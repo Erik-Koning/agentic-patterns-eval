@@ -1,0 +1,14 @@
+# Inspect model-cost config (readiness E5). Prices in USD per 1M tokens.
+# Fill from the OpenAI pricing page on the day of the run and record URL + date in PROVENANCE.md.
+# Keys must match the model names Inspect reports (e.g. "openai/<model-id>").
+# Pass with:  inspect eval ... --model-cost-config config/model_costs.yaml
+"openai/AGENT_MODEL_ID":
+  input: 0.0             # TODO(E5)
+  output: 0.0            # TODO(E5)
+  input_cache_write: 0.0 # OpenAI prompt caching has no write premium; confirm at E5
+  input_cache_read: 0.0  # TODO(E5)
+"openai/KG_MODEL_ID":
+  input: 0.0
+  output: 0.0
+  input_cache_write: 0.0
+  input_cache_read: 0.0

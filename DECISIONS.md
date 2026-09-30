@@ -21,6 +21,21 @@ Each entry records the decision, why it was made, and who made it.
 - Why: the rerank step needs a reranker model, and the OpenAI-only decision (D-000) rules out Cohere/Jina rerankers. APG has no rerank stage either.
 - Revisit if the PC1 anchor reproduction fails, since the published numbers may assume reranking.
 
+**D-005 (2026-09-30).** Context placement is part of the delivery definition.
+- **Per-query arms** (S1, S6, S7, APG-q, LGR-q) put their context in the system prompt, compiled once, so it is part of the cached prefix.
+- **Per-step arms** (S3s, APG-s, S5o, LGR-s) append a fresh context message after the history on every step. That message is replaced, never accumulated, so the history prefix stays cacheable.
+- Why: putting a monolith at the end of every step would re-send ~83k uncached tokens per turn (unrealistic); putting per-step context in the system prompt would break prompt caching.
+- Consequence: frequency and position are confounded between -q and -s variants, which is inherent to per-step delivery.
+
+**D-006 (2026-09-30).** Evidence is scored at world-spec fact granularity.
+- Mapping per system: chunks and flat retrieval map chunk → facts. APG oracle nodes carry `props.factIds`. Authored APG leaves and LightRAG records map through their source chunk.
+- The chunk-based mapping over-approximates what a unit contains, equally for both KGs.
+
+**D-007 (2026-09-30).** The APG authoring pipeline uses one category per source document. The LLM then splits each chunk into units that declare and reference identifiers; references become reciprocal `bring` edges, except toward tool-spec leaves. Allowlists may only name tools that some leaf actually defines, which hardens the pipeline against stray words in an author's `tools` list.
+
+**D-008 (2026-09-30).** Gate inference is world-clustered throughout: bootstrap over worlds within cells, and world-level sign flips for the S7 placebo and the S6 > S7 invariant. With fewer than 4 worlds per cell the verdict is INCONCLUSIVE.
+- Why: a task-level test was shown in synthetic data to be anti-conservative when world×arm effects exist.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
