@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://adaptive-prompt-graph.dev/schema/1/apg.schema.json",
+  "title": "Adaptive Prompt Graph document",
+  "description": "A portable, schema-validated JSON program executed by an APG runtime. Nodes form a taxonomy tree; bring[] edges import companion context; flow edges (decision/action/fallback) drive conversational walking.",
+  "type": "object",
+  "required": ["schemaVersion", "graphId", "nodes"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+    "graphId": { "type": "string", "minLength": 1 },
+    "version": { "type": "string" },
+    "profile": { "enum": ["L0", "L1", "L2", "L3", "L4", "L5"], "default": "L0" },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "defaults": { "$ref": "#/$defs/GraphDefaults" },
+    "connectors": {
+      "type": "object",
+      "description": "Connector bindings by registry key. `use` is a host-registered driver name, never an import.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["use"],
+        "properties": {
+          "use": { "type": "string" },
+          "config": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "variables": { "type": "array", "items": { "$ref": "#/$defs/VariableSpec" } },
+    "$include": {
+      "type": "array",
+      "description": "Child documents grafted under a declared mount node. Cycles rejected at load.",
+      "items": { "type": "string" }
+    },
+    "edges": { "type": "array", "items": { "$ref": "#/$defs/Edge" } },
+    "nodes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/ApgNode" } }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "NodeId": { "type": "string", "minLength": 1 },
+    "Slot": {
+      "enum": ["persona", "task", "constraints", "knowledge", "examples", "outputFormat", "queryRewrite"],
+      "description": "Closed slot enum: the composition/interop contract. Domain text reaches slots by templating props, never by custom slots."
+    },
+    "JsonSchemaFragment": { "type": "object" },
+    "GraphDefaults": {
+      "type": "object",
+      "properties": {
+        "composition": { "$ref": "#/$defs/CompositionRule" },
+        "routing": {
+          "type": "object",
+          "properties": {
+            "minConfidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.55 },
+            "allowMulti": { "type": "boolean", "default": true },
+            "shortlistK": { "type": "integer", "minimum": 1, "default": 12 },
+            "descriptor": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": ["title", "description"],
+              "description": "Node fields (reserved keys or props.* paths) serialized into the router outline. Graph-level: one graph, one routing vocabulary."
+            },
+            "embedText": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": ["title", "description", "aliases"],
+              "description": "Node fields the embedding pre-filter indexes."
+            },
+            "embedBypass": {
+              "type": ["object", "null"],
+              "required": ["minSimilarity", "minMargin"],
+              "properties": {
+                "minSimilarity": { "type": "number", "minimum": 0, "maximum": 1 },
+                "minMargin": { "type": "number", "minimum": 0, "maximum": 1 }
+              },
+              "additionalProperties": false,
+              "default": null,
+              "description": "Opt-in embedding fast path: a shortlist top-1 with similarity >= minSimilarity and a lead of >= minMargin over the runner-up skips the LLM classify (match reason 'embedding', confidence = cosine)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "budget": {
+          "type": "object",
+          "properties": { "maxPromptTokens": { "type": "integer", "minimum": 1, "default": 6000 } },
+          "additionalProperties": false
+        },
+        "model": {
+          "type": "object",
+          "properties": {
+            "model": { "type": "string" },
+            "temperature": { "type": "number" },
+            "maxTokens": { "type": "integer" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "PromptTemplate": {
+      "type": "object",
+      "required": ["slots"],
+      "properties": {
+        "slots": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/Slot" },
+          "additionalProperties": { "type": "string" }
+        },
+        "variables": { "type": "array", "items": { "$ref": "#/$defs/VariableSpec" } },
+        "format": { "enum": ["mustache", "f-string"], "default": "mustache" }
+      },
+      "additionalProperties": false
+    },
+    "CompositionRule": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/Slot" },
+          "additionalProperties": { "enum": ["override", "prepend", "append", "merge"] }
+        },
+        "defaultMode": { "enum": ["override", "prepend", "append", "merge"], "default": "append" },
+        "priority": { "type": "number", "description": "Truncation priority override under token budget (higher = kept longer)." }
+      },
+      "additionalProperties": false
+    },
+    "VariableSpec": {
+      "type": "object",
+      "required": ["name", "required"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" },
+        "default": { "type": "string" },
+        "source": { "enum": ["user", "session", "tenant", "memory"] },
+        "schema": { "$ref": "#/$defs/JsonSchemaFragment" },
+        "elicitationPrompt": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "DecisionSpec": {
+      "type": "object",
+      "required": ["question", "choices"],
+      "properties": {
+        "question": { "type": "string", "minLength": 1 },
+        "saveAs": { "type": "string" },
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["label", "value", "next"],
+            "properties": {
+              "label": { "type": "string" },
+              "value": { "type": "string" },
+              "next": { "$ref": "#/$defs/NodeId" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "freeform": {
+          "type": "object",
+          "required": ["classifyInto"],
+          "properties": { "classifyInto": { "type": "array", "items": { "$ref": "#/$defs/NodeId" } } },
+          "additionalProperties": false
+        },
+        "guard": { "type": "string", "description": "Sandboxed expression; if resolvable from session vars, auto-follow without asking." },
+        "timeoutNext": { "$ref": "#/$defs/NodeId" }
+      },
+      "additionalProperties": false
+    },
+    "ActionSpec": {
+      "type": "object",
+      "required": ["tool", "onSuccess", "onError"],
+      "properties": {
+        "tool": { "type": "string" },
+        "args": { "type": "object" },
+        "argsFromVars": { "type": "array", "items": { "type": "string" } },
+        "onSuccess": { "$ref": "#/$defs/NodeId" },
+        "onError": { "$ref": "#/$defs/NodeId" },
+        "resultSchema": { "$ref": "#/$defs/JsonSchemaFragment" },
+        "saveResultAs": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "EscalationPolicy": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["none", "suggest", "draft", "require"] },
+        "queue": { "type": "string" },
+        "sla": {
+          "type": "object",
+          "properties": { "firstResponseMins": { "type": "integer" } },
+          "additionalProperties": false
+        },
+        "collectBeforeHandoff": { "type": "array", "items": { "$ref": "#/$defs/VariableSpec" } },
+        "escalateBelowConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "resumeNode": { "$ref": "#/$defs/NodeId" }
+      },
+      "additionalProperties": false
+    },
+    "Edge": {
+      "type": "object",
+      "required": ["from", "to", "kind"],
+      "properties": {
+        "from": { "$ref": "#/$defs/NodeId" },
+        "to": { "$ref": "#/$defs/NodeId" },
+        "kind": { "enum": ["child", "seeAlso", "aliasOf", "bring", "choice", "fallback"] }
+      },
+      "additionalProperties": false
+    },
+    "NodeMetadata": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "string" },
+        "author": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "evalScore": { "type": "number" },
+        "avgTokenCost": { "type": "number" },
+        "modelCompatibility": { "type": "array", "items": { "type": "string" } },
+        "status": { "enum": ["draft", "staging", "production", "pruned"] },
+        "tenantId": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "ApgNode": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/NodeId", "description": "REQUIRED, globally unique within the graph." },
+        "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Unique among siblings; human-readable path addressing." },
+        "parentId": { "oneOf": [{ "$ref": "#/$defs/NodeId" }, { "type": "null" }], "description": "null only for the single root." },
+        "type": { "enum": ["category", "decision", "action", "answer"], "default": "category" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "props": {
+          "type": "object",
+          "description": "Open domain vocabulary bag. Structural keys reserved; semantics userland. Feeds router (via descriptor), embeddings (via embedText), agent search, and slot templates ({{props.x}}) — never the Composer directly."
+        },
+        "routingOverride": {
+          "type": "object",
+          "properties": {
+            "descriptor": { "type": "array", "items": { "type": "string" } },
+            "embedText": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false,
+          "description": "Subtree-scoped descriptor override (this node and descendants). Use sparingly."
+        },
+        "routable": { "type": "boolean", "default": true },
+        "pinned": {
+          "type": "boolean",
+          "default": false,
+          "description": "Protected from removal ops (deleteNode/pruneSubtree/mergeNodes victims) unless the op passes force:true. Content edits remain legal."
+        },
+        "prompt": {
+          "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/PromptTemplate" }],
+          "description": "A bare string is sugar for { slots: { task: string } }."
+        },
+        "composition": { "$ref": "#/$defs/CompositionRule" },
+        "fewShot": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["input", "output"],
+            "properties": { "input": { "type": "string" }, "output": { "type": "string" } },
+            "additionalProperties": false
+          }
+        },
+        "outputSchema": { "$ref": "#/$defs/JsonSchemaFragment" },
+        "bring": { "type": "array", "items": { "$ref": "#/$defs/NodeId" } },
+        "recursiveBring": { "type": "boolean", "default": false },
+        "bringMode": { "enum": ["full", "contextOnly"], "default": "contextOnly" },
+        "maxBringDepth": { "type": "integer", "minimum": 1, "default": 3 },
+        "decision": { "$ref": "#/$defs/DecisionSpec" },
+        "action": { "$ref": "#/$defs/ActionSpec" },
+        "escalation": { "$ref": "#/$defs/EscalationPolicy" },
+        "collect": { "type": "array", "items": { "$ref": "#/$defs/VariableSpec" } },
+        "fillPolicy": { "enum": ["explicit", "opportunistic"], "default": "opportunistic" },
+        "entryCondition": { "type": "string" },
+        "exitCondition": { "type": "string" },
+        "visitPolicy": { "enum": ["once", "repeatable", "loopUntilValid"], "default": "repeatable" },
+        "skipCondition": { "type": "string" },
+        "fallbackNodeId": { "$ref": "#/$defs/NodeId" },
+        "isFallback": { "type": "boolean", "default": false },
+        "toolAllowlist": { "type": "array", "items": { "type": "string" } },
+        "modelOverride": {
+          "type": "object",
+          "properties": {
+            "model": { "type": "string" },
+            "temperature": { "type": "number" },
+            "maxTokens": { "type": "integer" }
+          },
+          "additionalProperties": false
+        },
+        "embedding": { "type": "array", "items": { "type": "number" } },
+        "metadata": { "$ref": "#/$defs/NodeMetadata" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "decision" } }, "required": ["type"] },
+          "then": { "required": ["decision"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "action" } }, "required": ["type"] },
+          "then": { "required": ["action"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "answer" } }, "required": ["type"] },
+          "then": { "required": ["prompt"] }
+        },
+        {
+          "if": { "not": { "properties": { "type": { "const": "decision" } }, "required": ["type"] } },
+          "then": { "not": { "required": ["decision"] } }
+        },
+        {
+          "if": { "not": { "properties": { "type": { "const": "action" } }, "required": ["type"] } },
+          "then": { "not": { "required": ["action"] } }
+        }
+      ]
+    }
+  }
+}

@@ -29,3 +29,11 @@ def mock_agent(messages, tools, tool_choice, config) -> ModelOutput:
     if "submit_answer" in names:
         return ModelOutput.for_tool_call(MODEL, "submit_answer", {"answer": "unknown"})
     return ModelOutput.from_content(MODEL, json.dumps({"note": "no tools"}))
+
+
+def mock_classifier(messages, tools, tool_choice, config) -> ModelOutput:
+    """Scripted "kg" model: picks the first node in the APG outline with high confidence."""
+    user = next((m.text for m in messages if m.role == "user"), "")
+    outline = user.split("Category outline:\n", 1)[-1]
+    first = next((line.strip().split(":", 1)[0] for line in outline.splitlines() if line.strip()), "root")
+    return ModelOutput.from_content(MODEL, json.dumps({"matches": [{"nodeId": first, "confidence": 0.9, "reason": "mock"}]}))
