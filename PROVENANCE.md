@@ -14,6 +14,7 @@ Every result in this project must be traceable to the exact code and data below.
 | apg-core 0.1.0 | `python/packages/apg-core/src`, `python/packages/apg-core/pyproject.toml` | `22fb44ef882a4e6b71e720b8de25159a05a9109af3e4ff15f6564103dac040a3` | 2026-09-30T02:27Z |
 | APG schema | `schema/` | `78b4568e6459e2efef3591b3d8da2bdc3d73ad62cd508881d9fe216bf4be9490` | 2026-09-30T02:27Z |
 
+- **Layout constraint:** the path dependency is relative (`../Code/EvolvingWisdomAgents/python/packages/apg-core`), so this project must sit next to `Code/` (as in `~/Documents/Work/`). A clone elsewhere fails `uv sync` with "Distribution not found". Once APG has a commit/tag (O-2), switch to a git source pinned to that tag.
 - **How it's installed:** non-editable path dependency (`[tool.uv.sources]` in `pyproject.toml`). The copy in `.venv` is frozen at install time. Re-run `uv sync --reinstall-package apg-core` after any upstream change, then update the hashes above.
 
 ## Environment
