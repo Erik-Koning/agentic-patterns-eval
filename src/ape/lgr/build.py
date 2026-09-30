@@ -15,7 +15,8 @@ import importlib.metadata
 import os
 
 from ..config import Config, embedding_cache
-from ..llm.ledger import Ledger, LedgerEntry
+from ..llm.build_client import BuildLlm
+from ..llm.ledger import Ledger
 from ..worlds.render import Chunk, chunk_world
 from ..worlds.spec import World
 from .common import index_dir, open_rag, write_manifest
@@ -55,31 +56,6 @@ def oracle_kg(world: World, chunks: list[Chunk]) -> dict:
     }
 
 
-def build_llm(model: str, ledger: Ledger, world_id: str):
-    """LightRAG `llm_model_func` for extraction: OpenAI chat, every call metered in the ledger."""
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI()
-
-    async def llm(prompt: str, system_prompt: str | None = None, history_messages: list | None = None, **kwargs) -> str:
-        messages = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + list(history_messages or []) + [{"role": "user", "content": prompt}]
-        extra = {"response_format": kwargs["response_format"]} if kwargs.get("response_format") else {}
-        resp = await client.chat.completions.create(model=model, messages=messages, **extra)
-        u = resp.usage
-        details = getattr(u, "completion_tokens_details", None)
-        cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0
-        ledger.append(
-            LedgerEntry(
-                role="build", model=model, kind="chat", input_tokens=u.prompt_tokens, output_tokens=u.completion_tokens,
-                cached_input_tokens=cached, reasoning_tokens=getattr(details, "reasoning_tokens", 0) or 0,
-                context={"world": world_id, "system": "lightrag"},
-            )
-        )
-        return resp.choices[0].message.content or ""
-
-    return llm
-
-
 def _dir_hash(path) -> str:
     h = hashlib.sha256()
     for f in sorted(p for p in path.rglob("*") if p.is_file() and p.name != "ape_manifest.json"):
@@ -100,7 +76,7 @@ async def build_index(world: World, kind: str, cfg: Config) -> dict:
         model = os.environ.get("APE_BUILD_MODEL")
         if not model:
             raise RuntimeError("set APE_BUILD_MODEL (chosen at readiness E3) for extraction builds")
-        llm = build_llm(model, Ledger(cfg.ledger_path), world.id)
+        llm = BuildLlm(model, Ledger(cfg.ledger_path), {"world": world.id, "system": "lightrag"}).lightrag_func()
     else:
         model, llm = None, no_llm
     rag = await open_rag(wd, world.id, llm, emb, query_time=False)
