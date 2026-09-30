@@ -29,3 +29,4 @@ Each entry records the decision, why it was made, and who made it.
 | O-2 | Commit and tag `apg-eval-baseline` in EvolvingWisdomAgents (optional; the tree hash covers it for now). | A1 → ✅ |
 | O-3 | `team` (including a skeptic not on the APG team) and `compute_budget_usd` for the brief's §0. | D1 |
 | O-4 | Approval for live smoke tests (checkpoint 3, < $2). | L2, H4 |
+| O-5 | **Gate size.** The plan's starting point is 6 worlds per cell × 12 tasks × 3 epochs = 288 tasks per gate arm. `power_sim.py --mode ni` gives only **≈0.52 power at true Δ = 0** (σ_w = 0.5, σ_g = 0.3). For 80% power: **12 worlds/cell × 12 tasks** (576 tasks, 0.79; 0.88 if σ_g ≤ 0.15) or **16 × 12** (768 tasks, 0.91). Worlds matter far more than tasks per world. This is ≈1.8–2.5× the gate's run and build cost. Recommend 12 worlds/cell, re-simulated with pilot σ estimates before freezing GATE_PREREG. | GATE_PREREG, checkpoint 8 budget |

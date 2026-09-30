@@ -76,3 +76,24 @@ def test_apg_oracle_arms_run_end_to_end(offline_env, family, level, arm):
         if family == "F3":
             # APG scopes tools by the routed procedure's allowlist, never by name-matching.
             assert all(r["tools"] is None or isinstance(r["tools"], list) for r in recs)
+
+
+def test_results_load_from_real_logs(offline_env):
+    from ape.analysis.gate_stats import load_results, task_means
+
+    asyncio.run(build("dev", "F7", ["10"], n_worlds=2, n_tasks=3, relational=True, embed=True))
+    files = []
+    for arm in ("S1", "S6"):
+        log = inspect_eval(
+            gate(family="F7", level="10", split="dev", arm=arm),
+            model=get_model("mockllm/model", custom_outputs=mock_agent),
+            log_dir=str(offline_env / "logs" / arm),
+            display="none",
+            epochs=2,
+        )[0]
+        files.append(log.location)
+    df = load_results(files)
+    assert set(df["arm"]) == {"S1", "S6"} and len(df) == 2 * 6 * 2
+    assert set(df["cell"]) == {"F7-10"} and df["world"].nunique() == 2
+    tm = task_means(df)
+    assert list(tm.columns) == ["S1", "S6"] and len(tm) == 6
