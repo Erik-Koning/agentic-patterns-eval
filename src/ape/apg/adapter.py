@@ -10,12 +10,17 @@ a worker thread (record/replay):
    outline is byte-identical, then `compose` runs on the resulting targets.
 
 Connectors are passed per call; the global registry (`bind_connectors`) is never used.
+
+`fill=True` (matched-budget analyses only) adds further shortlisted nodes, in order of
+embedding similarity to the query, as secondary targets until the next one would exceed
+the budget. Default APG behaviour (`fill=False`) composes only what routing selected.
 """
 
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
 
+import numpy as np
 from apg_core import Graph, ScriptedLlm, compose, route
 from inspect_ai.model import Model
 
@@ -51,6 +56,7 @@ async def compile_context(
     kg_model: Model,
     embeddings: EmbeddingCache | None,
     max_prompt_tokens: int,
+    fill: bool = False,
 ) -> Compiled:
     connectors: dict = {}
     if embeddings is not None:
@@ -71,7 +77,21 @@ async def compile_context(
         assert replay_sha == outline_sha, "APG outline changed between record and replay passes"
 
     targets = [m["nodeId"] for m in routed["matches"]]
-    composed = compose(graph, targets, {"query": query, "maxPromptTokens": max_prompt_tokens, "countTokens": count_tokens})
+    opts = {"query": query, "maxPromptTokens": max_prompt_tokens, "countTokens": count_tokens}
+    composed = compose(graph, targets, opts)
+    filled: list[str] = []
+    if fill and embeddings is not None:
+        q = np.asarray(embeddings.lookup([query])[0], dtype=np.float64)
+        ranked = sorted(
+            (n for n in routed["shortlist"] if n not in targets and graph.get(n).get("embedding")),
+            key=lambda n: (-float(np.dot(q, graph.get(n)["embedding"])), n),
+        )
+        for n in ranked:
+            trial = compose(graph, [*targets, *filled, n], opts)
+            if count_tokens(trial["text"]) > max_prompt_tokens or trial["truncated"]:
+                break
+            filled.append(n)
+            composed = trial
     return Compiled(
         text=composed["text"],
         contributors=list(composed["contributors"]),
@@ -80,9 +100,10 @@ async def compile_context(
         route={
             "matches": routed["matches"],
             "fallback": routed["fallbackUsed"],
-            "shortlist_size": len(routed["shortlist"]),
+            "shortlist": list(routed["shortlist"]),
             "bypass": not first.calls,
             "outline_sha": outline_sha,
+            "filled": filled,
         },
         classify_error=error,
     )

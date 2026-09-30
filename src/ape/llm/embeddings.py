@@ -11,6 +11,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,10 @@ from .ledger import Ledger, LedgerEntry
 from .tokens import count_tokens
 
 BATCH = 256
+
+# Attribution for ledger entries made deep inside an arm (APG routing, S3s, LightRAG's own
+# embedding calls). The agent loop sets it around every compile: {"arm", "world", "sample", "epoch"}.
+EMBED_CONTEXT: ContextVar[dict | None] = ContextVar("ape_embed_context", default=None)
 
 
 def _key(model: str, text: str) -> str:
@@ -84,7 +89,7 @@ class EmbeddingCache:
                         model=self.model,
                         kind="embed",
                         input_tokens=used if used is not None else sum(count_tokens(t) for t in batch),
-                        context=context or {},
+                        context=context or EMBED_CONTEXT.get() or {},
                     )
                 )
         return self.lookup(texts)

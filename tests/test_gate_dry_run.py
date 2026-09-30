@@ -92,7 +92,9 @@ def test_results_load_from_real_logs(offline_env):
             epochs=2,
         )[0]
         files.append(log.location)
-    df = load_results(files)
+    df = load_results(files, require_cost=False)
+    with pytest.raises(ValueError, match="no cost"):
+        load_results(files)
     assert set(df["arm"]) == {"S1", "S6"} and len(df) == 2 * 6 * 2
     assert set(df["cell"]) == {"F7-10"} and df["world"].nunique() == 2
     tm = task_means(df)

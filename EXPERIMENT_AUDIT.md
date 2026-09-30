@@ -171,3 +171,30 @@ Status key: ✅ built and producing data · 🟡 partially built · ❌ not buil
 | P1 | `HYPOTHESES.md` registry (single ID space, status per hypothesis) | 0.5 day |
 | P2 | Main-study build: S8/S9, M1s/M1/M1k/M2, M7; F1/F2 generators; fault hooks; persona content | 2–3 weeks |
 | P2 | Study G build (`CONTEXT_MANAGEMENT_AUDIT.md` §10) | 2–3 weeks |
+
+---
+
+## 7. Fix status (2026-09-30)
+
+| Item | Status | Where |
+|---|---|---|
+| B1 context parity | ✅ PC4 replaced by best-config primary + matched-budget secondary (APG fill-to-budget) | `apg/adapter.py` (`fill`), `GATE_PREREG.md` §6–7, D-011 |
+| B2 placebo sizing | ✅ per-cell target from `config/s7_targets.json` (pilot), capped at 50% of corpus | `kb/baselines.py`, `agent/arms.py`, D-012 |
+| B3 relational artifact | ✅ `exception_style` knob (paired worlds) + `search_kb` pull delivery; verdict per delivery mode for F7 (O-6) | `worlds/gen_f7.py`, `agent/kb_react.py`, `tasks/gate.py`, D-013 |
+| B4 kg-role fallback | ✅ `required=True`; kg model name per compile | `apg/arm.py`, `lgr/adapter.py`, D-014 |
+| B5 gate size | ⏳ user decision (O-5) | `DECISIONS.md` |
+| B6 asymmetric selection | ✅ APG* chosen from APG-q/APG-s; APG knobs tunable; `decide(apg_arm=...)` | `analysis/gate_stats.py`, `GATE_PREREG.md`, D-014 |
+| Log: exposed tools per step | ✅ `step_log` | `agent/kb_react.py` |
+| Log: shortlist IDs, gold in shortlist/matches/contributors | ✅ compile meta | `apg/arm.py` |
+| Log: compile latency | ✅ `compile_ms` per compile | `agent/kb_react.py` |
+| Log: embedding attribution | ✅ `EMBED_CONTEXT` sets `{arm, world, sample, epoch, source}` on every ledger entry | `llm/embeddings.py`, `agent/kb_react.py` |
+| Cost guard | ✅ `load_results` fails on missing cost | `analysis/gate_stats.py` |
+| Per-step evidence | ✅ first-compile and per-step recall | `scorers/success.py` |
+| Tuning runner and log (PC6), `analysis/cost.py` | ⏳ P1 | — |
+| `messy` rendering, `HYPOTHESES.md` registry | ⏳ P1 | — |
+
+**Update to B3 from re-measurement:**
+- Descriptive rendering alone does **not** restore push-mode flat retrieval of exceptions at 1,000 policies (still 0/25 with lexical fake embeddings). A single query cannot lexically match the numeric band, and ~300 similar exceptions compete.
+- A pull follow-up query naming the policy ID retrieves them 25/25 in both renderings.
+- So delivery mode is the decisive factor, and GATE_PREREG now reports the F7 verdict per mode.
+- Real embeddings may rank descriptive exceptions better in push mode; the pilot will show this.

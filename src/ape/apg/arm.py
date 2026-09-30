@@ -7,8 +7,10 @@ Graph documents live in `indices/apg/{world_id}.{kind}.apg.json` with node embed
 precomputed. Oracle graphs are built on demand; authored graphs must be built first.
 """
 
+import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from apg_core import Graph, load_graph, precompute_embeddings
@@ -56,16 +58,30 @@ async def ensure_graph(world: World, kind: str, cfg: Config, emb: EmbeddingCache
     return doc
 
 
+def tuned(doc: dict) -> dict:
+    """Apply the dev-tuned APG knobs (GATE_PREREG §5) to a graph copy; they become part of its version."""
+    d = copy.deepcopy(doc)
+    routing = d.setdefault("defaults", {}).setdefault("routing", {})
+    if os.environ.get("APE_APG_SHORTLIST_K"):
+        routing["shortlistK"] = int(os.environ["APE_APG_SHORTLIST_K"])
+    if os.environ.get("APE_APG_MIN_CONFIDENCE"):
+        routing["minConfidence"] = float(os.environ["APE_APG_MIN_CONFIDENCE"])
+    return d
+
+
 class ApgArm:
-    def __init__(self, name: str, per_step: bool, doc: dict, emb: EmbeddingCache, chunk_index: ChunkIndex, budget: int):
+    def __init__(self, name: str, per_step: bool, doc: dict, emb: EmbeddingCache, chunk_index: ChunkIndex, budget: int, fill: bool = False):
         self.name = name
         self.per_step = per_step
+        doc = tuned(doc)
         self.graph = load_graph(doc)
         self.version = graph_version(doc)
         self.emb = emb
         self.chunk_index = chunk_index
         self.budget = budget
-        self.kg_model = get_model(role="kg")
+        self.fill = fill
+        self.kg_model = get_model(role="kg", required=True)  # never silently fall back to the agent model
+        self._node_facts = {n["id"]: self._facts([n["id"]]) for n in self.graph.dfs()}
 
     def _facts(self, node_ids: list[str]) -> list[str]:
         out: list[str] = []
@@ -74,14 +90,34 @@ class ApgArm:
             out.extend(props.get("factIds") or self.chunk_index.facts(props.get("sourceChunkIds") or []))
         return list(dict.fromkeys(out))
 
+    def gold_nodes(self, task: TaskItem) -> set[str]:
+        gold = set(task.gold_fact_ids)
+        return {n for n, facts in self._node_facts.items() if gold & set(facts)}
+
     async def compile(self, query: str, task: TaskItem) -> ContextResult:
-        c = await compile_context(self.graph, query, self.kg_model, self.emb, self.budget)
+        c = await compile_context(self.graph, query, self.kg_model, self.emb, self.budget, fill=self.fill)
+        gold = self.gold_nodes(task)
+        matched = {m["nodeId"] for m in c.route["matches"]}
         return ContextResult(
             text=c.text,
             unit_ids=c.contributors,
             fact_ids=self._facts(c.contributors),
             tools=c.tool_allowlist,
-            meta={"route": c.route, "graph_version": self.version, "truncated": len(c.truncated), "classify_error": c.classify_error},
+            meta={
+                "route": c.route,
+                "graph_version": self.version,
+                "truncated": len(c.truncated),
+                "classify_error": c.classify_error,
+                "kg_model": str(self.kg_model),
+                "fill": self.fill,
+                # NO-GO diagnosis (GATE_PREREG §8): where did the gold knowledge get lost?
+                "gold": {
+                    "nodes": sorted(gold),
+                    "in_shortlist": bool(gold & set(c.route["shortlist"])),
+                    "in_matches": bool(gold & matched),
+                    "in_contributors": bool(gold & set(c.contributors)),
+                },
+            },
         )
 
 
@@ -89,4 +125,5 @@ async def build_apg_arm(arm: str, world: World, cfg: Config) -> ApgArm:
     kind, per_step = ARMS[arm]
     emb = embedding_cache(cfg)
     doc = await ensure_graph(world, kind, cfg, emb)
-    return ApgArm(arm, per_step, doc, emb, ChunkIndex(chunk_world(world)), cfg.context_budget_tokens)
+    fill = os.environ.get("APE_APG_FILL") == "1"
+    return ApgArm(arm, per_step, doc, emb, ChunkIndex(chunk_world(world)), cfg.context_budget_tokens, fill=fill)

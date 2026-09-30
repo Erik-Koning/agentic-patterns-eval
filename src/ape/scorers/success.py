@@ -47,18 +47,39 @@ def task_success():
     return score
 
 
-@scorer(metrics={"evidence_recall": [mean()], "evidence_precision": [mean()], "ctx_tokens_mean": [mean()], "compiles": [mean()]})
+@scorer(
+    metrics={
+        "evidence_recall": [mean()],
+        "evidence_recall_first": [mean()],
+        "evidence_recall_step_mean": [mean()],
+        "evidence_precision": [mean()],
+        "ctx_tokens_mean": [mean()],
+        "compiles": [mean()],
+    }
+)
 def delivered_evidence():
-    """Did the arm put the gold facts in front of the model (union over steps)?"""
+    """Did the arm put the gold facts in front of the model?
+
+    `evidence_recall` unions all compiles (push and pull), which favours arms that take more
+    turns; `evidence_recall_first` (first compile) and `evidence_recall_step_mean` do not.
+    """
 
     async def score(state: TaskState, target: Target) -> Score:
         task = TaskItem(**state.metadata["task"])
         log = state.store.get(COMPILE_LOG, [])
         delivered = list(dict.fromkeys(f for rec in log for f in rec["fact_ids"]))
         p, r = evidence_pr(delivered, task.gold_fact_ids)
+        per_step = [evidence_pr(rec["fact_ids"], task.gold_fact_ids)[1] for rec in log]
         tokens = [rec["tokens"] for rec in log] or [0]
         return Score(
-            value={"evidence_recall": r, "evidence_precision": p, "ctx_tokens_mean": statistics.fmean(tokens), "compiles": len(log)},
+            value={
+                "evidence_recall": r,
+                "evidence_recall_first": per_step[0] if per_step else 0.0,
+                "evidence_recall_step_mean": statistics.fmean(per_step) if per_step else 0.0,
+                "evidence_precision": p,
+                "ctx_tokens_mean": statistics.fmean(tokens),
+                "compiles": len(log),
+            },
             metadata={"prompt_hashes": [rec["prompt_hash"] for rec in log], "route": [rec["meta"].get("route") for rec in log if rec["meta"].get("route")]},
         )
 

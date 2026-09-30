@@ -7,6 +7,12 @@ outcome for one customer tier, so answering correctly means finding both the
 policy and any exception that amends it. KB size is the level: 10, 100 or 1000
 base policies. Customer region and tier are only available via `lookup_customer`,
 which makes the task multi-step.
+
+`exception_style` controls how an exception refers to its policy (EXPERIMENT_AUDIT B3):
+"descriptive" restates the policy's domain, region and band, so any retriever can find it;
+"id_only" names only the policy ID, so finding it requires following the reference. Both
+styles come from the same random stream: identical policies, tasks and gold answers, so the
+effect of the rendering is a paired comparison.
 """
 
 import random
@@ -43,6 +49,7 @@ APPROVERS = ["team_lead", "tier2_supervisor", "compliance_officer", "regional_ma
 DOCUMENTS = ["none", "receipt", "photo_id", "police_report", "bank_statement", "delivery_photo"]
 LEVELS = {"10": (2, 1, 5), "100": (5, 2, 10), "1000": (20, 5, 10)}  # (domains, regions, bands)
 EXCEPTION_RATE = 0.3
+EXCEPTION_STYLES = {"descriptive": "desc", "id_only": "idonly"}
 
 _APPROVER_TEXT = {
     "team_lead": "team lead",
@@ -83,19 +90,19 @@ def _money(x: int) -> str:
     return f"${x:,}"
 
 
-def generate(level: str, relational: bool, split: str, seed: int, n_tasks: int) -> World:
-    rng = random.Random(f"F7|{level}|{relational}|{split}|{seed}")
+def generate(level: str, relational: bool, split: str, seed: int, n_tasks: int, exception_style: str = "descriptive") -> World:
+    rng = random.Random(f"F7|{level}|{relational}|{split}|{seed}")  # style-independent: paired worlds
     n_dom, n_reg, n_band = LEVELS[level]
     domains = sorted(rng.sample(DOMAINS, n_dom))
     regions = sorted(rng.sample(REGIONS, n_reg))
     bands = sorted(rng.sample(BANDS, n_band))
     world = World(
-        id=f"F7-{level}-{'rel' if relational else 'ind'}-{split}-s{seed}",
+        id=f"F7-{level}-{'rel-' + EXCEPTION_STYLES[exception_style] if relational else 'ind'}-{split}-s{seed}",
         family="F7",
         level=level,
         seed=seed,
         split=split,
-        entities={"relational": relational},
+        entities={"relational": relational, "exception_style": exception_style if relational else None},
     )
 
     # Base policies, one per cell; adjacent bands never share an outcome.
@@ -128,8 +135,14 @@ def generate(level: str, relational: bool, split: str, seed: int, n_tasks: int) 
             while o == p.outcome:
                 o = _outcome(rng)
             xid = f"X-{exc_ids[j]}"
+            scope = (
+                f": {dict(DOMAINS)[p.domain]} requests from customers in the {p.region} region with an amount of at "
+                f"least {_money(p.lo)} and under {_money(p.hi)}"
+                if exception_style == "descriptive"
+                else ""
+            )
             text = (
-                f"Exception {xid} (amends Policy {p.id}). When the customer holds {tier} status, Policy {p.id} "
+                f"Exception {xid} (amends Policy {p.id}{scope}). When the customer holds {tier} status, Policy {p.id} "
                 f"does not apply as written: the agent must instead {outcome_text(o)}."
             )
             world.add_fact(f"f-{xid}", text, "exception")

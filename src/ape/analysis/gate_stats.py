@@ -23,8 +23,13 @@ MIN_WORLDS_PER_CELL = 4  # below this a cluster bootstrap understates variance
 
 # ---------- loading ----------
 
-def load_results(log_files: list[str | Path]) -> pd.DataFrame:
-    """One row per (sample, epoch) from Inspect eval logs."""
+def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.DataFrame:
+    """One row per (sample, epoch) from Inspect eval logs.
+
+    Cost comes from Inspect's model-cost config. A missing price would otherwise read as $0
+    and silently disable the cost flag, so it is an error unless `require_cost=False`
+    (offline dry runs only).
+    """
     from inspect_ai.log import read_eval_log
 
     rows = []
@@ -35,6 +40,9 @@ def load_results(log_files: list[str | Path]) -> pd.DataFrame:
             md = s.metadata
             ev = s.scores.get("delivered_evidence")
             usage = {role: u for role, u in (s.role_usage or {}).items()}
+            missing = [m for m, u in (s.model_usage or {}).items() if u.total_cost is None]
+            if missing and require_cost:
+                raise ValueError(f"{f}: no cost for {missing}; run with --model-cost-config config/model_costs.yaml")
             rows.append(
                 {
                     "arm": arm,
@@ -44,6 +52,7 @@ def load_results(log_files: list[str | Path]) -> pd.DataFrame:
                     "epoch": s.epoch,
                     "success": 1.0 if s.scores["task_success"].value == "C" else 0.0,
                     "evidence_recall": ev.value["evidence_recall"] if ev else np.nan,
+                    "evidence_recall_first": ev.value.get("evidence_recall_first", np.nan) if ev else np.nan,
                     "ctx_tokens": ev.value["ctx_tokens_mean"] if ev else np.nan,
                     "cost_usd": sum((u.total_cost or 0.0) for u in (s.model_usage or {}).values()),
                     "kg_input_tokens": sum(u.input_tokens for r, u in usage.items() if r == "kg"),
@@ -126,16 +135,18 @@ def decide(
     alpha: float = 0.025,
     reps: int = 10_000,
     seed: int = 0,
+    apg_arm: str = "APG-s",
 ) -> Decision:
+    """`apg_arm` / `lgr_arm` are the dev-selected configurations (APG*, LGR*; GATE_PREREG §5)."""
     failed = [k for k, ok in preconditions.items() if not ok]
-    delta = pooled_delta(tm, "APG-s", lgr_arm)
-    boot = cluster_bootstrap(tm, "APG-s", lgr_arm, reps=reps, seed=seed)
+    delta = pooled_delta(tm, apg_arm, lgr_arm)
+    boot = cluster_bootstrap(tm, apg_arm, lgr_arm, reps=reps, seed=seed)
     lo, hi = float(np.quantile(boot, alpha)), float(np.quantile(boot, 1 - alpha))
     if failed:
         return Decision("PRECONDITION_FAIL", delta, (lo, hi), [f"precondition failed: {k}" for k in failed])
 
-    cell = cell_deltas(tm, "APG-s", lgr_arm)
-    s7 = world_diffs(tm, "APG-s", "S7") if "S7" in tm else np.array([])
+    cell = cell_deltas(tm, apg_arm, lgr_arm)
+    s7 = world_diffs(tm, apg_arm, "S7") if "S7" in tm else np.array([])
     p_s7 = sign_flip_p(s7, reps, seed) if len(s7) else 1.0
     details = {"cell_deltas": cell.to_dict(), "p_apg_gt_s7": p_s7, "cost_ratio": cost_ratio}
     idx = tm.index.to_frame(index=False)
@@ -151,7 +162,7 @@ def decide(
     if cell.get("F7-1000", 0.0) <= CELL_FLOOR:
         reasons.append(f"F7-1000 cell Δ {cell['F7-1000']:+.3f} <= {CELL_FLOOR}")
     if p_s7 >= 0.05:
-        reasons.append(f"APG-s not better than random-node placebo S7 (p={p_s7:.3f})")
+        reasons.append(f"{apg_arm} not better than random-node placebo S7 (p={p_s7:.3f})")
     if reasons:
         return Decision("NO_GO", delta, (lo, hi), reasons, details=details)
     verdict = "GO_WITH_COST_FLAG" if cost_ratio is not None and cost_ratio > COST_FLAG_RATIO else "GO"

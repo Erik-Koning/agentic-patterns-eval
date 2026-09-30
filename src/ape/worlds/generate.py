@@ -10,10 +10,10 @@ from .spec import World
 SPLIT_SEED_BASE = {"dev": 1000, "pilot": 2000, "test": 3000}
 
 
-def make_world(family: str, level: str, split: str, index: int, n_tasks: int, relational: bool = True) -> World:
+def make_world(family: str, level: str, split: str, index: int, n_tasks: int, relational: bool = True, exception_style: str = "descriptive") -> World:
     seed = SPLIT_SEED_BASE[split] + index
     if family == "F7":
-        return gen_f7.generate(level, relational, split, seed, n_tasks)
+        return gen_f7.generate(level, relational, split, seed, n_tasks, exception_style)
     if family == "F3":
         return gen_f3.generate(level, split, seed, n_tasks)
     if family == "F5":

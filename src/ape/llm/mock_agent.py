@@ -16,6 +16,8 @@ def mock_agent(messages, tools, tool_choice, config) -> ModelOutput:
     names = {t.name for t in tools}
     done = {m.function for m in messages if isinstance(m, ChatMessageTool)}
     task_text = next((m.text for m in messages if m.role == "user"), "")
+    if "search_kb" in names and "search_kb" not in done:
+        return ModelOutput.for_tool_call(MODEL, "search_kb", {"query": task_text[:200]})
     if "lookup_customer" in names and "lookup_customer" not in done:
         cid = re.search(r"CU-\d+", task_text)
         return ModelOutput.for_tool_call(MODEL, "lookup_customer", {"customer_id": cid.group(0) if cid else "CU-0"})

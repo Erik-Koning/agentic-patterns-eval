@@ -7,7 +7,7 @@ loop that created them.
 import asyncio
 from functools import lru_cache
 
-from ..config import Config, embedding_cache
+from ..config import ROOT, Config, embedding_cache
 from ..kb.baselines import FlatHybrid, Monolith, OracleContext, RandomUnits
 from ..kb.context import DeliveryArm
 from ..worlds.render import chunk_world
@@ -27,6 +27,24 @@ def _load_path(path: str) -> World:
     return World.load(path)
 
 
+def s7_target(cfg: Config, world: World) -> int:
+    """Per-cell S7 size, frozen from APG-s's realized median on the pilot (`config/s7_targets.json`).
+
+    Falls back to APE_S7_TARGET, then the context budget (dry runs only); RandomUnits caps it at
+    half the corpus either way.
+    """
+    import json
+    import os
+
+    path = ROOT / "config" / "s7_targets.json"
+    cell = f"{world.family}-{world.level}"
+    if path.exists():
+        targets = json.loads(path.read_text())
+        if cell in targets:
+            return int(targets[cell])
+    return int(os.environ.get("APE_S7_TARGET", cfg.context_budget_tokens))
+
+
 async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
     chunks = chunk_world(world)
     if arm == "S1":
@@ -38,7 +56,7 @@ async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
     if arm == "S6":
         return OracleContext(world)
     if arm == "S7":
-        return RandomUnits(chunks, cfg.context_budget_tokens)
+        return RandomUnits(chunks, s7_target(cfg, world))
     if arm.startswith("APG") or arm == "S5o":
         from ..apg.arm import build_apg_arm
 

@@ -34,6 +34,17 @@ def _pack(chunks: list[Chunk], budget: int) -> list[Chunk]:
     return out
 
 
+def _pack_under(chunks: list[Chunk], budget: int) -> list[Chunk]:
+    """Like `_pack` but never exceeds the budget (skips chunks that don't fit); the placebo must stay small."""
+    out, used = [], 0
+    for c in chunks:
+        n = count_tokens(c.text)
+        if used + n <= budget:
+            out.append(c)
+            used += n
+    return out or [min(chunks, key=lambda c: count_tokens(c.text))]
+
+
 def _result(chunks: list[Chunk], **meta) -> ContextResult:
     return ContextResult(
         text="\n\n".join(c.text for c in chunks),
@@ -101,17 +112,22 @@ class OracleContext:
 
 
 class RandomUnits:
-    """S7: random chunks, token-matched to a target, seeded per task (the "shorter prompt" placebo)."""
+    """S7: random chunks, token-matched to APG-s's realized context, seeded per task (the placebo).
+
+    The target is capped at `max_corpus_fraction` of the corpus: in small KBs an uncapped
+    target would deliver the whole corpus and stop being a placebo (EXPERIMENT_AUDIT B2).
+    """
 
     name = "S7"
     per_step = False
 
-    def __init__(self, chunks: list[Chunk], target_tokens: int, seed: int = 0):
+    def __init__(self, chunks: list[Chunk], target_tokens: int, seed: int = 0, max_corpus_fraction: float = 0.5):
         self.chunks = chunks
-        self.target = target_tokens
+        corpus = sum(count_tokens(c.text) for c in chunks)
+        self.target = max(1, min(target_tokens, int(max_corpus_fraction * corpus)))
         self.seed = seed
 
     async def compile(self, query: str, task: TaskItem) -> ContextResult:
         rng = random.Random(f"{self.seed}|{task.id}")
         order = rng.sample(self.chunks, len(self.chunks))
-        return _result(_pack(order, self.target), target=self.target)
+        return _result(_pack_under(order, self.target), target=self.target)

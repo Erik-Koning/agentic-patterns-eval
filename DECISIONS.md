@@ -47,6 +47,23 @@ Each entry records the decision, why it was made, and who made it.
 **D-010 (2026-09-30).** The PC1 sample is 200 questions per type (all 166 Creative Generation), not 50.
 - Why: at 50 per type the sampling error (≈4 pp) makes a faithful reproduction fail at least one of four ±5 pp checks more often than not; at 200 it is ≈2 pp.
 
+**D-011 (2026-09-30, EXPERIMENT_AUDIT B1).** The gate's primary comparison uses each system's dev-selected configuration, with realized context tokens and cost reported. A matched-budget secondary analysis runs at ≈300 and ≈2,000 tokens (APG fills via `APE_APG_FILL=1`; LightRAG and S3s are capped). PC4 is now a sanity bound.
+- Why: measured APG context is ≈120 tokens against LightRAG's 1,100–2,350, so the old parity ratio (0.8–1.25) could never pass.
+
+**D-012 (2026-09-30, B2).** S7 is sized per cell to APG*'s realized median context on the pilot (`config/s7_targets.json`) and capped at 50% of the corpus.
+- Why: at the old fixed 2,000 tokens, S7 was the entire KB in F7-10 and F3-5.
+
+**D-013 (2026-09-30, B3).** F7 exceptions are rendered `descriptive` in gate cells and `id_only` as a paired secondary, both from the same random stream. `search_kb` pull delivery exists for every retrieval arm.
+- Offline measurements (lexical fake embeddings, F7-1000):
+  - push-mode flat retrieval finds the exception 0/25 in **both** renderings;
+  - a pull follow-up query naming the policy ID finds it 25/25 in both.
+- So the delivery mode decides relational results. Rendering alone does not fix single-shot retrieval at 1,000 policies, because the numeric band can't be matched lexically.
+
+**D-014 (2026-09-30, B4 and B6).**
+- The kg role is required (`get_model(role="kg", required=True)`) and its model name is logged per compile.
+- APG* is selected on dev from APG-q and APG-s, symmetric with LGR*.
+- APG's `shortlistK` and `minConfidence` are tunable through `APE_APG_SHORTLIST_K` and `APE_APG_MIN_CONFIDENCE`, and are folded into the logged graph version.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
@@ -56,3 +73,4 @@ Each entry records the decision, why it was made, and who made it.
 | O-3 | `team` (including a skeptic not on the APG team) and `compute_budget_usd` for the brief's §0. | D1 |
 | O-4 | Approval for live smoke tests (checkpoint 3, < $2). | L2, H4 |
 | O-5 | **Gate size.** The plan's starting point is 6 worlds per cell × 12 tasks × 3 epochs = 288 tasks per gate arm. `power_sim.py --mode ni` gives only **≈0.52 power at true Δ = 0** (σ_w = 0.5, σ_g = 0.3). For 80% power: **12 worlds/cell × 12 tasks** (576 tasks, 0.79; 0.88 if σ_g ≤ 0.15) or **16 × 12** (768 tasks, 0.91). Worlds matter far more than tasks per world. This is ≈1.8–2.5× the gate's run and build cost. Recommend 12 worlds/cell, re-simulated with pilot σ estimates before freezing GATE_PREREG. | GATE_PREREG, checkpoint 8 budget |
+| O-6 | **Delivery modes.** Recommended (data-driven, see D-013): push and pull **co-primary for the F7 cells**, with the verdict reported per mode; F3 push only. That is ≈1.5× the push-only gate cost. Cheaper alternative: pull as a half-size secondary, which leaves the relational verdict dependent on the push-only assumption. | GATE_PREREG §3, gate budget |

@@ -16,13 +16,25 @@ from ape.agent.arms import arm_provider, load_world
 from ape.agent.kb_react import kb_agent
 from ape.config import Config
 from ape.scorers.success import delivered_evidence, task_success
+from ape.worlds.gen_f7 import EXCEPTION_STYLES
 from ape.worlds.spec import World
 
+# Arms with a retriever a search_kb tool can call (monolith and oracle context have none).
+PULLABLE = {"S3s", "APG-q", "APG-s", "APGo-q", "S5o", "LGR-q", "LGR-s", "LGRo-q", "LGRo-s"}
 
-def gate_samples(family: str, level: str, split: str, relational: bool = True, limit_worlds: int | None = None) -> list[Sample]:
+
+def _variant(family: str, relational: bool, exception_style: str) -> str:
+    if family != "F7":
+        return "-"
+    return f"-rel-{EXCEPTION_STYLES[exception_style]}-" if relational else "-ind-"
+
+
+def gate_samples(
+    family: str, level: str, split: str, relational: bool = True, limit_worlds: int | None = None, exception_style: str = "descriptive"
+) -> list[Sample]:
     cfg = Config()
-    variant = {"F7": ("-rel-" if relational else "-ind-")}.get(family, "-")
-    paths = sorted((cfg.worlds_dir / split).glob(f"{family}-{level}{variant}*.json"))
+    variant = _variant(family, relational, exception_style)
+    paths = sorted((cfg.worlds_dir / split).glob(f"{family}-{level}{variant}{split}-*.json"))
     if limit_worlds:
         paths = paths[:limit_worlds]
     samples = []
@@ -34,7 +46,15 @@ def gate_samples(family: str, level: str, split: str, relational: bool = True, l
                     id=t.id,
                     input=t.prompt,
                     target=json.dumps(t.gold, sort_keys=True),
-                    metadata={"world_id": w.id, "family": family, "level": level, "split": split, "task": asdict(t), "case": t.tags.get("case")},
+                    metadata={
+                        "world_id": w.id,
+                        "family": family,
+                        "level": level,
+                        "split": split,
+                        "exception_style": w.entities.get("exception_style"),
+                        "task": asdict(t),
+                        "case": t.tags.get("case"),
+                    },
                 )
             )
     if not samples:
@@ -51,11 +71,23 @@ def gate(
     exposure: str = "retrieved",
     relational: bool = True,
     limit_worlds: int | None = None,
+    exception_style: str = "descriptive",
+    delivery: str = "push",
 ) -> Task:
+    if delivery != "push" and arm not in PULLABLE:
+        raise ValueError(f"{arm} has no retriever for delivery={delivery}; pull applies to {sorted(PULLABLE)}")
     cfg = Config()
     return Task(
-        dataset=MemoryDataset(gate_samples(family, level, split, relational, limit_worlds), name=f"{family}-{level}-{split}"),
-        solver=kb_agent(arm_provider(arm, cfg), load_world, exposure=exposure, max_turns=cfg.max_turns),
+        dataset=MemoryDataset(gate_samples(family, level, split, relational, limit_worlds, exception_style), name=f"{family}-{level}-{split}"),
+        solver=kb_agent(arm_provider(arm, cfg), load_world, exposure=exposure, max_turns=cfg.max_turns, delivery=delivery),
         scorer=[task_success(), delivered_evidence()],
-        metadata={"arm": arm, "exposure": exposure, "family": family, "level": level, "split": split},
+        metadata={
+            "arm": arm,
+            "exposure": exposure,
+            "delivery": delivery,
+            "family": family,
+            "level": level,
+            "split": split,
+            "exception_style": exception_style if family == "F7" and relational else None,
+        },
     )

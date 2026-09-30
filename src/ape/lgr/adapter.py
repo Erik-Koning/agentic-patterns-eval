@@ -39,7 +39,7 @@ KEYWORDS_SCHEMA = JSONSchema.model_validate(
 
 def kg_llm_func():
     """LightRAG `llm_model_func` for query time, routed through Inspect (role "kg")."""
-    model = get_model(role="kg")
+    model = get_model(role="kg", required=True)  # never silently fall back to the agent model
 
     async def llm(prompt: str, system_prompt: str | None = None, history_messages: list | None = None, **kwargs) -> str:
         messages = ([ChatMessageSystem(content=system_prompt)] if system_prompt else []) + [ChatMessageUser(content=prompt)]
@@ -48,6 +48,7 @@ def kg_llm_func():
             config = GenerateConfig(response_schema=ResponseSchema(name="keywords", json_schema=KEYWORDS_SCHEMA, strict=True))
         return (await model.generate(messages, config=config)).completion
 
+    llm.model_name = str(model)
     return llm
 
 
@@ -69,8 +70,9 @@ def _paths(record: dict) -> list[str]:
 
 
 class LgrArm:
-    def __init__(self, name: str, per_step: bool, rag, chunk_index: ChunkIndex, params: dict, manifest: dict):
+    def __init__(self, name: str, per_step: bool, rag, chunk_index: ChunkIndex, params: dict, manifest: dict, kg_model: str = ""):
         self.name = name
+        self.kg_model = kg_model
         self.per_step = per_step
         self.rag = rag
         self.chunk_index = chunk_index
@@ -95,6 +97,7 @@ class LgrArm:
             meta={
                 "lightrag": {"mode": self.params["mode"], "keywords": {"high": hl, "low": ll}, "counts": [len(entities), len(relations), len(chunks)]},
                 "index_hash": self.manifest.get("index_hash"),
+                "kg_model": self.kg_model,
             },
         )
 
@@ -107,5 +110,6 @@ async def build_lgr_arm(arm: str, world: World, cfg: Config) -> LgrArm:
     manifest = read_manifest(wd)
     if manifest["world_hash"] != world.content_hash():
         raise RuntimeError(f"{wd} was built from a different world version")
-    rag = await open_rag(wd, world.id, kg_llm_func(), embedding_cache(cfg), query_time=True)
-    return LgrArm(arm, per_step, rag, ChunkIndex(chunk_world(world)), query_params(cfg.context_budget_tokens), manifest)
+    llm = kg_llm_func()
+    rag = await open_rag(wd, world.id, llm, embedding_cache(cfg), query_time=True)
+    return LgrArm(arm, per_step, rag, ChunkIndex(chunk_world(world)), query_params(cfg.context_budget_tokens), manifest, kg_model=llm.model_name)
