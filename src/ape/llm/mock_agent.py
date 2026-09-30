@@ -37,3 +37,12 @@ def mock_classifier(messages, tools, tool_choice, config) -> ModelOutput:
     outline = user.split("Category outline:\n", 1)[-1]
     first = next((line.strip().split(":", 1)[0] for line in outline.splitlines() if line.strip()), "root")
     return ModelOutput.from_content(MODEL, json.dumps({"matches": [{"nodeId": first, "confidence": 0.9, "reason": "mock"}]}))
+
+
+def mock_kg(messages, tools, tool_choice, config) -> ModelOutput:
+    """Scripted "kg" model serving both APG classify and LightRAG keyword extraction."""
+    if config.response_schema is not None and config.response_schema.name == "keywords":
+        user = next((m.text for m in messages if m.role == "user"), "")
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", user.split("---Query---")[-1])][:6]
+        return ModelOutput.from_content(MODEL, json.dumps({"high_level_keywords": words[:2], "low_level_keywords": words[2:]}))
+    return mock_classifier(messages, tools, tool_choice, config)
