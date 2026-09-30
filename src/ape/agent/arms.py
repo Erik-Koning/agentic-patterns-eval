@@ -1,0 +1,64 @@
+"""Arm registry: builds (and caches) one delivery arm per (arm, world, event loop).
+
+Loop identity is part of the key because LightRAG binds its async locks to the
+loop that created them.
+"""
+
+import asyncio
+from functools import lru_cache
+
+from ..config import Config, embedding_cache
+from ..kb.baselines import FlatHybrid, Monolith, OracleContext, RandomUnits
+from ..kb.context import DeliveryArm
+from ..worlds.render import chunk_world
+from ..worlds.spec import World
+
+BASELINE_ARMS = ("S1", "S3s", "S6", "S7")
+_cache: dict[tuple, DeliveryArm] = {}
+_locks: dict[tuple, asyncio.Lock] = {}
+
+
+def load_world(world_id: str) -> World:
+    return _load_path(str(Config().world_path(world_id)))
+
+
+@lru_cache(maxsize=64)
+def _load_path(path: str) -> World:
+    return World.load(path)
+
+
+async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
+    chunks = chunk_world(world)
+    if arm == "S1":
+        return Monolith(world, chunks)
+    if arm == "S3s":
+        emb = embedding_cache(cfg)
+        await emb.embed([c.text for c in chunks], context={"world": world.id, "system": "flat"})
+        return FlatHybrid(chunks, emb, cfg.context_budget_tokens)
+    if arm == "S6":
+        return OracleContext(world)
+    if arm == "S7":
+        return RandomUnits(chunks, cfg.context_budget_tokens)
+    if arm.startswith("APG") or arm == "S5o":
+        from ..apg.arm import build_apg_arm
+
+        return await build_apg_arm(arm, world, cfg)
+    if arm.startswith("LGR"):
+        from ..lgr.adapter import build_lgr_arm
+
+        return await build_lgr_arm(arm, world, cfg)
+    raise ValueError(f"unknown arm {arm}")
+
+
+def arm_provider(arm: str, cfg: Config | None = None):
+    cfg = cfg or Config()
+
+    async def provide(world: World) -> DeliveryArm:
+        key = (arm, world.id, str(cfg.worlds_dir), str(cfg.cache_dir), id(asyncio.get_running_loop()))
+        lock = _locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if key not in _cache:
+                _cache[key] = await _build(arm, world, cfg)
+        return _cache[key]
+
+    return provide
