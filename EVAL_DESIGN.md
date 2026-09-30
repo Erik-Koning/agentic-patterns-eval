@@ -2,6 +2,8 @@
 
 Status: design draft, 2026-09-29. Benchmark facts were checked against primary sources (papers, repos, HF cards, leaderboards) on 2026-09-29.
 
+> **Re-pricing needed (2026-09-30).** Cost figures here assume Claude list prices. The provider decision is now **OpenAI only**, so every $ estimate must be recomputed from the E5 price table (`config/model_costs.yaml`) before any budget decision. Token counts and multipliers still apply.
+
 Tags used throughout:
 - **[V]** verified at the linked source on 2026-09-29
 - **[P]** partially verified

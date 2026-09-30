@@ -3,9 +3,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-logs/
-worlds/
-indices/
-cache/
+# Generated artifacts (root only; src/ape/worlds is source code)
+/logs/
+/worlds/
+/indices/
+/cache/
 *.sqlite
 .DS_Store

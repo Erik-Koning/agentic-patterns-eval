@@ -339,7 +339,7 @@ Any claim about a mechanism must cite a single-switch row. Otherwise it is label
 - **Fault hooks** (§6.5):
   - **Environment faults** at the content level: corrupt fact f_j wherever it first surfaces (tool result, document, chunk or KG node), keeping evidence redundancy equal across arms.
   - **Message faults:** replace one worker/peer return value with a plausible wrong result.
-  - **Never implement faults by editing prior assistant turns.** On current Claude models, edited history can invalidate thinking blocks or be rejected (preserved thinking). Inject only via tool results or sub-agent return values.
+  - **Never implement faults by editing prior assistant turns.** Edited history is not a realistic fault and, on providers that bind reasoning to the conversation (e.g. OpenAI reasoning items, Claude preserved thinking), it can silently drop reasoning or be rejected. Inject only via tool results or sub-agent return values.
 - **Validation:** the generator's own solver reaches 100% on gold evidence (S6 sanity), plus a human spot-check of 20 tasks per family.
 
 ### 5.4 F0 anchors (real benchmarks; programmatic scoring where available)
@@ -394,7 +394,7 @@ Pre-register the exact formulas and compute every metric from Inspect logs.
 
 Regimes:
 - **(a) Minimum-variance settings where the provider honors them.** Record exactly which settings were honored.
-  - Current Claude Opus/Sonnet 5.x and Fable models reject non-default sampling parameters. Verify whether any seed parameter exists.
+  - The provider is OpenAI (decided 2026-09-29). Reasoning models may reject or ignore `temperature`; `seed` support varies by model. `readiness/probe_openai.py` records exactly which parameters each role's model honours (`cache/openai_probe.json`).
   - The controlled testbed is the self-hosted open-weight model. Verify whether your vLLM version offers a batch-invariant/deterministic mode.
 - **(b) Production default settings.**
 
