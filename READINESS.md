@@ -35,6 +35,7 @@ Last updated: 2026-09-30.
 | L3 (B) | 20 concurrent in-loop queries, no loop errors; workspaces disjoint | ⚠️ | **Offline half passes:** `tests/test_lgr.py` runs 20 concurrent samples over two worlds inside Inspect's loop with no loop errors, and neither world's workspace leaks the other's facts. **Still needed:** a repeat on a real extraction index after L2. | — |
 | L4 | Query cache off gives two metered keyword calls for two identical queries | ⛔ | Needs E2. | — |
 | L5 | Realized context within ±10% of `max_total_tokens` | ⛔ | Needs E2. | — |
+| L6 | GraphRAG-Bench data, license, eval script and paper model recorded | ✅ | Repo `GraphRAG-Bench/GraphRAG-Benchmark` @ fdbab59: Medical corpus (1 document, ~218k tokens) and 2,062 questions in 4 types. Official accuracy is `Evaluation/metrics/answer_accuracy.py` (gpt-4o-mini judge, T=0, seed 42). LightRAG setup from paper App. H.2. Anchor: `ape.anchor`, `ape.tasks.anchor_graphragbench`, 11 offline tests. Deviations: D-009. | — |
 
 ## Design documents
 

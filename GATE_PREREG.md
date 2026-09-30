@@ -85,7 +85,7 @@ A failure here means fix and re-pilot, not NO-GO.
 
 | ID | Condition |
 |---|---|
-| PC1 | The LightRAG setup reproduces its published GraphRAG-Bench Medical accuracy per question type: within ±5 pp if the paper's generation model is used, ±10 pp otherwise. Mix/hybrid beats naive. |
+| PC1 | The LightRAG setup reproduces its published GraphRAG-Bench Medical accuracy (arXiv 2506.05690 v3, Table 2: 63.32 / 61.32 / 63.14 / 67.91) for each question type: within ±5 pp if answer, judge and build models are all gpt-4o-mini, ±10 pp otherwise. Uses hybrid mode, `n_per_type` = 200 (all 166 Creative Generation questions), and the official accuracy metric (0.75 × LLM-judged statement F1 + 0.25 × embedding similarity; prompts verbatim). Hybrid must beat naive on the **macro mean** over types; per-type wins are reported but not required, because the paper's own LightRAG loses to vanilla RAG on two types. Implementation: `ape.anchor.graphragbench.pc1_from_logs`. |
 | PC2 | On F5, LGR* ≥ LightRAG naive mode. |
 | PC3 | Invariants: S6 ≥ S5o ≥ APG-s ≥ S7, each allowing 3 pp tolerance; and S6 > S7 by a world-level sign-flip test, p < 0.05. |
 | PC4 | Median realized context tokens for APG-s / LGR* falls within [0.8, 1.25]. |

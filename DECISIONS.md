@@ -36,6 +36,17 @@ Each entry records the decision, why it was made, and who made it.
 **D-008 (2026-09-30).** Gate inference is world-clustered throughout: bootstrap over worlds within cells, and world-level sign flips for the S7 placebo and the S6 > S7 invariant. With fewer than 4 worlds per cell the verdict is INCONCLUSIVE.
 - Why: a task-level test was shown in synthetic data to be anti-conservative when world×arm effects exist.
 
+**D-009 (2026-09-30).** The PC1 anchor (GraphRAG-Bench Medical) follows the paper's LightRAG setup, with these documented deviations:
+- LightRAG 1.5.7 instead of 1.2.5, so context caps are an approximate mapping.
+- The judge prompts are the current repo versions (rewritten 2025-07-21). Three of the four published numbers predate the rewrite.
+- Similarity uses our embedding model instead of bge-large-en-v1.5.
+- Keyword extraction uses structured JSON output.
+- The corpus is inserted whole and chunked by LightRAG, as in the paper, rather than per D-003. With per-chunk insertion, LightRAG 1.5.7 would list up to 75 chunk IDs on every entity line and use up the token caps.
+- Why: PC1 validates *our LightRAG setup*, not the gate's shared-chunk protocol. If PC1 fails, these deviations are the first suspects.
+
+**D-010 (2026-09-30).** The PC1 sample is 200 questions per type (all 166 Creative Generation), not 50.
+- Why: at 50 per type the sampling error (≈4 pp) makes a faithful reproduction fail at least one of four ±5 pp checks more often than not; at 200 it is ≈2 pp.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
