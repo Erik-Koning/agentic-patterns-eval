@@ -64,13 +64,39 @@ Each entry records the decision, why it was made, and who made it.
 - APG* is selected on dev from APG-q and APG-s, symmetric with LGR*.
 - APG's `shortlistK` and `minConfidence` are tunable through `APE_APG_SHORTLIST_K` and `APE_APG_MIN_CONFIDENCE`, and are folded into the logged graph version.
 
+**D-015 (2026-09-30, user: "do all").** Models and roles (OpenAI, GPT-6 family, released 2026-09-03 / 09-22).
+
+| Role | Model | Effort |
+|---|---|---|
+| agent (gate) | GPT-6 Luna | high |
+| kg (APG classify, LightRAG keywords) | GPT-6 Luna | low |
+| build (APG authoring, LightRAG extraction) | GPT-6 Luna, high; falls back to GPT-6 Sol, medium (rule in D-017) | — |
+| embeddings | text-embedding-3-small | — |
+| Study G tiers | Luna, Sol, Astra | all at high, plus low as extra capability points |
+| summarizer and probe (Study G) | same model as the agent | — |
+
+- Listed prices per 1M tokens, input / output: Luna $0.10 / $0.50; Sol $2 / $10; Astra $10 / $50 (input doubles above 272K context); embeddings $0.02.
+- Exact API model IDs and the parameters each honours are confirmed by `readiness/probe_openai.py` (E3).
+
+**D-016 (2026-09-30).** Gate delivery modes: push and pull **co-primary for F7** cells, with the verdict reported per mode; F3 push only. Was O-6.
+
+**D-017 (2026-09-30).** Gate size and build model, decided together.
+- Build model: run a dev check with Luna (high) as the builder for both systems. Pass threshold: authored APG graphs declare ≥ 95% of spec IDs (`id_coverage`) on descriptive worlds, and LightRAG extraction recovers ≥ 95% of policy/procedure IDs as entities.
+- If Luna passes: build on Luna and use **16 worlds per cell** (power ≈ 0.91 at Δ = 0).
+- If it fails: build on Sol (medium) and use **12 worlds per cell** (power ≈ 0.79).
+- Re-simulate with pilot σ before freezing. Was O-5.
+
+**D-018 (2026-09-30).** Budget and roles.
+- Gate phase: `compute_budget_usd` = **1,500** (anchor + dev + pilot + gate, ~30% contingency).
+- Study G is budgeted separately after its micro-pilot.
+- Roles: APG owner, skeptic (not on the APG side; tunes LightRAG and S3s and owns their tuning candidates), analyst (owns the pre-registration freeze). Names are still open (O-3).
+
+**D-019 (2026-09-30).** Single hypothesis registry (`HYPOTHESES.md`), and the custom Inspect harness is the only platform. The nine-pattern public-benchmark study in `EVAL_DESIGN.md` is deferred; its benchmarks are external anchors.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
 |---|---|---|
-| O-1 | Put `OPENAI_API_KEY` in `.env`. The shell has `OPENAI_KEY`; one way is `echo "OPENAI_API_KEY=$OPENAI_KEY" > .env`, run by the user so the key is never displayed. | E2–E5, L2, L4, L5, H4 |
-| O-2 | Commit and tag `apg-eval-baseline` in EvolvingWisdomAgents (optional; the tree hash covers it for now). | A1 → ✅ |
-| O-3 | `team` (including a skeptic not on the APG team) and `compute_budget_usd` for the brief's §0. | D1 |
-| O-4 | Approval for live smoke tests (checkpoint 3, < $2). | L2, H4 |
-| O-5 | **Gate size.** The plan's starting point is 6 worlds per cell × 12 tasks × 3 epochs = 288 tasks per gate arm. `power_sim.py --mode ni` gives only **≈0.52 power at true Δ = 0** (σ_w = 0.5, σ_g = 0.3). For 80% power: **12 worlds/cell × 12 tasks** (576 tasks, 0.79; 0.88 if σ_g ≤ 0.15) or **16 × 12** (768 tasks, 0.91). Worlds matter far more than tasks per world. This is ≈1.8–2.5× the gate's run and build cost. Recommend 12 worlds/cell, re-simulated with pilot σ estimates before freezing GATE_PREREG. | GATE_PREREG, checkpoint 8 budget |
-| O-6 | **Delivery modes.** Recommended (data-driven, see D-013): push and pull **co-primary for the F7 cells**, with the verdict reported per mode; F3 push only. That is ≈1.5× the push-only gate cost. Cheaper alternative: pull as a half-size secondary, which leaves the relational verdict dependent on the push-only assumption. | GATE_PREREG §3, gate budget |
+| O-1 | Replace the key in `.env` with a dedicated OpenAI **project key that has a hard spend limit** (recommended limit: the D-018 budget). The smoke tests used the existing `OPENAI_KEY`. | Any spend beyond the smoke tests |
+| O-3 | Names for the three roles in D-018. The skeptic must not be on the APG side. | Dev tuning (the skeptic owns the LightRAG/S3s candidates) |
+| H5 | A human reviews `readiness/spotcheck.md` (30–45 min). | Pilot |

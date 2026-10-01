@@ -44,7 +44,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 | S6 | diagnostic | Gold facts only |
 | S7 | diagnostic / placebo | Random chunks, sized per cell to APG*'s realized median context on the pilot (`config/s7_targets.json`), capped at 50% of the corpus |
 
-**Delivery modes** (EXPERIMENT_AUDIT B3; `[USER: O-6]` to confirm).
+**Delivery modes** (EXPERIMENT_AUDIT B3; decided D-016).
 - **push:** the harness compiles context (per query or per step) and hands it to the agent.
 - **pull:** the agent calls `search_kb(query)`, backed by the same arm's retriever, so it can follow references it has read.
 - **Why both matter** (measured offline on F7-1000 relational, exception-applies tasks):
@@ -60,18 +60,18 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 ## 4. Samples
 
 - **Splits.** `dev` (seeds 1000+) is for tuning, `pilot` (2000+) for calibration, `test` (3000+) for the gate. The test split is generated after the freeze and never inspected before the gate run.
-- **Size `[USER: O-5]`.** Recommended: **12 worlds per cell × 12 tasks × 3 epochs** (576 tasks per gate arm). That gives power ≈ 0.79 at true Δ = 0 with σ_g = 0.3, and ≈ 0.88 with σ_g ≤ 0.15.
+- **Size** (D-017): **16 worlds per cell × 12 tasks × 3 epochs** (768 tasks per gate arm; power ≈ 0.91 at Δ = 0) if the Luna builder passes the dev quality check; otherwise 12 worlds per cell (power ≈ 0.79).
   - Diagnostic arms: 100 tasks × 3 epochs, drawn from the same worlds.
   - Re-simulate with pilot σ_w and σ_g (`power/power_sim.py --mode ni`) before freezing `[PILOT]`.
-- **Models `[USER / E3]`.** OpenAI IDs for the four roles, with reasoning effort fixed per role:
-  - agent: `…`
-  - kg (APG classify and LightRAG keywords): `…`
-  - build (APG authoring and LightRAG extraction): `…`
-  - embeddings: `…`
+- **Models** (D-015; exact IDs confirmed at E3):
+  - agent: GPT-6 Luna, effort high
+  - kg (APG classify and LightRAG keywords): GPT-6 Luna, effort low
+  - build (APG authoring and LightRAG extraction): GPT-6 Luna, high, or GPT-6 Sol, medium, per D-017
+  - embeddings: text-embedding-3-small
 
 ## 5. Tuning (dev split only; equal budget)
 
-- **Budget.** Each system gets **N = `[PILOT]`** configurations, evaluated on the same dev tasks. Every configuration tried is logged in `cache/tuning_log.jsonl`.
+- **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.tuning`. Every configuration tried is logged in `cache/tuning_log.jsonl`. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
 - **LightRAG** (tuned by the skeptic): mode ∈ {local, global, hybrid, mix, naive}, per-query vs per-step, `top_k`, `chunk_top_k`, `max_entity_tokens`, `max_relation_tokens`, `max_total_tokens`. Rerank is off (D-004).
 - **APG** (tuned by the APG side): per-query vs per-step, `shortlistK` ∈ {12, 24, 48} (`APE_APG_SHORTLIST_K`), `minConfidence` (`APE_APG_MIN_CONFIDENCE`), routable vs non-routable categories, `maxPromptTokens`. The authoring prompt may be revised on dev only.
 - **S3s** (tuned by the skeptic): token budget and fusion depth.

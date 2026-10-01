@@ -24,16 +24,14 @@ A field still reading `TODO…` means the human has not filled it in. Never trea
 kg_ingestion_pipeline: "ape/apg/author.py"  # APG graphs are hand-authored in production (no document ingestion exists), so the realistic pipeline is
                                           # LLM authoring from the shared chunks with no world-spec access: taxonomy → leaf policy nodes → bring edges → leaf allowlists,
                                           # validated + human sample review. Oracle APG (S5o) is built from the world spec as an upper bound only. See the APG gate plan.
-team: TODO-BLOCKING                       # Names and roles. MUST include one "skeptic" who is not on the KG team (§8) and an independent M-arm prompt author (§7.3).
-                                          # Fallback: roles only — lead, generator engineer, harness engineer, KG engineer, skeptic, analyst.
-compute_budget_usd: TODO-BLOCKING         # Total for pilot + MVS + Tier B, in USD.
-                                          # Fallback: size the MVS for 5000; label every budget table PROVISIONAL(compute_budget_usd).
+team: TODO                                # Roles fixed (D-018): APG owner, skeptic (not on the APG side), analyst. Names pending (O-3).
+compute_budget_usd: 1500                  # Gate phase only (D-018). Study G / main study budgeted after their micro-pilots.
 models_available:                         # Exact provider/model IDs per tier.
   provider: openai                        # Decided 2026-09-29: OpenAI only (chat + embeddings).
-  frontier: TODO                          # OpenAI model IDs chosen at readiness E3 (models.list + probe). Fallback: tier placeholders.
-  mid_tier: TODO
-  small_or_cheap: TODO
-  embeddings: TODO                        # One embedding model shared by APG shortlist, S3s and LightRAG.
+  frontier: gpt-6-astra                   # D-015; exact IDs confirmed by readiness/probe_openai.py
+  mid_tier: gpt-6-sol
+  small_or_cheap: gpt-6-luna
+  embeddings: text-embedding-3-small      # One embedding model shared by APG shortlist, S3s and LightRAG.
   open_weight_self_hosted: TODO           # Needs a rented NVIDIA GPU (the dev machine is Apple M1); needed for Study E and determinism regime (a).
 target_output: TODO                       # Conference talk date / workshop paper / blog + open release.
                                           # Fallback: workshop paper + open release; no fixed date.
