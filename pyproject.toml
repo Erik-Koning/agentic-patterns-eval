@@ -21,8 +21,9 @@ dependencies = [
 dev = ["pytest>=8", "pytest-asyncio"]
 
 [tool.uv.sources]
-# Non-editable: the installed copy is frozen at install time; PROVENANCE.md records its tree hash.
-apg-core = { path = "../Code/EvolvingWisdomAgents/python/packages/apg-core", editable = false }
+# Pinned to the annotated tag apg-eval-baseline (commit d47f7f3); uv.lock records the commit SHA.
+# Local repository URL until APG has a remote; then swap the URL and keep the tag.
+apg-core = { git = "file:///Users/erikkoning/Documents/Work/Code/EvolvingWisdomAgents", subdirectory = "python/packages/apg-core", tag = "apg-eval-baseline" }
 
 [build-system]
 requires = ["hatchling"]

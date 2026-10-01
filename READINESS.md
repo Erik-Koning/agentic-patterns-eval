@@ -20,7 +20,7 @@ Last updated: 2026-09-30.
 
 | ID | Check | Status | Evidence / notes | Owner |
 |---|---|---|---|---|
-| A1 (B) | Commit or tree hash recorded | ⚠️ | Tree hashes are in `PROVENANCE.md`. The repo has **no commits**, so a commit + `apg-eval-baseline` tag is still preferred. | user |
+| A1 (B) | Commit or tree hash recorded | ✅ | Tag `apg-eval-baseline` → `d47f7f3` (first commit; secret scan clean). Installed as a git source pinned to the tag; tree hashes match (`PROVENANCE.md`). | — |
 | A2 (B) | APG pytest passes, including 66 conformance fixtures | ✅ | `123 passed in 0.09s` on 3.14, run against the installed copy (`-p no:cacheprovider`, no writes to the APG repo). **Fails to import on 3.12** (G0). | — |
 | A3 (B) | 1,000-leaf graph: validate < 5 s, route p95 < 1 s, compose < 50 ms, outline < 2.5k tokens | ✅ | `readiness/bench_apg_scale.py`: validate 0.004 s; route p50 0.155 s / p95 0.165 s; compose p95 0.31 ms; shortlisted outline ≤ 504 tokens. **Without embeddings the outline is 42,000 tokens** (G9). | — |
 | A4 | Gap register with workarounds | ✅ | See the gap register below. | — |

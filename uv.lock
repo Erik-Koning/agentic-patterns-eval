@@ -182,7 +182,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apg-core", directory = "../Code/EvolvingWisdomAgents/python/packages/apg-core" },
+    { name = "apg-core", git = "file:///Users/erikkoning/Documents/Work/Code/EvolvingWisdomAgents?subdirectory=python%2Fpackages%2Fapg-core&tag=apg-eval-baseline" },
     { name = "inspect-ai" },
     { name = "jsonschema" },
     { name = "lightrag-hku", specifier = "==1.5.7" },
@@ -204,12 +204,7 @@ dev = [
 [[package]]
 name = "apg-core"
 version = "0.1.0"
-source = { directory = "../Code/EvolvingWisdomAgents/python/packages/apg-core" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8" }]
+source = { git = "file:///Users/erikkoning/Documents/Work/Code/EvolvingWisdomAgents?subdirectory=python%2Fpackages%2Fapg-core&tag=apg-eval-baseline#d47f7f3749dac38e9f917429810136e4ec6ebb37" }
 
 [[package]]
 name = "ascii-colors"
