@@ -278,3 +278,11 @@ The cap is raised to `--max-usd 3`, since the anchor index build on Luna is ≈ 
 3. `READINESS.md` is updated: H2 and the new smoke checks have status rows.
 4. The cost model prints a ≤ $5,000 program total.
 5. Once a working key exists (O-1), the sequence is `run_gate preflight` → smoke → `run_gate all`, with a stop at `freeze` for human sign-off.
+
+**Status (2026-10-01): done offline.** Items 1–4 are met:
+- FX-1 to FX-8 are committed (42c7c97 … 726b8cb), with 228 tests passing.
+- `run_gate all --offline` runs all nine phases.
+- `readiness/smoke.py --dry` passes.
+- The cost model prints $4,693 conservative / $3,201 expected.
+
+Item 5 waits on O-1. The live sequence is in `READINESS.md`, "Running the gate". Design changes made along the way are recorded in D-022.

@@ -121,3 +121,19 @@ uv run python readiness/smoke.py --only pull,burst                 # re-run some
 `readiness/smoke.py` (FX-8) runs, on the gate profile: `effort` (from the probe), `L2` (live LightRAG extraction and source mapping), `D017` (the build-quality check: authoring `id_coverage` and LightRAG ID coverage ≥ 0.95), `H4` (changing tool sets), `L4_L5` (one keyword call per compile; realized context against `max_total_tokens`), `APG`, `pull`, `recovery`, `burst`, `retrieval` and `orchestrator` (the real `run_gate` at SMOKE_SCALE through pilot, then a refused freeze). Before spending it prints each check's projected cost and refuses a total over `--max-usd`; before each check it stops if spend plus that check's projection would pass the cap. It writes `cache/smoke/report.json` and `report.md`, and exits non-zero when a check fails. Everything lives in `cache/smoke/`; nothing touches `config/`, `PROVENANCE.md` or `runs/`. `--dry` passes every check offline ($0, ~20 s; `tests/test_smoke.py`).
 
 Projected live cost on the gate profile (conservative priors, 2026-10-01): L2 $0.10 · D017 $0.04 · H4 $0.01 · L4_L5 $0.01 · APG $0.01 · pull $0.05 · recovery $0.01 · burst $0.10 · retrieval ~$0 · orchestrator $1.06 (build-dev $0.08, tune $0.13, anchor $0.52, of which $0.47 is the GraphRAG-Bench index, pilot $0.32) = **$1.38**. With the Luna anchor fallback (no gpt-4o-mini in the probe) it is $1.25. The smoke's anchor index is isolated, so the real gate builds its own.
+
+## Running the gate (after the smoke passes)
+
+```
+uv run python -m ape.run_gate all --run-id gate-1    # preflight → build-dev → tune → anchor → pilot, then stops at freeze
+# fill GATE_PREREG.md's [PILOT: …] items from runs/gate-1/pilot/pilot.json and its [USER: …] items (D-017 builder, O-3 names);
+# set Status to FROZEN; commit it with config/selected.yaml, config/s7_targets.json, config/budget_calibration.yaml
+uv run python -m ape.run_gate freeze --run-id gate-1  # hashes the design; refuses on a marker, a dirty tree or a failing PC1
+git commit PROVENANCE.md                              # the freeze record
+uv run python -m ape.run_gate all --run-id gate-1    # build-test → test → analyze; finished phases are skipped
+```
+
+- **Progress:** each phase writes `runs/gate-1/<phase>/manifest.json` (status, spend, logs). Re-running the same command resumes after a crash, a failed group or a budget stop.
+- **Result:** `runs/gate-1/report/report.md` (the verdict, PC1–PC6, tables) and `decision.json`.
+- **Spend:** the guard refuses any phase projected over what is left of $5,000. The gate's projection is $201 conservative / $176 expected (`BUDGET.md`).
+- **Before the freeze:** H5 (spot-check) and O-3 (names) must be done, and the D-017 builder decided.
