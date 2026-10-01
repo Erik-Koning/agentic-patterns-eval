@@ -14,6 +14,11 @@ Prices (FX-2) come from one table, `config/model_costs.yaml`: every eval call ta
 `**eval_cost_kwargs()` so Inspect fills `ModelUsage.total_cost` for the agent and every role,
 and `ape.analysis.cost.load_prices()` prices the ledger (build and embedding calls) from the
 same file. `preflight()` checks, before any spend, that every model a profile calls is priced.
+
+Concurrency (FX-3) is per profile too: an optional `concurrency:` mapping beside the roles. Its
+`max_connections` goes on every Inspect model's GenerateConfig (for the same reason as effort: the
+eval-wide config reaches only the agent), and `ape.runner.run_evals` passes `max_samples` and
+`max_tasks` to `eval_set`.
 """
 
 import os
@@ -37,6 +42,7 @@ INSPECT_ROLES = ("agent", "kg", "judge")
 REQUIRED_ROLES = ("agent", "kg", "build", "embeddings")
 ROLES = (*INSPECT_ROLES, "build", "build_fallback", "embeddings")
 _FIELDS = {"model", "reasoning_effort", "max_tokens", "temperature", "top_p", "seed"}
+CONCURRENCY_KEY = "concurrency"
 
 
 @dataclass(frozen=True)
@@ -58,9 +64,25 @@ class RoleSpec:
 
 
 @dataclass(frozen=True)
+class Concurrency:
+    """Run concurrency for a profile (FX-3), conservative until FX-8's concurrency probe tunes it.
+
+    - `max_connections`: concurrent API calls per model, set on every Inspect model's GenerateConfig
+      (the agent's and each role's). `null` leaves it to Inspect's adaptive controller.
+    - `max_samples`: samples in flight per task (`eval_set(max_samples=...)`).
+    - `max_tasks`: tasks in flight at once (`eval_set(max_tasks=...)`).
+    """
+
+    max_connections: int | None = 16
+    max_samples: int | None = 32
+    max_tasks: int | None = 2
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     roles: dict[str, RoleSpec]
+    concurrency: Concurrency = Concurrency()
 
     def role(self, name: str) -> RoleSpec:
         if name not in self.roles:
@@ -84,7 +106,8 @@ def load_profile(name: str | None = None, path: Path = MODELS_PATH) -> Profile:
     profiles = (yaml.safe_load(path.read_text()) or {}).get("profiles") or {}
     if name not in profiles:
         raise ValueError(f"unknown model profile {name!r} in {path}; known: {sorted(profiles)}")
-    raw = profiles[name] or {}
+    raw = dict(profiles[name] or {})
+    concurrency = _concurrency(raw.pop(CONCURRENCY_KEY, None), f"model profile {name!r} {CONCURRENCY_KEY}")
     if unknown := sorted(set(raw) - set(ROLES)):
         raise ValueError(f"model profile {name!r}: unknown role(s) {unknown}; roles are {list(ROLES)}")
     if missing := [r for r in REQUIRED_ROLES if r not in raw]:
@@ -102,16 +125,29 @@ def load_profile(name: str | None = None, path: Path = MODELS_PATH) -> Profile:
         roles[role] = RoleSpec(
             str(spec["model"]), _effort(spec.get("reasoning_effort"), where), max_tokens, spec.get("temperature"), spec.get("top_p"), spec.get("seed")
         )
-    return Profile(name, roles)
+    return Profile(name, roles, concurrency)
+
+
+def _concurrency(raw: Any, where: str) -> Concurrency:
+    if raw is None:
+        return Concurrency()
+    fields = set(Concurrency.__dataclass_fields__)
+    if not isinstance(raw, dict) or set(raw) - fields:
+        raise ValueError(f"{where}: expected a mapping with fields {sorted(fields)}, got {raw!r}")
+    for k, v in raw.items():
+        if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v <= 0):
+            raise ValueError(f"{where}: {k} must be a positive integer or null, got {v!r}")
+    return Concurrency(**raw)
 
 
 def _inspect_model(profile: Profile, role: str, model: str | None, model_args: dict) -> Model:
     if role not in INSPECT_ROLES:
         raise ValueError(f"{role!r} is not an Inspect role (one of {INSPECT_ROLES}); use build_settings() or embedding_model()")
     spec = profile.role(role)
+    config = spec.generate_config().merge(GenerateConfig(max_connections=profile.concurrency.max_connections))
     # memoize=False: agent and kg share a model name, and memoized instances would collapse
     # onto one object, mixing their configs and their per-role usage.
-    return get_model(model or spec.model, config=spec.generate_config(), memoize=False, **model_args)
+    return get_model(model or spec.model, config=config, memoize=False, **model_args)
 
 
 def agent_model(profile: Profile | None = None, *, model: str | None = None, **model_args: Any) -> Model:

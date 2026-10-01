@@ -8,11 +8,18 @@ the same dev cells and appends each result to `cache/tuning_log.jsonl`. Selectio
 the cheaper one. Cost is Inspect's, priced from `config/model_costs.yaml`; an unpriced call
 fails the candidate rather than reading as $0 and winning the tie-break (mockllm is exempt).
 
+Each candidate runs as one `ape.runner.run_evals` set over all dev cells (FX-3: retries, the 2%
+error budget, resume), in its own log dir `cache/tuning_logs/<system>/<id>-<spec hash>`: its env
+knobs are not part of Inspect's task identity, so candidates must not share a dir. Re-running
+`tune` reuses each candidate's finished logs. A sample that errored within the error budget counts
+as a failure.
+
     uv run python -m ape.tuning --system LightRAG [--profile gate]   # agent + kg models from config/models.yaml
 """
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import time
@@ -60,48 +67,82 @@ def _priced_cost(log, label: str) -> float:
     return sum(u.total_cost or 0.0 for _, u in usage)
 
 
-def run_candidate(cand: dict, cells: list[str], model, model_roles: dict, limit_worlds: int | None, epochs: int, log_dir: str) -> dict:
-    from inspect_ai import eval as inspect_eval
+def candidate_dir(log_dir: str | Path, cand: dict) -> Path:
+    """`<log_dir>/<id>-<hash of the candidate spec>`: a changed spec never resumes another's logs."""
+    digest = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).hexdigest()[:10]
+    return Path(log_dir) / f"{cand['id']}-{digest}"
 
-    from .models import eval_cost_kwargs
+
+def _cell(log) -> str:
+    return f"{log.eval.task_args['family']}-{log.eval.task_args['level']}"
+
+
+def _succeeded(sample) -> bool:
+    """An errored sample (tolerated under fail_on_error) has no scores and counts as a failure."""
+    score = (sample.scores or {}).get("task_success")
+    return score is not None and score.value == "C"
+
+
+def run_candidate(cand: dict, cells: list[str], model, model_roles: dict, limit_worlds: int | None, epochs: int, log_dir: str | Path, profile=None) -> dict:
+    from inspect_ai.log import read_eval_log
+
+    from .runner import log_path, run_evals
     from .tasks.gate import gate
 
-    per_cell, cost, files = {}, 0.0, []
     with env(cand.get("env", {})):
-        for cell in cells:
-            family, level = cell.split("-", 1)
-            log = inspect_eval(
-                gate(family=family, level=level, split="dev", arm=cand["arm"], delivery=cand.get("delivery", "push"), limit_worlds=limit_worlds),
-                model=model,
-                model_roles=model_roles,
-                epochs=epochs,
-                log_dir=log_dir,
-                display="none",
-                **eval_cost_kwargs(),
-            )[0]
-            if log.status != "success":
-                raise RuntimeError(f"{cand['id']} {cell}: {log.error}")
-            scores = [s.scores["task_success"].value == "C" for s in log.samples]
-            per_cell[cell] = sum(scores) / len(scores)
-            cost += _priced_cost(log, f"{cand['id']} {cell}")
-            files.append(log.location)
+        tasks = [
+            gate(family=family, level=level, split="dev", arm=cand["arm"], delivery=cand.get("delivery", "push"), limit_worlds=limit_worlds)
+            for family, level in (cell.split("-", 1) for cell in cells)
+        ]
+        # allow_dirty: logs of an earlier run with other models or --limit-worlds may share the dir.
+        success, logs = run_evals(
+            tasks, candidate_dir(log_dir, cand), profile=profile, model=model, model_roles=model_roles, epochs=epochs, display="none", log_dir_allow_dirty=True
+        )
+    if not success:
+        failed = [f"{_cell(h)}: {h.error.message if h.error else h.status}" for h in logs if h.status != "success"]
+        raise RuntimeError(f"{cand['id']}: " + "; ".join(failed))
+    headers = {_cell(h): h for h in logs}
+    per_cell, cost, files = {}, 0.0, []
+    for cell in cells:
+        log = read_eval_log(headers[cell].location)
+        scores = [_succeeded(s) for s in log.samples]
+        per_cell[cell] = sum(scores) / len(scores)
+        cost += _priced_cost(log, f"{cand['id']} {cell}")
+        files.append(log_path(log))
     return {"per_cell": per_cell, "mean_success": sum(per_cell.values()) / len(per_cell), "cost_usd": cost, "log_files": files}
 
 
 def select(records: list[dict], tie_pp: float) -> dict:
-    best = max(r["mean_success"] for r in records)
-    tied = [r for r in records if r["mean_success"] >= best - tie_pp / 100.0]
+    """Pre-registered rule over candidates that ran: max mean dev success; ties within `tie_pp` -> lower cost.
+    A candidate whose run failed (errors beyond the budget after retries) cannot be selected."""
+    ran = [r for r in records if r.get("status", "ok") == "ok"]
+    if not ran:
+        raise RuntimeError("no tuning candidate completed; see the tuning log for each failure")
+    best = max(r["mean_success"] for r in ran)
+    tied = [r for r in ran if r["mean_success"] >= best - tie_pp / 100.0]
     return min(tied, key=lambda r: (r["cost_usd"], r["candidate"]["id"]))
 
 
-def tune(system: str, model, model_roles: dict, limit_worlds: int | None = None, epochs: int = 1, grid: dict | None = None, log_path: Path | None = None) -> dict:
+def tune(
+    system: str,
+    model,
+    model_roles: dict,
+    limit_worlds: int | None = None,
+    epochs: int = 1,
+    grid: dict | None = None,
+    log_path: Path | None = None,
+    profile=None,
+) -> dict:
     grid = grid or load_grid()
     cfg = Config()
     log_path = log_path or cfg.cache_dir / "tuning_log.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     records = []
     for cand in candidates(grid, system):
-        result = run_candidate(cand, grid["dev_cells"], model, model_roles, limit_worlds, epochs, str(cfg.cache_dir / "tuning_logs"))
+        try:
+            result = {"status": "ok", **run_candidate(cand, grid["dev_cells"], model, model_roles, limit_worlds, epochs, cfg.cache_dir / "tuning_logs" / system, profile)}
+        except RuntimeError as e:  # run failure: logged (PC6 evidence) and unselectable; config errors still raise
+            result = {"status": "failed", "error": str(e)[:500], "mean_success": None, "cost_usd": None}
         rec = {"system": system, "candidate": cand, **result, "ts": time.time()}
         records.append(rec)
         with log_path.open("a") as f:
@@ -127,7 +168,7 @@ def main() -> None:
     os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model(profile))
     require_preflight(profile, live=True, overrides={"agent": args.model, "kg": args.kg})
     agent, roles = agent_model(profile, model=args.model), role_models(profile, ("kg",), model=args.kg)
-    chosen = tune(args.system, agent, roles, args.limit_worlds, args.epochs)
+    chosen = tune(args.system, agent, roles, args.limit_worlds, args.epochs, profile=profile)
     print(json.dumps({"selected": chosen["candidate"], "mean_success": chosen["mean_success"], "cost_usd": chosen["cost_usd"]}, indent=1))
 
 

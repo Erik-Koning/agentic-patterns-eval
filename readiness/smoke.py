@@ -7,7 +7,9 @@
 Everything runs in an isolated scratch area (`cache/smoke/`) on tiny worlds. A preflight
 (`ape.models.require_preflight`) first checks that every model is priced and, for live runs, that
 OPENAI_API_KEY is set. The script stops before the next step if ledger-plus-Inspect spend exceeds
-`--max-usd`; a live call without a price stops it too, rather than counting as $0. It writes
+`--max-usd`; a live call without a price stops it too, rather than counting as $0. The three evals
+run through `ape.runner.run_evals` (FX-3 retries and error budget), each in a fresh log dir under
+`cache/smoke/logs/<timestamp>/`, so a smoke run never reuses an earlier run's logs. It writes
 `cache/smoke/report.json`.
 """
 
@@ -16,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,14 +88,15 @@ def main() -> None:
     if args.build:
         os.environ["APE_BUILD_MODEL"] = args.build
 
-    from inspect_ai import eval as inspect_eval
+    from inspect_ai.log import read_eval_log
 
     from ape.apg.author import author_world, build_llm_author
     from ape.build import build
     from ape.config import Config
     from ape.lgr.build import build_index
     from ape.llm.ledger import Ledger
-    from ape.models import agent_model, build_settings, embedding_model, eval_cost_kwargs, load_profile, require_preflight, role_models
+    from ape.models import agent_model, build_settings, embedding_model, load_profile, require_preflight, role_models
+    from ape.runner import run_evals
     from ape.tasks.gate import gate
     from ape.worlds.render import chunk_world
     from ape.worlds.spec import World
@@ -146,10 +150,10 @@ def main() -> None:
 
     # H4 (changing tool sets) + L4 (one keyword call per compile) + L5 (realized context) on live models.
     runs = {"H4_S3s_F3": dict(family="F3", level="5", arm="S3s"), "L4_L5_LGR_F7": dict(family="F7", level="100", arm="LGR-s" if not args.dry else "LGRo-s"), "APG_F7": dict(family="F7", level="100", arm="APG-s")}
+    log_root = OUT / "logs" / time.strftime("%Y%m%dT%H%M%S")
     for name, kw in runs.items():
-        log = inspect_eval(
-            gate(split="dev", **kw), model=agent, model_roles=roles, log_dir=str(OUT / "logs"), display="none", message_limit=40, **eval_cost_kwargs()
-        )[0]
+        _, (header,) = run_evals(gate(split="dev", **kw), log_root / name, profile=profile, model=agent, model_roles=roles, display="none", message_limit=40)
+        log = read_eval_log(header.location)
         logs.append(log)
         recs = [r for s in log.samples for r in s.store.get("compile_log", [])]
         kg_calls = sum(1 for s in log.samples for e in s.events if e.event == "model" and getattr(e, "role", None) == "kg")

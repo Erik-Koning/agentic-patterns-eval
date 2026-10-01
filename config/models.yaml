@@ -11,9 +11,16 @@
 # Each role takes `model` and optional `reasoning_effort`, `max_tokens`, `temperature`, `top_p`, `seed`.
 # Sampling fields are only for models that accept them (the anchor's gpt-4o-mini); gate profiles never set them.
 # Inspect model IDs must match config/model_costs.yaml (confirmed by readiness/probe_openai.py, E3).
+#
+# Optional per-profile `concurrency:` (FX-3; read by ape.runner.run_evals). Omitted fields take these defaults:
+#   max_connections  16  concurrent API calls per Inspect model (agent and each role); null = Inspect's adaptive controller
+#   max_samples      32  samples in flight per task
+#   max_tasks         2  tasks in flight at once
+# Conservative until FX-8's concurrency probe tunes them. Profiles inheriting with `<<: *gate` inherit it whole.
 
 profiles:
   gate: &gate
+    concurrency: {max_connections: 16, max_samples: 32, max_tasks: 2}
     agent: {model: openai/gpt-6-luna, reasoning_effort: high}
     kg: {model: openai/gpt-6-luna, reasoning_effort: low}
     judge: {model: openai/gpt-6-luna, reasoning_effort: low}

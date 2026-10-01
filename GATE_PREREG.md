@@ -27,6 +27,7 @@ Is APG (Adaptive Prompt Graph), with graphs built by the authoring pipeline `ape
   - F7-1000 cell point Δ > −10 pp.
   - APG* beats the random-node placebo S7: world-level sign-flip test, one-sided p < 0.05.
 - **Superiority.** If the lower bound is > 0, superiority is also reported (fixed-sequence; no α penalty).
+- **Errored samples.** A sample that still errors after its retries (tolerated up to the PC5 limit) counts as a **failure** in the primary analysis, so a system that errors more pays for it. A sensitivity analysis excludes errored samples.
 
 ## 3. Arms
 

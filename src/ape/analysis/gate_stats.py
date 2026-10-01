@@ -38,7 +38,7 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
         arm = log.eval.task_args.get("arm") or (log.eval.metadata or {}).get("arm")
         for s in log.samples or []:
             md = s.metadata
-            ev = s.scores.get("delivered_evidence")
+            ev = (s.scores or {}).get("delivered_evidence")
             usage = {role: u for role, u in (s.role_usage or {}).items()}
             missing = [m for m, u in (s.model_usage or {}).items() if u.total_cost is None]
             if missing and require_cost:
@@ -50,11 +50,13 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
                     "world": md["world_id"],
                     "task": s.id,
                     "epoch": s.epoch,
-                    "success": 1.0 if s.scores["task_success"].value == "C" else 0.0,
+                    # An errored sample (tolerated under fail_on_error, PC5) has no scores. Primary analysis counts
+                    # it as a failure (GATE_PREREG §2); the `error` column lets the sensitivity analysis exclude it.
+                    "success": 1.0 if (s.scores or {}).get("task_success") is not None and s.scores["task_success"].value == "C" else 0.0,
                     "evidence_recall": ev.value["evidence_recall"] if ev else np.nan,
                     "evidence_recall_first": ev.value.get("evidence_recall_first", np.nan) if ev else np.nan,
-                    "partial_credit": s.scores["error_analysis"].value["partial_credit"] if "error_analysis" in s.scores else np.nan,
-                    "error_label": s.scores["error_analysis"].metadata.get("error") if "error_analysis" in s.scores else None,
+                    "partial_credit": s.scores["error_analysis"].value["partial_credit"] if "error_analysis" in (s.scores or {}) else np.nan,
+                    "error_label": s.scores["error_analysis"].metadata.get("error") if "error_analysis" in (s.scores or {}) else ("harness_error" if s.error else None),
                     "case": md.get("case"),
                     "delivery": (log.eval.task_args or {}).get("delivery", "push"),
                     "ctx_tokens": ev.value["ctx_tokens_mean"] if ev else np.nan,

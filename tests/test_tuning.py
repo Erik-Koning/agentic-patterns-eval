@@ -61,5 +61,17 @@ def test_tune_logs_every_candidate_and_the_selection(offline_env):
     )
     lines = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert [line["candidate"]["id"] for line in lines[:2]] == ["small", "big"]
+    # Candidates differ only in env knobs, which are not part of Inspect's task identity: each needs its own log dir.
+    assert lines[0]["log_files"] != lines[1]["log_files"]
     assert lines[2]["selected"] == chosen["candidate"]["id"]
     assert "APE_CONTEXT_BUDGET" not in os.environ
+
+
+def test_failed_candidate_is_logged_and_unselectable():
+    recs = [
+        {"candidate": {"id": "broken"}, "status": "failed", "mean_success": None, "cost_usd": None},
+        {"candidate": {"id": "ok"}, "status": "ok", "mean_success": 0.5, "cost_usd": 1.0},
+    ]
+    assert select(recs, tie_pp=1.0)["candidate"]["id"] == "ok"
+    with pytest.raises(RuntimeError, match="no tuning candidate completed"):
+        select(recs[:1], tie_pp=1.0)

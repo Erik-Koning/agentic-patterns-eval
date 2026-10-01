@@ -22,7 +22,9 @@ context, which eats the 4000-token KG budgets that the paper's numbers were prod
 `build` and `run` take their models and reasoning efforts from `config/models.yaml`
 (`ape.models`): the build role for extraction, the agent role for answers, the judge role for ACC.
 Both first run `ape.models.require_preflight` (every model priced, OPENAI_API_KEY set), and `run`
-prices its Inspect calls from `config/model_costs.yaml`.
+prices its Inspect calls from `config/model_costs.yaml`. `run` goes through `ape.runner.run_evals`
+(FX-3: sample and task retries, the 2% error budget, resume): re-running the same mode, size and
+models with the same `--log-dir` reuses a finished log instead of spending again.
 """
 
 import argparse
@@ -45,7 +47,7 @@ from ..lgr.common import embedding_dim, embedding_func, index_dir, read_manifest
 from ..llm.build_client import BuildLlm
 from ..llm.embeddings import EmbeddingCache
 from ..llm.ledger import Ledger
-from ..models import agent_model, build_settings, embedding_model, eval_cost_kwargs, require_preflight, role_models
+from ..models import build_settings, embedding_model, require_preflight
 
 ANCHOR_ID = "graphragbench-medical"
 QUESTION_TYPES = ("Fact Retrieval", "Complex Reasoning", "Contextual Summarize", "Creative Generation")  # labels as in the data
@@ -230,7 +232,7 @@ def main() -> None:
     r = sub.add_parser("run", help="anchor eval with the profile's agent (answers) and judge models")
     r.add_argument("--mode", default="hybrid")
     r.add_argument("--n-per-type", type=int, default=200)
-    r.add_argument("--log-dir")
+    r.add_argument("--log-dir", help="eval-set log dir (default: $INSPECT_LOG_DIR or ./logs); a finished identical run in it is reused")
     for s in (b, r):
         s.add_argument("--data", help="dataset dir (default: $APE_CACHE/graphragbench)")
         s.add_argument("--profile", help="config/models.yaml profile (default: $APE_MODEL_PROFILE or gate)")
@@ -248,13 +250,14 @@ def main() -> None:
     if args.cmd == "pc1":
         result = pc1_from_logs(read_eval_log(args.graph_log), read_eval_log(args.naive_log), args.tolerance)
     elif args.cmd == "run":
-        from inspect_ai import eval as inspect_eval
-
+        from ..runner import log_path, run_evals
         from ..tasks.anchor_graphragbench import graphragbench_anchor
 
         task = graphragbench_anchor(mode=args.mode, n_per_type=args.n_per_type, data=args.data)
-        log = inspect_eval(task, model=agent_model(), model_roles=role_models(roles=("judge",)), log_dir=args.log_dir, **eval_cost_kwargs())[0]
-        result = {"status": log.status, "log": log.location, "by_type": results_by_type(log) if log.status == "success" else None}
+        log_dir = args.log_dir or os.environ.get("INSPECT_LOG_DIR") or "logs"
+        # The log dir may hold other runs (other modes, older logs): allow_dirty ignores them.
+        _, (log,) = run_evals(task, log_dir, roles=("judge",), live=True, log_dir_allow_dirty=True)
+        result = {"status": log.status, "log": log_path(log), "by_type": results_by_type(log) if log.status == "success" else None}
     else:
         model, effort = build_settings()
         bench = load_medical(args.data or default_data_dir(cfg), n_per_type=0, seed=0)
