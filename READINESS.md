@@ -11,7 +11,7 @@ Last updated: 2026-09-30.
 | ID | Check | Status | Evidence / notes | Owner |
 |---|---|---|---|---|
 | E1 (B) | Venv imports all dependencies; lockfile committed | ✅ | Python 3.14.0. inspect-ai 0.3.273, lightrag-hku 1.5.7, apg-core 0.1.0, openai 3.22.1 import cleanly. `uv.lock` is committed. Python 3.12 is **not** usable; see G0 and D-001. | — |
-| E2 (B) | `OPENAI_API_KEY` in gitignored `.env`; `models.list()` succeeds | ⛔ | Only `OPENAI_KEY` is set in the shell. The SDK and Inspect read `OPENAI_API_KEY`. | user |
+| E2 (B) | `OPENAI_API_KEY` in gitignored `.env`; `models.list()` succeeds | ❌ | 2026-09-30: the shell's `OPENAI_KEY` is **rejected by OpenAI (401 invalid_api_key)**, meaning it was revoked or has expired. `.env` (gitignored, mode 600) still holds that rejected key; replace it with a new one (O-1). No spend occurred. | user |
 | E3 (B) | Model IDs chosen per role (agent, kg, build, embeddings); honoured params probed | ⛔ | Blocked on E2. Probe script: `readiness/probe_openai.py` (to be written). | — |
 | E4 | Rate-limit tier / TPM fits the concurrency plan | ⛔ | Blocked on E2. | — |
 | E5 (B) | Price table (source URL + date) in Inspect's model-cost config | ⛔ | Blocked on E3. | — |
