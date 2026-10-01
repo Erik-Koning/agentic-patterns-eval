@@ -22,12 +22,19 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
                 passes (offline: a rehearsal on a filled copy, and warnings); then the sha256 of the
                 pre-registration, the FROZEN_CONFIG and FROZEN_OUTPUTS files, the commits and the APG pin
                 -> freeze.json and PROVENANCE.md. `require_frozen` is the guard build-test and test call.
+    build-test  the test worlds (split "test", seeds 3000+; `test_world_specs`) and their artifacts, from the frozen
+                plan's TEST_BUILD_CELLS. Only this phase may generate the test split: it sets TEST_SPLIT_ENV
+                after its freeze guard, and every other generator refuses (`worlds.generate`).
+    test        every enabled run cell of the frozen plan's TEST_RUN_PHASES (`test_groups`), one eval set per
+                cell and environment, PRIMARY_CELLS first; the budget is re-checked before each group, a
+                failing group is recorded and the others still run (the phase then fails; a re-run resumes).
 
-Part 2 (build-test, test, analyze) appends phases to `PHASES`. `all` runs through freeze.
+`analyze` (FX-7) appends a phase to `PHASES`. `all` runs through test.
 
 Freeze. A run is frozen once: after freeze.json exists, `tune` and `pilot` refuse to run (even with
---force; they would rewrite frozen inputs), and `freeze` re-runs only as a skip. Any change after the
-freeze is a logged deviation (GATE_PREREG.md, Deviations log) and a new --run-id.
+--force; they would rewrite frozen inputs), and `freeze` re-runs only as a skip. `build-test` and `test`
+take the frozen files as inputs and refuse (naming the file) unless every one still matches its hash. Any
+change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log) and a new --run-id.
 
 Run directory (`runs/<id>/`, git-ignored):
 
@@ -46,6 +53,10 @@ Run directory (`runs/<id>/`, git-ignored):
     pilot/power.json         variance components and NI power at POWER_SIZES (`ape.analysis.pilot`)
     pilot/pilot.json         the summary the analyst transcribes; `prereg_items` is keyed by placeholder label
     freeze.json              frozen files {key: {path, sha256}}, git, analysis commit, APG pin, rehearsal
+    build-test/worlds.json   every test world, as build-dev/worlds.json (groups test, id_only, f5)
+    test/<cell>/<group>-<hash>/   one eval set: Inspect logs + runner_index.json; <cell> the plan cell id,
+                             <group> its env group, <hash> of the group's env and arms (knobs are not part of
+                             Inspect's task identity, so a new env never reuses another env's logs)
     work/                    offline only: worlds/, indices/, cache/ and config/ (the outputs live mode
                              writes to config/), GATE_PREREG.md (the rehearsal copy) and
                              PROVENANCE.freeze.md, so an offline run never touches live artifacts
@@ -86,6 +97,23 @@ selected.yaml (pilot and later phases read it; `read_selected`):
     S3s:  {arm: S3s, env: {APE_S3S_BUDGET: "2000"}, candidate: s3s-2000, mean_success: 0.6, cost_usd: 1.1}
 
 `env` holds only per-arm knobs (APE_APG_*, APE_LGR_*, APE_S3S_BUDGET), so the three can be applied together.
+
+Test runs (the contract FX-7's analysis reads). Groups (`test_groups`): `selected` (the cell's arms under every
+selection's knobs together), `matched` (a cell with `context`: the selected knobs, then budget_calibration.yaml's
+on top), and arm variants (ARM_VARIANTS: `lgr-naive` is LGR* with APE_LGR_MODE=naive). World selection: a
+cell's `split` (default test) and `exception_style` (default descriptive) name its worlds; a `worlds:` cell
+uses that many per task cell, an `n_tasks:` cell the first ceil(n_tasks / tasks per world) (whole worlds, the
+same seeds as the primary's; offline: OFFLINE_SCALE). test/manifest.json adds:
+
+    primary_complete: bool                   every PRIMARY_CELLS cell is done
+    cells: {<plan cell id>: {                in run order
+        status: done | failed | stopped (budget) | pending,
+        primary: bool,
+        groups: [{name, arms: [{declared, run}], split, cells, deliveries, exposure, exception_style,
+                  epochs, n_worlds: {task cell: n}, env, log_dir, log_files, status, projected_usd, error?}]}}
+
+Every test-phase task also records, in its eval metadata: arm (as run), delivery, exposure, split,
+exception_style, plan_cell, group and knobs (the APE_* arm knobs it ran under, `tasks.gate`).
 """
 
 import argparse
@@ -111,9 +139,10 @@ from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_
 from .config import ROOT, Config, embedding_cache
 from .models import PreflightError, Profile, load_profile, preflight
 from .runner import INDEX_NAME
+from .worlds.generate import TEST_SPLIT_ENV, require_test_split_unlocked
 
 STUDY = "gate"
-PHASES = ("preflight", "build-dev", "tune", "anchor", "pilot", "freeze")  # part 2 appends: build-test, test, analyze
+PHASES = ("preflight", "build-dev", "tune", "anchor", "pilot", "freeze", "build-test", "test")  # FX-7 appends analyze
 COMPLETE = ("done", "skipped")
 APG_PIN = "d47f7f3749dac38e9f917429810136e4ec6ebb37"  # PROVENANCE.md: tag apg-eval-baseline
 MOCK = "mockllm/model"
@@ -154,8 +183,15 @@ FROZEN_OUTPUTS = ("selected.yaml", "s7_targets.json", "budget_calibration.yaml")
 PLACEHOLDER = re.compile(r"\[(PILOT|USER)\b")  # any marker in GATE_PREREG.md's body blocks the freeze
 PLACEHOLDER_ITEM = re.compile(r"\[(PILOT|USER)(?::\s*([^\]\n]*))?\]")
 DEVIATION = "any change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log): record it there and start a new --run-id"
+# The test split (GATE_PREREG §4), built and run only on a frozen run: world groups and their plan build cells.
+TEST_BUILD_CELLS = {"test": "gate.build.test", "id_only": "gate.build.test-id-only", "f5": "gate.build.test-f5"}
+# The test phase runs every enabled run cell of these plan phases; the GO rule's evidence first (GATE_PREREG §7).
+TEST_RUN_PHASES = ("test", "diagnostics", "f5", "secondaries")
+PRIMARY_CELLS = ("gate.test.f7", "gate.test.f3", "gate.diag.s7")
+# Plan arms that run as another arm under extra knobs: LightRAG naive (PC2) is LGR* in naive mode.
+ARM_VARIANTS = {"LGR-naive": ("LGR*", {"APE_LGR_MODE": "naive"})}
 # Environment variables the orchestrator manages itself; every other APE_* knob is recorded in params.
-MANAGED_ENV = ("APE_WORLDS", "APE_INDICES", "APE_CACHE", "APE_EMBEDDINGS", "APE_EMBEDDING_MODEL", "APE_MODEL_PROFILE", "APE_S7_TARGETS")
+MANAGED_ENV = ("APE_WORLDS", "APE_INDICES", "APE_CACHE", "APE_EMBEDDINGS", "APE_EMBEDDING_MODEL", "APE_MODEL_PROFILE", "APE_S7_TARGETS", TEST_SPLIT_ENV)
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
@@ -430,10 +466,12 @@ def scale(run: GateRun) -> dict:
     }
 
 
-def dev_world_specs(run: GateRun) -> list[dict]:
+def dev_world_specs(run: GateRun, offline: bool | None = None) -> list[dict]:
     """Every dev world group the gate needs, from its run_plan.yaml build cell (DEV_BUILD_CELLS): world
     counts and exception style from the cell; tasks per world from `gate.tune` tasks_per_world, except
-    messy worlds, which split `gate.sec.messy` n_tasks per cell over the cell's worlds."""
+    messy worlds, which split `gate.sec.messy` n_tasks per cell over the cell's worlds. `offline` overrides
+    the run's mode (OFFLINE_SCALE), for the live projection of an offline run."""
+    offline = run.offline if offline is None else offline
     p = plan(run)
     tasks = int(p.cell("gate.tune").spec["tasks_per_world"])
     messy_n = int(p.cell("gate.sec.messy").spec["n_tasks"])
@@ -443,7 +481,7 @@ def dev_world_specs(run: GateRun) -> list[dict]:
         for world_cell, count in cell["worlds"].items():
             family, level = world_cell.split("-", 1)
             n_tasks = math.ceil(messy_n / count) if group == "messy" else tasks
-            if run.offline:
+            if offline:
                 count, n_tasks = OFFLINE_SCALE["worlds_per_cell"], OFFLINE_SCALE["tasks_per_world"]
             style = cell.get("exception_style", "descriptive")
             specs.append({"group": group, "family": family, "level": level, "count": int(count), "n_tasks": int(n_tasks), "exception_style": style, "relational": True})
@@ -667,6 +705,7 @@ def build_world_set(run: GateRun, record: dict, phase: str, split: str, specs: l
     from .worlds.generate import make_world
     from .worlds.spec import World
 
+    require_test_split_unlocked(split)  # the test split: only build-test, after the freeze guard
     cfg = Config()
     worlds: list[dict] = []
     for s in specs:
@@ -1065,12 +1104,12 @@ def _pilot(run: GateRun, record: dict) -> None:
     #    are not part of Inspect's task identity, so the log dir is keyed by them.
     main_dir = pdir / "logs" / f"main-{_digest({'env': env, 'arms': arms})}"
     record["log_dirs"] = [_show(main_dir)]
-    by_epochs: dict[int, list] = {}
-    for spec, only in ((main, [a for a in main["arms"] if a != "S7"]), (pull, None)):
-        by_epochs.setdefault(int(spec["epochs"]), []).extend(_gate_tasks(spec, arms, "pilot", only))
-    print(f"[pilot] {sum(map(len, by_epochs.values()))} task(s): {', '.join(main['arms'])} x {main['cells']} (push) + {', '.join(pull['arms'])} x {pull['cells']} (pull)", flush=True)
     logs: list[str] = []
-    with _environ(env):
+    with _environ(env):  # tasks are created under the knobs they run with (they record them)
+        by_epochs: dict[int, list] = {}
+        for spec, only in ((main, [a for a in main["arms"] if a != "S7"]), (pull, None)):
+            by_epochs.setdefault(int(spec["epochs"]), []).extend(_gate_tasks(spec, arms, "pilot", only))
+        print(f"[pilot] {sum(map(len, by_epochs.values()))} task(s): {', '.join(main['arms'])} x {main['cells']} (push) + {', '.join(pull['arms'])} x {pull['cells']} (pull)", flush=True)
         for epochs, tasks in by_epochs.items():
             logs += run_gate_tasks(run, gp, models, tasks, main_dir / f"epochs-{epochs}", epochs, "pilot runs")
     tokens = realized_tokens(logs, "push")
@@ -1346,6 +1385,312 @@ def _freeze(run: GateRun, record: dict) -> None:
         record["warnings"].append(f"commit {_show(run.provenance_path)} (the freeze record) before build-test")
 
 
+# build-test ----------------------------------------------------------------------------------------
+
+
+def _frozen_inputs(run: GateRun) -> dict[str, Path]:
+    """The files freeze.json froze, as a phase's inputs: an edit changes the fingerprint, so the phase is not
+    skipped and its freeze check (`_refuse_unless_frozen`) names the file."""
+    record = read_freeze(run) or {}
+    return {k: _resolve(f["path"]) for k, f in (record.get("files") or {}).items()}
+
+
+def _refuse_unless_frozen(name: str) -> Callable[[GateRun], str | None]:
+    def refuse(run: GateRun) -> str | None:
+        try:
+            require_frozen(run)
+        except PhaseError as e:
+            return f"{name}: {e}"
+        return None
+
+    return refuse
+
+
+def _test_tasks_per_world(p: Plan) -> int:
+    """Tasks per test world: the `tasks_per_world` of the plan's test-phase cells, which must agree."""
+    values = {int(c.spec["tasks_per_world"]) for c in _test_cells(p) if "tasks_per_world" in c.spec}
+    if len(values) != 1:
+        raise PhaseError(f"run_plan.yaml: the gate's test cells must share one tasks_per_world (got {sorted(values)})")
+    return values.pop()
+
+
+def test_world_specs(run: GateRun, offline: bool | None = None) -> list[dict]:
+    """The test worlds (split "test", seeds 3000+) from the frozen plan's build cells (TEST_BUILD_CELLS): counts
+    and exception style from the cell, tasks per world from the test cells (offline: OFFLINE_SCALE; `offline`
+    overrides the run's mode, for the live projection). World i of every group has seed 3000+i, so the id_only
+    worlds are paired renderings of the first gate test worlds."""
+    offline = run.offline if offline is None else offline
+    p = plan(run)
+    tasks = _test_tasks_per_world(p)
+    specs = []
+    for group, cell_id in TEST_BUILD_CELLS.items():
+        cell = p.cell(cell_id).spec
+        for world_cell, count in cell["worlds"].items():
+            family, level = world_cell.split("-", 1)
+            n_tasks = tasks
+            if offline:
+                count, n_tasks = OFFLINE_SCALE["worlds_per_cell"], OFFLINE_SCALE["tasks_per_world"]
+            style = cell.get("exception_style", "descriptive")
+            specs.append({"group": group, "family": family, "level": level, "count": int(count), "n_tasks": int(n_tasks), "exception_style": style, "relational": True})
+    return specs
+
+
+def _build_test(run: GateRun, record: dict) -> None:
+    freeze = require_frozen(run)
+    record["frozen_at"] = freeze["frozen_at"]
+    with _environ({TEST_SPLIT_ENV: run.run_id}):
+        build_world_set(run, record, "build-test", "test", test_world_specs(run))
+
+
+# test ----------------------------------------------------------------------------------------------
+
+
+def _test_cells(p: Plan) -> list[PlanCell]:
+    """The plan's gate run cells the test phase runs, in run order: PRIMARY_CELLS (the GO rule's evidence)
+    first, so a budget stop leaves them complete; then the others in plan order."""
+    cells = [c for c in p.cells if c.study == STUDY and c.phase in TEST_RUN_PHASES and c.kind == "agent" and c.enabled]
+    ids = [c.id for c in cells]
+    if missing := [c for c in PRIMARY_CELLS if c not in ids]:
+        raise PhaseError(f"run_plan.yaml has no enabled primary cell(s) {missing}")
+    return sorted(cells, key=lambda c: (PRIMARY_CELLS.index(c.id) if c.id in PRIMARY_CELLS else len(PRIMARY_CELLS), ids.index(c.id)))
+
+
+def _world_sets(run: GateRun, offline: bool) -> dict[tuple[str, str, str], dict]:
+    """(split, cell, exception style) -> {count, n_tasks}: the worlds build-dev and build-test make."""
+    out = {}
+    for split, specs in (("dev", dev_world_specs(run, offline)), ("test", test_world_specs(run, offline))):
+        for s in specs:
+            out[(split, f"{s['family']}-{s['level']}", s["exception_style"])] = {"count": s["count"], "n_tasks": s["n_tasks"]}
+    return out
+
+
+def _cell_worlds(run: GateRun, cell: PlanCell, offline: bool) -> dict:
+    """Which worlds a run cell uses: its split and exception style (plan keys, default test and descriptive), and
+    per task cell how many worlds (the first, by seed): `worlds` for worlds-cells; for n_tasks-cells the
+    first ceil(n_tasks / tasks per world), drawn from the same worlds as the primary (offline: OFFLINE_SCALE)."""
+    s = cell.spec
+    split, style = s.get("split", "test"), s.get("exception_style", "descriptive")
+    sets = _world_sets(run, offline)
+    n_worlds, n_tasks = {}, {}
+    for task_cell in s["cells"]:
+        have = sets.get((split, task_cell, style if task_cell.startswith("F7-") else "descriptive"))
+        if have is None:
+            raise PhaseError(f"{cell.id}: no {split} worlds for {task_cell} ({style}) in the plan's build cells")
+        if offline:
+            n = OFFLINE_SCALE["worlds_per_cell"]
+        elif "worlds" in s:
+            n = int(s["worlds"])
+        else:
+            n = math.ceil(int(s["n_tasks"]) / have["n_tasks"])
+        if n > have["count"]:
+            raise PhaseError(f"{cell.id}: needs {n} {split} worlds for {task_cell}, but the plan builds {have['count']}")
+        n_worlds[task_cell], n_tasks[task_cell] = n, n * have["n_tasks"]
+    return {"split": split, "exception_style": style, "n_worlds": n_worlds, "n_tasks": n_tasks}
+
+
+def read_calibration(run: GateRun) -> dict:
+    path = run.budget_calibration_path
+    if not path.is_file():
+        raise PhaseError(f"{_show(path)} missing: run the pilot phase")
+    return yaml.safe_load(path.read_text()) or {}
+
+
+def matched_env(calibration: dict, context: int) -> dict[str, str]:
+    """The matched-budget knobs of every arm (budget_calibration.yaml), together; applied on top of the selected env."""
+    if int(calibration.get("context", -1)) != int(context):
+        raise PhaseError(f"budget_calibration.yaml calibrates {calibration.get('context')} tokens, but the matched-budget cell runs at {context}: re-pilot")
+    env: dict[str, str] = {}
+    for key, a in (calibration.get("arms") or {}).items():
+        if a.get("converged") is False or not a.get("env"):
+            raise PhaseError(f"budget_calibration.yaml: {key} has no converged matched-budget setting: re-pilot")
+        knobs = {k: str(v) for k, v in a["env"].items()}
+        if clash := sorted(set(knobs) & set(env)):
+            raise PhaseError(f"budget_calibration.yaml: {key} sets {clash}, which another arm also sets")
+        env |= knobs
+    return env
+
+
+def test_groups(run: GateRun, selected: dict, calibration: dict, offline: bool | None = None) -> list[dict]:
+    """Every eval set the test phase runs, in order: per plan cell, one group per environment.
+
+    - `selected`: the cell's arms under every selection's knobs together (`selected_env`).
+    - `matched` (a cell with `context`): every arm under the selected knobs, then the matched-budget knobs on top.
+    - a variant (ARM_VARIANTS, e.g. `lgr-naive`): the base arm under the selected knobs plus the variant's.
+    Knobs are not part of Inspect's task identity, so each group has its own log dir, named by its env."""
+    offline = run.offline if offline is None else offline
+    arms, base = selected_arms(selected), selected_env(selected)
+    p = plan(run)
+    groups = []
+    for cell in _test_cells(p):
+        s = cell.spec
+        worlds = _cell_worlds(run, cell, offline)
+        by_name: dict[str, dict] = {}
+        for a in _arm_names(s["arms"]):
+            if "context" in s:
+                name, env, run_arm = "matched", base | matched_env(calibration, int(s["context"])), _resolve_arm(a, arms)
+            elif a in ARM_VARIANTS:
+                key, extra = ARM_VARIANTS[a]
+                name, env, run_arm = a.lower(), base | extra, arms[key]
+            else:
+                name, env, run_arm = "selected", base, _resolve_arm(a, arms)
+            g = by_name.setdefault(name, {"cell": cell.id, "name": name, "env": env, "arms": []})
+            g["arms"].append({"declared": a, "run": run_arm})
+        for g in by_name.values():
+            g |= {
+                "primary": cell.id in PRIMARY_CELLS,
+                "split": worlds["split"],
+                "cells": list(s["cells"]),
+                "deliveries": list(s.get("deliveries", ["push"])),
+                "exposure": s.get("exposure", "retrieved"),
+                "exception_style": worlds["exception_style"],
+                "epochs": OFFLINE_SCALE["epochs"] if offline else int(s.get("epochs", 1)),
+                "n_worlds": worlds["n_worlds"],
+                "n_tasks": worlds["n_tasks"],
+                "dir": f"{cell.id}/{g['name']}-{_digest({'env': g['env'], 'arms': g['arms']})}",
+            }
+            groups.append(g)
+    return groups
+
+
+def _arm_names(arms: Any) -> list[str]:
+    return list(arms) if isinstance(arms, (list, tuple, dict)) else [arms]
+
+
+def _group_cell(run: GateRun, g: dict) -> PlanCell:
+    """A group as a plan cell for the projection: its declared arms, at the live sizes it runs (an n_tasks-cell
+    runs whole worlds, so its n_tasks is worlds x tasks per world)."""
+    cell = plan(run).cell(g["cell"])
+    live = _cell_worlds(run, cell, offline=False)
+    spec = dict(cell.spec) | {"arms": [a["declared"] for a in g["arms"]]}
+    if "n_tasks" in spec:
+        spec["n_tasks"] = max(live["n_tasks"].values())
+    return PlanCell(cell.id, cell.study, cell.phase, spec)
+
+
+def _group_projected(run: GateRun, g: dict) -> float:
+    return project(run, [_group_cell(run, g)])
+
+
+def _test_projected(run: GateRun) -> float:
+    """Every test-phase cell at the live sizes it runs (n_tasks-cells as whole worlds)."""
+    p = plan(run)
+    cells = []
+    for cell in _test_cells(p):
+        spec = dict(cell.spec)
+        if "n_tasks" in spec:
+            spec["n_tasks"] = max(_cell_worlds(run, cell, offline=False)["n_tasks"].values())
+        cells.append(PlanCell(cell.id, cell.study, cell.phase, spec))
+    return project(run, cells)
+
+
+def _test_params(run: GateRun) -> dict:
+    params: dict[str, Any] = {"scale": scale(run), "lightrag_kind": "oracle" if run.offline else "extract", "env_knobs": _env_knobs()}
+    if read_freeze(run) is None or not run.selected_path.is_file() or not run.budget_calibration_path.is_file():
+        return params  # not frozen: the freeze check refuses the phase
+    groups = test_groups(run, read_selected(run.selected_path), read_calibration(run))
+    return params | {"groups": [{k: g[k] for k in ("cell", "name", "dir", "arms", "env", "deliveries", "exposure", "split", "exception_style", "epochs", "n_worlds")} for g in groups]}
+
+
+def _test_group_tasks(g: dict) -> list:
+    """The gate tasks of one group; call under the group's env (each task records its knobs)."""
+    from .tasks.gate import gate
+
+    return [
+        gate(
+            family=family,
+            level=level,
+            split=g["split"],
+            arm=a["run"],
+            exposure=g["exposure"],
+            exception_style=g["exception_style"],
+            delivery=delivery,
+            limit_worlds=g["n_worlds"][task_cell],
+            plan_cell=g["cell"],
+            group=g["name"],
+        )
+        for a in g["arms"]
+        for delivery in g["deliveries"]
+        for task_cell in g["cells"]
+        for family, level in [task_cell.split("-", 1)]
+    ]
+
+
+def _cell_status(groups: list[dict]) -> str:
+    statuses = {g["status"] for g in groups}
+    for s in ("failed", "stopped", "pending"):
+        if s in statuses:
+            return s
+    return "done"
+
+
+def _test(run: GateRun, record: dict) -> None:
+    freeze = require_frozen(run)
+    record["frozen_at"] = freeze["frozen_at"]
+    selected = read_selected(run.selected_path)
+    groups = test_groups(run, selected, read_calibration(run))
+    gp = gate_profile(run)
+    models = gate_models(run, gp)
+    tdir = run.phase_dir("test")
+    cells: dict[str, dict] = {}
+    entries = []
+    for g in groups:
+        entry = {
+            "name": g["name"],
+            "arms": g["arms"],
+            "split": g["split"],
+            "cells": g["cells"],
+            "deliveries": g["deliveries"],
+            "exposure": g["exposure"],
+            "exception_style": g["exception_style"],
+            "epochs": g["epochs"],
+            "n_worlds": g["n_worlds"],
+            "env": g["env"],
+            "log_dir": _show(tdir / g["dir"]),
+            "log_files": [],
+            "status": "pending",
+        }
+        cells.setdefault(g["cell"], {"status": "pending", "primary": g["primary"], "groups": []})["groups"].append(entry)
+        entries.append((g, entry))
+    record["cells"], record["primary_complete"] = cells, False
+    record["log_dirs"] = [e["log_dir"] for _, e in entries]
+    stopped: BudgetError | None = None
+    for g, entry in entries:
+        what = f"test {g['cell']} ({g['name']})"
+        if stopped is None:
+            try:
+                entry["projected_usd"] = round(_group_projected(run, g), 4)
+                require_affordable(entry["projected_usd"], spend(run)["remaining_usd"], what)
+            except BudgetError as e:
+                stopped = e
+        if stopped is not None:
+            entry["status"] = "stopped"
+            continue
+        print(f"[test] {g['cell']} / {g['name']}: {', '.join(a['run'] for a in g['arms'])} x {g['cells']} x {g['deliveries']} ({g['split']}, {g['epochs']} epoch(s))", flush=True)
+        try:
+            with _environ(g["env"]):
+                entry["log_files"] = run_gate_tasks(run, gp, models, _test_group_tasks(g), tdir / g["dir"], g["epochs"], what)
+            entry["status"] = "done"
+        except Exception as e:  # noqa: BLE001  (recorded; the other cells still run, and the phase then fails)
+            entry |= {"status": "failed", "error": f"{type(e).__name__}: {e}"}
+        for c in cells.values():
+            c["status"] = _cell_status(c["groups"])
+        record["primary_complete"] = all(cells[c]["status"] == "done" for c in PRIMARY_CELLS)
+        _write_json(run.manifest_path("test"), record)  # progress: the manifest shows each finished group
+    for c in cells.values():
+        c["status"] = _cell_status(c["groups"])
+    record["primary_complete"] = all(cells[c]["status"] == "done" for c in PRIMARY_CELLS)
+    record["outputs"] = {f"logs:{g['dir']}": e["log_dir"] for g, e in entries if e["status"] == "done"}
+    failed = [f"{g['cell']} ({g['name']}): {e['error']}" for g, e in entries if e["status"] == "failed"]
+    if stopped is not None:
+        not_run = [f"{g['cell']} ({g['name']})" for g, e in entries if e["status"] == "stopped"]
+        raise BudgetError(
+            f"{stopped}. Stopped before {not_run}; the primary cells are {'complete' if record['primary_complete'] else 'NOT complete'}"
+            + (f"; failed: {failed}" if failed else "")
+        )
+    if failed:
+        raise PhaseError(f"{len(failed)} test group(s) failed (re-run to resume; finished logs are reused): " + "; ".join(failed))
+
+
 PHASE_DEFS: dict[str, Phase] = {
     "preflight": Phase(
         "preflight",
@@ -1405,6 +1750,28 @@ PHASE_DEFS: dict[str, Phase] = {
         requires=("preflight", "tune", "anchor", "pilot"),
         upstream=("tune", "pilot"),
         refuse=_refuse_refreeze,
+    ),
+    "build-test": Phase(
+        "build-test",
+        _build_test,
+        inputs=_frozen_inputs,
+        params=lambda r: {"scale": scale(r), "worlds": test_world_specs(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline},
+        projected=lambda r: project(r, [plan(r).cell(c) for c in TEST_BUILD_CELLS.values()]),
+        profile=gate_profile,
+        requires=("freeze",),
+        upstream=("freeze",),
+        refuse=_refuse_unless_frozen("build-test"),
+    ),
+    "test": Phase(
+        "test",
+        _test,
+        inputs=_frozen_inputs,
+        params=_test_params,
+        projected=_test_projected,
+        profile=gate_profile,
+        requires=("freeze", "build-test"),
+        upstream=("freeze", "build-test"),
+        refuse=_refuse_unless_frozen("test"),
     ),
 }
 assert tuple(PHASE_DEFS) == PHASES

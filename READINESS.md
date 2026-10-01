@@ -54,6 +54,7 @@ Last updated: 2026-09-30.
 | H3 (B) | Classify/keyword calls appear as ModelEvents, one per compile | ✅ Asserted in `tests/test_gate_dry_run.py` (APG: one per compile, minus embedding bypasses) and `tests/test_lgr.py` (LightRAG: exactly one per compile). |
 | H4 | Live check: OpenAI accepts tool sets that change across turns | ⛔ (needs E2) |
 | H5 | Human spot-check of 20 tasks per family | ⏳ |
+| H6 | One-command gate (FIX_PLAN FX-6): `python -m ape.run_gate all --run-id <id>` runs preflight → build-dev → tune → anchor → pilot → freeze → build-test → test, each phase resumable, budget-checked and recorded in `runs/<id>/` | ✅ offline end to end (`--offline`: mock models, fake embeddings, oracle indices; `tests/test_run_gate.py`), including the freeze guard on build-test/test, the test split's lock, primary-first budget stops and resume after a failed group. Live needs O-1 and the filled `GATE_PREREG.md`. |
 
 ---
 

@@ -7,10 +7,12 @@
 # Cell kinds (default `agent`):
 #   agent    one sample = one task. Fields: arms (list, or {arm: candidates}), cells, deliveries (default
 #            [push]), n_tasks or worlds x tasks_per_world (per task cell), epochs; optional context (override,
-#            tokens), exposure (retrieved | all).
+#            tokens), exposure (retrieved | all). Gate run cells may name their worlds: split (default test)
+#            and exception_style (default descriptive); see ape.run_gate's test phase.
+#   build    one sample = one world. Fields: worlds {cell: count}, systems (default [apg, lightrag]);
+#            gate build cells may set exception_style (F7 worlds; default descriptive).
 #   session  Study G F8 sessions. Fields: arms, N (items per session), sessions (per arm), epochs; window and
 #            threshold from `study_g` below.
-#   build    one sample = one world. Fields: worlds {cell: count}, systems (default [apg, lightrag]).
 #   anchor   GraphRAG-Bench questions: n_tasks per mode, modes.
 #   fixed    a capped spend (usd).
 # Every cell takes `profile` (config/models.yaml; default: the study's), optional `effort` (agent effort
@@ -76,12 +78,12 @@ studies:
            note: "PC2 and F5 report; never pooled"}
       secondaries:
         - {id: gate.sec.id-only, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000], deliveries: [push, pull],
-           n_tasks: 100, epochs: 2}
+           n_tasks: 100, epochs: 2, exception_style: id_only, note: "on the gate.build.test-id-only worlds"}
         - {id: gate.sec.matched-300, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000, F3-5, F3-60], n_tasks: 100,
            epochs: 2, context: 300, note: "one matched budget, ~300 tokens (was 300 and 2,000)"}
         - {id: gate.sec.te-all, arms: [APG*, LGR*, S3s], cells: [F3-5, F3-60], n_tasks: 100, epochs: 2, exposure: all}
         - {id: gate.sec.messy, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000], n_tasks: 50, epochs: 2,
-           note: "dev diagnostic on the 2 messy worlds"}
+           split: dev, exception_style: messy, note: "dev diagnostic on the 2 messy worlds (gate.build.dev-messy)"}
 
   # ------------------------------------------------------------------------------------------------
   main:

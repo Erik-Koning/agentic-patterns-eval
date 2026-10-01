@@ -5,7 +5,9 @@ as its own document with `file_path` = our chunk ID, and `chunk_token_size` is s
 above the shared chunker's cap so LightRAG never re-splits it.
 """
 
+import asyncio
 import json
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +51,20 @@ def build_concurrency_kwargs() -> dict[str, int]:
     return {"llm_model_max_async": c.llm, "max_parallel_insert": c.parallel_insert, "embedding_func_max_async": c.embed}
 
 
+# LightRAG's process-wide init lock (shared_storage `data_init_lock`) is a plain asyncio.Lock. The first time two
+# instances initialise at once it binds to that event loop, and from then on any contended initialisation in
+# another loop (every eval set runs its own) raises "is bound to a different event loop", failing the sample.
+# `open_rag` opens one instance at a time per loop, so LightRAG's lock is never contended and never binds.
+_open_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _open_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    if (lock := _open_locks.get(loop)) is None:
+        lock = _open_locks[loop] = asyncio.Lock()
+    return lock
+
+
 async def open_rag(working_dir: Path, world_id: str, llm_func, emb: EmbeddingCache, query_time: bool) -> LightRAG:
     """Query time disables the LLM response cache so every compile pays for its keyword call
     (APG's classify is never cached either); build time keeps the extraction cache.
@@ -56,18 +72,20 @@ async def open_rag(working_dir: Path, world_id: str, llm_func, emb: EmbeddingCac
     Build time also raises LightRAG's concurrency (`build_concurrency_kwargs`); query time keeps
     LightRAG's defaults."""
     working_dir.mkdir(parents=True, exist_ok=True)
-    rag = LightRAG(
-        working_dir=str(working_dir),
-        workspace=workspace_name(world_id),
-        llm_model_func=llm_func,
-        embedding_func=embedding_func(emb, await embedding_dim(emb)),
-        enable_llm_cache=not query_time,
-        enable_llm_cache_for_entity_extract=True,
-        chunk_token_size=CHUNK_TOKEN_SIZE,
-        **({} if query_time else build_concurrency_kwargs()),
-    )
-    await rag.initialize_storages()
-    await initialize_pipeline_status()
+    func = embedding_func(emb, await embedding_dim(emb))
+    async with _open_lock():  # see _open_locks
+        rag = LightRAG(
+            working_dir=str(working_dir),
+            workspace=workspace_name(world_id),
+            llm_model_func=llm_func,
+            embedding_func=func,
+            enable_llm_cache=not query_time,
+            enable_llm_cache_for_entity_extract=True,
+            chunk_token_size=CHUNK_TOKEN_SIZE,
+            **({} if query_time else build_concurrency_kwargs()),
+        )
+        await rag.initialize_storages()
+        await initialize_pipeline_status()
     return rag
 
 

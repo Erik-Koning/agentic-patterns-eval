@@ -10,6 +10,7 @@ with `ape.models.agent_model` and `role_models`. Either way the log records each
 """
 
 import json
+import os
 from dataclasses import asdict
 
 from inspect_ai import Task, task
@@ -25,6 +26,9 @@ from ape.worlds.spec import World
 
 # Arms with a retriever a search_kb tool can call (monolith and oracle context have none).
 PULLABLE = {"S3s", "APG-q", "APG-s", "APGo-q", "S5o", "LGR-q", "LGR-s", "LGRo-q", "LGRo-s"}
+# Environment knobs that change what an arm delivers; the task records them (metadata `knobs`) as they are when
+# it is created, since they are not task args. Callers create the task under the knobs it runs with.
+ARM_KNOB_PREFIXES = ("APE_APG_", "APE_LGR_", "APE_S3S_", "APE_S7_", "APE_CONTEXT_BUDGET", "APE_MAX_TURNS")
 
 
 def _variant(family: str, relational: bool, exception_style: str) -> str:
@@ -77,13 +81,18 @@ def gate(
     limit_worlds: int | None = None,
     exception_style: str = "descriptive",
     delivery: str = "push",
+    plan_cell: str | None = None,
+    group: str | None = None,
 ) -> Task:
+    """`plan_cell` and `group` label a gate orchestrator run (the run_plan.yaml cell and its env group) in the
+    task metadata; they are task args only when passed, so other callers' task identities are unchanged."""
     if delivery != "push" and arm not in PULLABLE:
         raise ValueError(f"{arm} has no retriever for delivery={delivery}; pull applies to {sorted(PULLABLE)}")
     cfg = Config()
     return Task(
         dataset=MemoryDataset(gate_samples(family, level, split, relational, limit_worlds, exception_style), name=f"{family}-{level}-{split}"),
-        solver=kb_agent(arm_provider(arm, cfg), load_world, exposure=exposure, max_turns=cfg.max_turns, delivery=delivery),
+        # The arm reads its knobs (budgets included) when it is built inside the run, under the run's environment.
+        solver=kb_agent(arm_provider(arm), load_world, exposure=exposure, max_turns=cfg.max_turns, delivery=delivery),
         scorer=[task_success(), delivered_evidence(), error_analysis()],
         metadata={
             "arm": arm,
@@ -93,5 +102,7 @@ def gate(
             "level": level,
             "split": split,
             "exception_style": exception_style if family == "F7" and relational else None,
-        },
+            "knobs": {k: v for k, v in sorted(os.environ.items()) if k.startswith(ARM_KNOB_PREFIXES)},
+        }
+        | ({"plan_cell": plan_cell, "group": group} if plan_cell or group else {}),
     )

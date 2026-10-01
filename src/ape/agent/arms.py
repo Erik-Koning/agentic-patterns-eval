@@ -92,16 +92,18 @@ def config_fingerprint() -> tuple:
 
 
 def arm_provider(arm: str, cfg: Config | None = None):
-    cfg = cfg or Config()
+    """The arm for a world, built once per configuration. Without `cfg`, the `Config` (budget knobs included)
+    is read when the arm is built, inside the run, so it always matches `config_fingerprint()` in the key."""
 
     async def provide(world: World) -> DeliveryArm:
-        key = (arm, world.id, str(cfg.worlds_dir), str(cfg.cache_dir), config_fingerprint(), id(asyncio.get_running_loop()))
+        c = cfg or Config()
+        key = (arm, world.id, str(c.worlds_dir), str(c.cache_dir), config_fingerprint(), id(asyncio.get_running_loop()))
         if arm == "S7":
             key += _s7_targets_stamp()
         lock = _locks.setdefault(key, asyncio.Lock())
         async with lock:
             if key not in _cache:
-                _cache[key] = await _build(arm, world, cfg)
+                _cache[key] = await _build(arm, world, c)
         return _cache[key]
 
     return provide

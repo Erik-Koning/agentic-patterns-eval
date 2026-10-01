@@ -78,6 +78,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
     - Matched budget: one budget, ≈300 realized tokens, all 4 cells, 100 tasks per cell.
     - TE-all: F3-5 and F3-60, 100 tasks per cell.
     - Messy (dev diagnostic): F7-10 and F7-1000 on the 2 messy dev worlds, 50 tasks per cell.
+  - Cells sized in tasks use whole worlds: the first ⌈n / 12⌉ worlds of the cell by seed. So "100 tasks" is 9 worlds × 12 = 108 tasks, and the messy cells are 1 world of 50 tasks each.
   - These sizes are set by the cost model (FIX_PLAN FX-5, D-021; `config/run_plan.yaml`, `BUDGET.md`).
   - Pilot re-simulation of the NI power: [PILOT: pilot σ_w, σ_g and power].
     - Source: `ape.run_gate pilot` → `runs/<id>/pilot/power.json`, via `power/power_sim.py`.

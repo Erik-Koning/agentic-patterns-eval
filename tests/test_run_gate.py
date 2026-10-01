@@ -1,5 +1,6 @@
-"""Gate orchestrator (FX-6 part A): offline end to end, idempotence, the budget guard, live preflight, and
-per-arm context budgets (FX-6 §0). Offline: mock models, fake embeddings, oracle indices, no network."""
+"""Gate orchestrator (FX-6): offline end to end, idempotence, the budget guard, live preflight, per-arm context
+budgets (FX-6 §0), the pilot and freeze (part 1), and the test split's build and runs (part 2). Offline: mock
+models, fake embeddings, oracle indices, no network."""
 
 import asyncio
 import json
@@ -37,6 +38,7 @@ def clean_env(tmp_path, monkeypatch):
 
 
 PART_A = ("preflight", "build-dev", "tune", "anchor")  # the phases before the pilot; a freeze would block re-tuning
+THROUGH_FREEZE = PHASES[: PHASES.index("freeze") + 1]
 
 
 def _manifests(run_dir, phases=PART_A) -> dict[str, dict]:
@@ -268,7 +270,7 @@ def _body_labels(text: str) -> set[str]:
     return {p["label"] for p in run_gate.prereg_placeholders(text) if p["kind"] == "PILOT"}
 
 
-def test_offline_all_pilots_calibrates_rehearses_the_freeze_and_then_refuses_changes(clean_env, monkeypatch):
+def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_refuses_changes(clean_env, monkeypatch):
     tmp = clean_env
     config = tmp / "config"
     shutil.copytree(ROOT / "config", config)
@@ -293,8 +295,8 @@ def test_offline_all_pilots_calibrates_rehearses_the_freeze_and_then_refuses_cha
     monkeypatch.setattr(run_gate, "calibrate_caps", real_calibrate)
 
     # 2. The re-run resumes the pilot and completes every phase through a rehearsal freeze.
-    assert main(["all", *argv]) == 0
-    m = _manifests(run_dir, PHASES)
+    assert max(main([p, *argv]) for p in THROUGH_FREEZE) == 0
+    m = _manifests(run_dir, THROUGH_FREEZE)
     assert {p: x["status"] for p, x in m.items()} == {**dict.fromkeys(PART_A, "skipped"), "pilot": "done", "freeze": "done"}
     assert m["pilot"]["upstream"] == {"tune": m["tune"]["fingerprint"]} and m["pilot"]["projected_usd"] > 0
     assert m["pilot"]["offline_check"]["ledger_entries"] == 0 and m["freeze"]["offline_check"]["ledger_entries"] == 0
@@ -337,8 +339,8 @@ def test_offline_all_pilots_calibrates_rehearses_the_freeze_and_then_refuses_cha
     assert run_gate.require_frozen(run)["run_id"] == "t2"
 
     # 3. Re-running skips everything, freeze included.
-    assert main(["all", *argv]) == 0
-    assert _statuses(run_dir, PHASES) == dict.fromkeys(PHASES, "skipped")
+    assert max(main([p, *argv]) for p in THROUGH_FREEZE) == 0
+    assert _statuses(run_dir, THROUGH_FREEZE) == dict.fromkeys(THROUGH_FREEZE, "skipped")
 
     # 4. A frozen run never re-tunes, re-pilots or re-freezes, even with --force; the manifests are left alone.
     forced = GateRun("t2", offline=True, force=True, runs_root=tmp / "runs", config_dir=config)
@@ -472,3 +474,152 @@ def test_the_real_prereg_marks_every_open_item_with_a_label():
     assert items and all(p["label"] for p in items), "every body marker is a labelled [PILOT: ...] or [USER: ...]"
     assert {p["label"] for p in items if p["kind"] == "USER"} == {"builder", "APG owner", "skeptic", "analyst"}
     assert run_gate.PLACEHOLDER.search(text[: run_gate.prereg_body_start(text)]), "the header describes the markers"
+
+
+# --- FX-6b part 2: build-test and test -------------------------------------------------------------
+
+
+def test_offline_all_builds_the_test_split_after_the_freeze_runs_the_primary_first_and_resumes(clean_env, monkeypatch):
+    from inspect_ai.log import read_eval_log
+
+    tmp = clean_env
+    config = tmp / "config"
+    shutil.copytree(ROOT / "config", config)
+    argv = ["--offline", "--run-id", "t3", "--runs-dir", str(tmp / "runs"), "--config-dir", str(config)]
+    run = GateRun("t3", offline=True, runs_root=tmp / "runs", config_dir=config)
+    run_dir, out = run.dir, run.out_config_dir
+    plan_cells = [c.id for c in run_gate._test_cells(run_gate.plan(run))]
+    primary = list(run_gate.PRIMARY_CELLS)
+
+    # 1. A budget that only covers the primary: the test phase runs the GO-rule cells first, then stops.
+    real_projected = run_gate._group_projected
+    monkeypatch.setattr(run_gate, "_group_projected", lambda r, g: real_projected(r, g) if g["cell"] in run_gate.PRIMARY_CELLS else 1e9)
+    with pytest.raises(BudgetError, match=r"test gate.diag \(selected\): projected \$1,000,000,000.00 exceeds(.|\n)*the primary cells are complete"):
+        run_phases(run, "all")
+    m = read_manifest(run, "test")
+    assert m["status"] == "failed" and m["primary_complete"] is True
+    assert list(m["cells"])[:3] == primary and set(m["cells"]) == set(plan_cells)
+    assert {c: x["status"] for c, x in m["cells"].items()} == {c: "done" if c in primary else "stopped" for c in plan_cells}
+    monkeypatch.setattr(run_gate, "_group_projected", real_projected)
+
+    # 2. A failing group is recorded; the other cells still run; the phase fails.
+    real_tasks = run_gate.run_gate_tasks
+
+    def te_all_breaks(r, gp, models, tasks, log_dir, epochs, what):
+        if "gate.sec.te-all" in what:
+            raise PhaseError("injected failure")
+        return real_tasks(r, gp, models, tasks, log_dir, epochs, what)
+
+    monkeypatch.setattr(run_gate, "run_gate_tasks", te_all_breaks)
+    with pytest.raises(PhaseError, match=r"1 test group\(s\) failed .*gate.sec.te-all \(selected\): PhaseError: injected failure"):
+        run_phases(run, "test")
+    m = read_manifest(run, "test")
+    assert {c: x["status"] for c, x in m["cells"].items()} == {c: "failed" if c == "gate.sec.te-all" else "done" for c in plan_cells}
+    monkeypatch.setattr(run_gate, "run_gate_tasks", real_tasks)
+
+    # 3. The re-run resumes (finished logs are reused) and completes every cell.
+    assert main(["all", *argv]) == 0
+    m = _manifests(run_dir, PHASES)
+    assert m["test"]["status"] == "done" and m["build-test"]["status"] == "skipped" and m["test"]["primary_complete"] is True
+    assert m["test"]["upstream"] == {"freeze": m["freeze"]["fingerprint"], "build-test": m["build-test"]["fingerprint"]}
+    assert set(m["test"]["inputs"]) == set(json.loads(run.freeze_path.read_text())["files"]), "the frozen files are the test's inputs"
+    assert m["test"]["offline_check"]["models"] == ["mockllm/model"] and m["test"]["projected_usd"] > 100, "the live projection, whole worlds"
+
+    # The test worlds: split "test", built after the freeze; id_only renderings pair the first test seeds.
+    worlds = json.loads((run_dir / "build-test" / "worlds.json").read_text())["worlds"]
+    assert {w["group"] for w in worlds} == {"test", "id_only", "f5"} and all("-test-" in w["world_id"] for w in worlds)
+    seeds = {g: {w["world_id"].rsplit("-", 1)[1] for w in worlds if w["group"] == g} for g in ("test", "id_only")}
+    assert seeds["id_only"] <= seeds["test"]
+
+    # Every plan cell's groups: their logs, and what each log says it ran.
+    selected = read_selected(out / "selected.yaml")
+    calibration = yaml.safe_load((out / "budget_calibration.yaml").read_text())
+    matched = {k: str(v) for a in calibration["arms"].values() for k, v in a["env"].items()}
+    for cell_id, cell in m["test"]["cells"].items():
+        assert cell["status"] == "done" and cell["primary"] == (cell_id in primary)
+        for g in cell["groups"]:
+            assert g["status"] == "done" and g["log_files"] and all(os.path.isfile(f) for f in g["log_files"])
+            assert g["log_dir"].endswith(f"test/{cell_id}/{g['name']}-" + g["log_dir"].rsplit("-", 1)[1])
+            for f in g["log_files"]:
+                head = read_eval_log(f, header_only=True)
+                md = head.eval.metadata
+                assert head.eval.model == "mockllm/model" and head.status == "success"
+                assert (md["plan_cell"], md["group"], md["split"], md["exposure"]) == (cell_id, g["name"], g["split"], g["exposure"])
+                assert md["delivery"] in g["deliveries"] and md["arm"] in {a["run"] for a in g["arms"]}
+                assert md["knobs"] == {k: v for k, v in g["env"].items()} | {"APE_S7_TARGETS": str(out / "s7_targets.json")}
+    groups = {(c, g["name"]): g for c, x in m["test"]["cells"].items() for g in x["groups"]}
+    assert groups[("gate.sec.messy", "selected")]["split"] == "dev" and groups[("gate.sec.messy", "selected")]["exception_style"] == "messy"
+    assert groups[("gate.sec.id-only", "selected")]["exception_style"] == "id_only" and groups[("gate.sec.te-all", "selected")]["exposure"] == "all"
+    assert groups[("gate.test.f7", "selected")]["deliveries"] == ["push", "pull"]
+    # The matched-budget secondary: the selected knobs, then the calibration's on top.
+    m300 = groups[("gate.sec.matched-300", "matched")]
+    assert m300["env"] == run_gate.selected_env(selected) | matched and m300["env"]["APE_APG_FILL"] == "1"
+    # LightRAG naive (PC2): LGR*'s arm in naive mode, in its own group; every compile ran naive.
+    naive = groups[("gate.f5", "lgr-naive")]
+    assert [a["run"] for a in naive["arms"]] == [selected["LGR*"]["arm"]] and naive["env"]["APE_LGR_MODE"] == "naive"
+    modes = {r["meta"]["lightrag"]["mode"] for f in naive["log_files"] for s in read_eval_log(f).samples for r in s.store["compile_log"]}
+    assert modes == {"naive"}
+    assert groups[("gate.f5", "selected")]["env"].get("APE_LGR_MODE") != "naive"
+
+    # 4. Re-running skips every phase.
+    assert main(["all", *argv]) == 0
+    assert _statuses(run_dir, PHASES) == dict.fromkeys(PHASES, "skipped")
+
+    # 5. A frozen file edited after the freeze: build-test and test refuse, naming it; their manifests stay as they were.
+    (out / "selected.yaml").write_text((out / "selected.yaml").read_text() + "\n# edited after the freeze\n")
+    for phase in ("build-test", "test"):
+        with pytest.raises(PhaseError, match=rf"{phase}: frozen file\(s\) changed since the freeze at .*config/selected.yaml \(.*\): changed"):
+            run_phases(run, phase)
+        assert read_manifest(run, phase)["status"] == "skipped"
+
+
+def test_the_test_split_is_built_only_by_the_orchestrators_build_test(clean_env, monkeypatch):
+    import sys
+
+    from ape import build as build_cli
+    from ape.worlds.generate import TEST_SPLIT_ENV, TestSplitLocked
+
+    for k, v in {"APE_WORLDS": "worlds", "APE_CACHE": "cache"}.items():
+        monkeypatch.setenv(k, str(clean_env / v))
+    with pytest.raises(TestSplitLocked, match="run_gate build-test"):
+        asyncio.run(build("test", "F7", ["10"], n_worlds=1, n_tasks=2, relational=True, embed=False))
+    monkeypatch.setattr(sys, "argv", ["ape.build", "--split", "test", "--family", "F7", "--levels", "10", "--no-embed"])
+    with pytest.raises(SystemExit) as e:
+        build_cli.main()
+    assert e.value.code == 2
+    with pytest.raises(TestSplitLocked):
+        run_gate.build_world_set(GateRun("x", offline=True, runs_root=clean_env / "runs"), {"outputs": {}}, "build-test", "test", [])
+    assert not (clean_env / "worlds" / "test").exists()
+    monkeypatch.setenv(TEST_SPLIT_ENV, "a-frozen-run")  # what build-test sets, after its freeze guard
+    assert asyncio.run(build("test", "F7", ["10"], n_worlds=1, n_tasks=2, relational=True, embed=False))
+    assert asyncio.run(build("dev", "F7", ["10"], n_worlds=1, n_tasks=2, relational=True, embed=False)), "other splits are never locked"
+
+
+def test_test_groups_at_live_sizes_follow_the_plan():
+    run = GateRun("plan-check")
+    p = run_gate.plan(run)
+    selected = {"APG*": {"arm": "APG-s", "env": {"APE_APG_SHORTLIST_K": "24"}}, "LGR*": {"arm": "LGR-s", "env": {"APE_LGR_MODE": "mix"}}, "S3s": {"arm": "S3s", "env": {"APE_S3S_BUDGET": "2000"}}}
+    calibration = {"context": 300, "arms": {"APG*": {"env": {"APE_APG_FILL": "1", "APE_APG_BUDGET": "300", "APE_APG_SHORTLIST_K": "48"}}, "LGR*": {"converged": True, "env": {"APE_LGR_BUDGET": "350"}}, "S3s": {"converged": True, "env": {"APE_S3S_BUDGET": "310"}}}}
+    groups = run_gate.test_groups(run, selected, calibration, offline=False)
+    order = list(dict.fromkeys(g["cell"] for g in groups))
+    assert order[:3] == list(run_gate.PRIMARY_CELLS) and set(order) == {c.id for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES}
+    by = {(g["cell"], g["name"]): g for g in groups}
+    tests = p.cell("gate.build.test").spec["worlds"]
+    # worlds-cells run the plan's worlds; n_tasks-cells the first whole worlds covering n_tasks (12 tasks each).
+    assert by[("gate.test.f7", "selected")]["n_worlds"] == {c: tests[c] for c in ("F7-10", "F7-1000")} and by[("gate.test.f7", "selected")]["epochs"] == 3
+    assert by[("gate.diag", "selected")]["n_worlds"] == dict.fromkeys(("F7-10", "F7-1000", "F3-5", "F3-60"), 9) and by[("gate.diag", "selected")]["n_tasks"]["F3-5"] == 108
+    assert by[("gate.sec.id-only", "selected")]["n_worlds"] == {"F7-10": 9, "F7-1000": 9} and by[("gate.sec.id-only", "selected")]["exception_style"] == "id_only"
+    assert by[("gate.sec.messy", "selected")]["n_worlds"] == {"F7-10": 1, "F7-1000": 1} and by[("gate.sec.messy", "selected")]["split"] == "dev"
+    assert by[("gate.f5", "selected")]["n_worlds"] == {"F5-1hop": 9, "F5-2hop": 9}
+    # Env groups: the matched budget on top of the selections; LightRAG naive is LGR* in naive mode.
+    assert by[("gate.sec.matched-300", "matched")]["env"] == {"APE_APG_SHORTLIST_K": "48", "APE_LGR_MODE": "mix", "APE_S3S_BUDGET": "310", "APE_APG_FILL": "1", "APE_APG_BUDGET": "300", "APE_LGR_BUDGET": "350"}
+    assert by[("gate.f5", "lgr-naive")]["arms"] == [{"declared": "LGR-naive", "run": "LGR-s"}] and by[("gate.f5", "lgr-naive")]["env"]["APE_LGR_MODE"] == "naive"
+    assert [a["declared"] for a in by[("gate.f5", "selected")]["arms"]] == ["APG*", "LGR*"]
+    assert by[("gate.diag.s7", "selected")]["env"] == {"APE_APG_SHORTLIST_K": "24", "APE_LGR_MODE": "mix", "APE_S3S_BUDGET": "2000"}
+    # A calibration for another budget, or one that did not converge, is refused.
+    with pytest.raises(PhaseError, match="calibrates 2000 tokens"):
+        run_gate.test_groups(run, selected, calibration | {"context": 2000}, offline=False)
+    with pytest.raises(PhaseError, match="S3s has no converged"):
+        run_gate.test_groups(run, selected, {**calibration, "arms": {**calibration["arms"], "S3s": {"converged": False, "env": {"APE_S3S_BUDGET": "9"}}}}, offline=False)
+    # The projection prices what runs: n_tasks-cells as whole worlds (108 tasks for 100).
+    assert run_gate._test_projected(run) > run_gate.project(run, [c for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES])
