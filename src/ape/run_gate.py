@@ -1,6 +1,6 @@
 """Gate orchestrator (FIX_PLAN FX-6): the gate as named phases, each idempotent, resumable and recorded.
 
-    uv run python -m ape.run_gate <phase> --run-id <id> [--offline] [--force]
+    uv run python -m ape.run_gate <phase> --run-id <id> [--offline] [--smoke] [--force] [--budget-usd N]
 
 Phases, in order (`all` runs them in this order and stops at the first failure):
 
@@ -96,6 +96,15 @@ the synthetic anchor dataset of `ape.anchor.fixture`; `OFFLINE_SCALE`; and a reh
 by a sentinel and OPENAI_BASE_URL points at a closed local port for the whole run, and after each phase
 every eval log's models must be mockllm and the ledger empty (`offline_check`).
 
+Smoke mode (`--smoke`, FIX_PLAN FX-8; `readiness/smoke.py` drives it): the live wiring at `SMOKE_SCALE`, i.e.
+OFFLINE_SCALE's sizes restricted to the cheapest gate cells (F7-10, F3-5): live models (or, with
+`--offline`, the offline mocks at the same scale), its own worlds/, indices/, cache/ and config outputs
+under runs/<id>/work/ (default runs dir: cache/smoke/runs/), the GraphRAG-Bench data read from
+cache/graphragbench, and projections priced at smoke sizes. `budget_usd` (smoke.py passes what is left
+of its --max-usd) replaces the plan's budget in the guard. A smoke run never freezes (the freeze refuses,
+listing the pre-registration's open items too), so it never reaches build-test or test, and it never
+writes config/ or PROVENANCE.md. A run is smoke or not for its whole life (run.json).
+
 selected.yaml (pilot and later phases read it; `read_selected`):
 
     APG*: {arm: APG-s, env: {APE_APG_SHORTLIST_K: "24"}, candidate: apg-s-k24, mean_success: 0.71, cost_usd: 1.9}
@@ -167,6 +176,10 @@ OFFLINE_SCALE = {
     "tune_candidates_per_system": 2,  # the first N declared candidates of each system
     "anchor_n_per_type": 2,  # of the fixture's 5 per type
 }
+# Live smoke scale (FIX_PLAN FX-8): OFFLINE_SCALE's sizes on the cheapest gate cells only. Plan cells of other
+# world cells are dropped (an anchor index keeps its corpus); see `_smoke_cell` for the projection.
+SMOKE_SCALE = {**OFFLINE_SCALE, "cells": ("F7-10", "F3-5")}
+SMOKE_RUNS = ROOT / "cache" / "smoke" / "runs"
 # Dev world groups and their run_plan.yaml build cells. The plan is the one source of counts, so the
 # projection and the build cover the same worlds. World i of every group has seed 1000+i, so the id_only
 # and messy worlds are paired renderings of gate worlds.
@@ -228,6 +241,9 @@ class GateRun:
     probe_path: Path = ROOT / "cache" / "openai_probe.json"
     provenance_path: Path = ROOT / "PROVENANCE.md"
     prereg_path: Path = ROOT / "GATE_PREREG.md"
+    smoke: bool = False
+    budget_usd: float | None = None  # lowers the guard's budget below the plan's budget.total_usd (smoke: what --max-usd leaves)
+    anchor_data_dir: Path | None = None  # GraphRAG-Bench data; default <cache>/graphragbench (smoke: the repo's cache/)
 
     def __post_init__(self) -> None:
         if not _RUN_ID.match(self.run_id):
@@ -235,6 +251,20 @@ class GateRun:
         self.runs_root, self.config_dir = Path(self.runs_root), Path(self.config_dir)
         if not self.offline and self.config_dir.resolve() != (ROOT / "config").resolve():
             raise PhaseError("--config-dir is for offline runs and tests; live runs read config/ (build workers load config/models.yaml)")
+        if self.smoke and self.runs_root.resolve() == (ROOT / "runs").resolve():
+            raise PhaseError(f"smoke runs live outside runs/ (default {_show(SMOKE_RUNS)}): pass another --runs-dir")
+        if self.smoke and self.anchor_data_dir is None:
+            self.anchor_data_dir = ROOT / "cache" / "graphragbench"
+
+    @property
+    def tiny(self) -> bool:
+        """Offline or smoke: the small sizes (OFFLINE_SCALE, or SMOKE_SCALE on its cells)."""
+        return self.offline or self.smoke
+
+    @property
+    def isolated(self) -> bool:
+        """Offline or smoke: worlds, indices, cache and config outputs under runs/<id>/work/."""
+        return self.offline or self.smoke
 
     @property
     def dir(self) -> Path:
@@ -252,7 +282,7 @@ class GateRun:
 
     @property
     def out_config_dir(self) -> Path:
-        return self.work_dir / "config" if self.offline else self.config_dir
+        return self.work_dir / "config" if self.isolated else self.config_dir
 
     @property
     def selected_path(self) -> Path:
@@ -382,7 +412,8 @@ def _environ(updates: dict[str, str | Path | None]) -> Iterator[None]:
 @contextlib.contextmanager
 def run_environment(run: GateRun) -> Iterator[None]:
     """Offline: every path under runs/<id>/work, fake embeddings, and an OpenAI key that cannot reach anything.
-    Live: the embedding model from the gate profile unless APE_EMBEDDING_MODEL is set (as the CLIs do).
+    Live: the embedding model from the gate profile unless APE_EMBEDDING_MODEL is set (as the CLIs do); smoke
+    also puts worlds, indices and cache under runs/<id>/work.
     Both: APE_S7_TARGETS is the run's S7 targets file."""
     if run.offline:
         w = run.work_dir
@@ -400,21 +431,27 @@ def run_environment(run: GateRun) -> Iterator[None]:
         }
     else:
         updates = {} if os.environ.get("APE_EMBEDDING_MODEL") else {"APE_EMBEDDING_MODEL": gate_profile(run).role("embeddings").model}
+        if run.smoke:  # live models, but nothing shared with real runs
+            w = run.work_dir
+            updates |= {"APE_WORLDS": w / "worlds", "APE_INDICES": w / "indices", "APE_CACHE": w / "cache"}
     updates["APE_S7_TARGETS"] = run.s7_targets_path  # S7 reads the targets this run's pilot writes
     with _environ(updates):
         yield
 
 
 def _check_mode(run: GateRun) -> None:
-    """A run is offline or live for its whole life: an offline `done` must never satisfy a live phase."""
+    """A run is offline or live, and smoke or not, for its whole life: an offline `done` must never satisfy a live
+    phase, nor a smoke-size one a full-size phase."""
     path = run.dir / "run.json"
     if path.is_file():
         info = json.loads(path.read_text())
         if bool(info.get("offline")) != run.offline:
             mode = "an offline" if info.get("offline") else "a live"
             raise PhaseError(f"run {run.run_id!r} is {mode} run ({path}); use another --run-id")
+        if bool(info.get("smoke")) != run.smoke:
+            raise PhaseError(f"run {run.run_id!r} is {'a smoke' if info.get('smoke') else 'not a smoke'} run ({path}); use another --run-id")
         return
-    _write_json(path, {"run_id": run.run_id, "offline": run.offline, "created": _now(), "config_dir": _show(run.config_dir), "git": git_state()})
+    _write_json(path, {"run_id": run.run_id, "offline": run.offline, "smoke": run.smoke, "created": _now(), "config_dir": _show(run.config_dir), "git": git_state()})
 
 
 # --- Plan, profiles, scale, budget ----------------------------------------------------------------
@@ -458,7 +495,9 @@ def anchor_profile_name(run: GateRun) -> tuple[str, str]:
 
 
 def scale(run: GateRun) -> dict:
-    """The sizes this run uses: OFFLINE_SCALE offline, else run_plan.yaml's gate cells."""
+    """The sizes this run uses: SMOKE_SCALE for smoke runs, OFFLINE_SCALE offline, else run_plan.yaml's gate cells."""
+    if run.smoke:
+        return {"offline": run.offline, "smoke": True, **SMOKE_SCALE, "cells": list(SMOKE_SCALE["cells"])}
     if run.offline:
         return {"offline": True, **OFFLINE_SCALE}
     p = plan(run)
@@ -473,12 +512,43 @@ def scale(run: GateRun) -> dict:
     }
 
 
+def smoke_keeps(run: GateRun, world_cell: str) -> bool:
+    """Whether this run uses `world_cell`: every cell, except a smoke run's cells outside SMOKE_SCALE."""
+    return not run.smoke or world_cell in SMOKE_SCALE["cells"]
+
+
+def _smoke_cell(run: GateRun, cell: PlanCell) -> PlanCell:
+    """A plan cell as a smoke run executes it, for the projection: builds of SMOKE_SCALE's cells, one world each
+    (the anchor index keeps its corpus); agent cells on those cells at one world x tasks_per_world, one epoch,
+    and gate.tune's arms counted from the smoke grid; the anchor at anchor_n_per_type per question type."""
+    from .anchor.graphragbench import QUESTION_TYPES
+
+    s = dict(cell.spec)
+    kind = s.get("kind", "agent")
+    if kind == "build" and cell.id != "gate.anchor.index":
+        s["worlds"] = {c: SMOKE_SCALE["worlds_per_cell"] for c in s["worlds"] if c in SMOKE_SCALE["cells"]}
+    elif kind == "anchor":
+        s["n_tasks"] = SMOKE_SCALE["anchor_n_per_type"] * len(QUESTION_TYPES)
+        s["n_per_type"] = SMOKE_SCALE["anchor_n_per_type"]
+    elif kind == "agent":
+        s.pop("n_tasks", None)
+        s |= {"cells": [c for c in s["cells"] if c in SMOKE_SCALE["cells"]], "worlds": SMOKE_SCALE["worlds_per_cell"], "tasks_per_world": SMOKE_SCALE["tasks_per_world"], "epochs": SMOKE_SCALE["epochs"]}
+        if isinstance(s.get("arms"), dict):  # gate.tune: candidates per arm
+            counts: dict[str, int] = {}
+            for sdef in tuning_grid(run)["systems"].values():
+                for c in sdef["candidates"]:
+                    counts[c.get("declared_arm", c["arm"])] = counts.get(c.get("declared_arm", c["arm"]), 0) + 1
+            s["arms"] = counts
+    return PlanCell(cell.id, cell.study, cell.phase, s)
+
+
 def dev_world_specs(run: GateRun, offline: bool | None = None) -> list[dict]:
     """Every dev world group the gate needs, from its run_plan.yaml build cell (DEV_BUILD_CELLS): world
     counts and exception style from the cell; tasks per world from `gate.tune` tasks_per_world, except
     messy worlds, which split `gate.sec.messy` n_tasks per cell over the cell's worlds. `offline` overrides
-    the run's mode (OFFLINE_SCALE), for the live projection of an offline run."""
-    offline = run.offline if offline is None else offline
+    the run's small sizes (OFFLINE_SCALE), for the live projection of an offline run; a smoke run keeps only
+    SMOKE_SCALE's cells."""
+    offline = run.tiny if offline is None else offline
     p = plan(run)
     tasks = int(p.cell("gate.tune").spec["tasks_per_world"])
     messy_n = int(p.cell("gate.sec.messy").spec["n_tasks"])
@@ -486,6 +556,8 @@ def dev_world_specs(run: GateRun, offline: bool | None = None) -> list[dict]:
     for group, cell_id in DEV_BUILD_CELLS.items():
         cell = p.cell(cell_id).spec
         for world_cell, count in cell["worlds"].items():
+            if not smoke_keeps(run, world_cell):
+                continue
             family, level = world_cell.split("-", 1)
             n_tasks = math.ceil(messy_n / count) if group == "messy" else tasks
             if offline:
@@ -505,7 +577,10 @@ def _cost_kwargs(run: GateRun) -> dict:
 
 
 def project(run: GateRun, cells: Sequence[PlanCell]) -> float:
-    """Conservative $ for these plan cells (plan cells, or ad-hoc ones for what the plan does not list)."""
+    """Conservative $ for these plan cells (plan cells, or ad-hoc ones for what the plan does not list); a smoke
+    run prices them at its sizes (`_smoke_cell`)."""
+    if run.smoke:
+        cells = [_smoke_cell(run, c) for c in cells]
     return projected_cost(plan=Plan(tuple(cells), {}, {}, ()), **_cost_kwargs(run))
 
 
@@ -525,8 +600,12 @@ def run_log_files(run: GateRun) -> list[str]:
 
 
 def spend(run: GateRun) -> dict:
-    """What is spent and left of the plan's budget: this run's Inspect logs plus the build/embedding ledger."""
-    return remaining(float(plan(run).budget["total_usd"]), run_log_files(run), Config().ledger_path, run.costs_path)
+    """What is spent and left of the plan's budget (or `run.budget_usd`): this run's Inspect logs plus the
+    build/embedding ledger."""
+    budget = float(plan(run).budget["total_usd"])
+    if run.budget_usd is not None:
+        budget = min(budget, run.budget_usd)  # an override may only lower the plan's budget, never raise it
+    return remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path)
 
 
 def verify_offline(run: GateRun) -> dict:
@@ -595,7 +674,7 @@ def run_gate_tasks(run: GateRun, gp: Profile, models: tuple[Any, dict], tasks: l
     from .runner import log_path, run_evals
 
     agent, roles = models
-    extra = {"display": "none"} if run.offline else {}
+    extra = {"display": "none"} if run.tiny else {}
     success, logs = run_evals(tasks, log_dir, profile=gp, model=agent, model_roles=dict(roles), epochs=epochs, costs_path=run.costs_path, log_dir_allow_dirty=True, **extra)
     if not success:
         failed = [f"{h.eval.task_args.get('arm')} {h.eval.task_args.get('family')}-{h.eval.task_args.get('level')}: {h.error.message if h.error else h.status}" for h in logs if h.status != "success"]
@@ -753,22 +832,23 @@ def _build_dev(run: GateRun, record: dict) -> None:
 
 
 def tuning_grid(run: GateRun) -> dict:
-    """config/tuning_grid.yaml; offline: the first N candidates per system, LightRAG arms as their oracle twins."""
+    """config/tuning_grid.yaml; offline and smoke: the first N candidates per system (offline: LightRAG arms as
+    their oracle twins; smoke: the dev cells it keeps)."""
     from .tuning import load_grid
 
     grid = load_grid(run.config("tuning_grid.yaml"))
-    if not run.offline:
+    if not run.tiny:
         return grid
     systems = {}
     for name, sdef in grid["systems"].items():
         cands = []
         for c in sdef["candidates"][: OFFLINE_SCALE["tune_candidates_per_system"]]:
             c = dict(c)
-            if c.get("arm") in OFFLINE_ARMS:
+            if run.offline and c.get("arm") in OFFLINE_ARMS:
                 c["declared_arm"], c["arm"] = c["arm"], OFFLINE_ARMS[c["arm"]]
             cands.append(c)
         systems[name] = {**sdef, "candidates": cands}
-    return {**grid, "systems": systems}
+    return {**grid, "systems": systems, "dev_cells": [c for c in grid["dev_cells"] if smoke_keeps(run, c)]}
 
 
 def _tune_params(run: GateRun) -> dict:
@@ -776,7 +856,7 @@ def _tune_params(run: GateRun) -> dict:
     return {
         "scale": sc,
         "systems": [s for s, _ in TUNED_SYSTEMS],
-        "limit_worlds": sc["worlds_per_cell"] if run.offline else sc["tune_worlds"],
+        "limit_worlds": sc["worlds_per_cell"] if run.tiny else sc["tune_worlds"],
         "epochs": sc["epochs"],
         "offline_arms": OFFLINE_ARMS if run.offline else None,
         "env_knobs": _env_knobs(),
@@ -833,7 +913,8 @@ def _anchor_cells(run: GateRun, profile: str) -> list[PlanCell]:
 
 def _anchor_params(run: GateRun) -> dict:
     name, _ = anchor_profile_name(run)
-    return {"scale": scale(run), "profile": name, "modes": list(ANCHOR_MODES), "data": "fixture" if run.offline else "cache/graphragbench", "env_knobs": _env_knobs()}
+    data = "fixture" if run.offline else _show(run.anchor_data_dir) if run.anchor_data_dir else "cache/graphragbench"
+    return {"scale": scale(run), "profile": name, "modes": list(ANCHOR_MODES), "data": data, "env_knobs": _env_knobs()}
 
 
 def _anchor(run: GateRun, record: dict) -> None:
@@ -859,7 +940,7 @@ def _anchor(run: GateRun, record: dict) -> None:
         from .models import require_preflight
 
         require_preflight(profile, live=True, costs_path=run.costs_path, env_path=run.env_path)
-        data = gb.default_data_dir(cfg)
+        data = run.anchor_data_dir or gb.default_data_dir(cfg)
     try:
         bench = gb.load_medical(data, 0, 0)
     except FileNotFoundError as e:
@@ -929,21 +1010,26 @@ def pilot_world_specs(run: GateRun) -> list[dict]:
     tasks = int(p.cell("gate.pilot").spec["tasks_per_world"])
     specs = []
     for world_cell, count in p.cell(PILOT_BUILD_CELL).spec["worlds"].items():
+        if not smoke_keeps(run, world_cell):
+            continue
         family, level = world_cell.split("-", 1)
         n_tasks = tasks
-        if run.offline:
+        if run.tiny:
             count, n_tasks = OFFLINE_SCALE["worlds_per_cell"], OFFLINE_SCALE["tasks_per_world"]
         specs.append({"group": "pilot", "family": family, "level": level, "count": int(count), "n_tasks": int(n_tasks), "exception_style": "descriptive", "relational": True})
     return specs
 
 
 def _pilot_cells(run: GateRun) -> dict[str, dict]:
-    """The pilot run cells as this run executes them: world limits and epochs (offline: OFFLINE_SCALE)."""
+    """The pilot run cells as this run executes them: world limits and epochs (offline and smoke: OFFLINE_SCALE;
+    smoke: on SMOKE_SCALE's cells)."""
     out = {}
     for cell_id in PILOT_RUN_CELLS:
         spec = dict(plan(run).cell(cell_id).spec)
-        if run.offline:
+        if run.tiny:
             spec |= {"worlds": OFFLINE_SCALE["worlds_per_cell"], "epochs": OFFLINE_SCALE["epochs"]}
+        if run.smoke:
+            spec["cells"] = [c for c in spec["cells"] if smoke_keeps(run, c)]
         spec.setdefault("deliveries", ["push"])
         spec.setdefault("epochs", 1)
         out[cell_id] = spec
@@ -1076,7 +1162,7 @@ def _pilot_params(run: GateRun) -> dict:
         "worlds": pilot_world_specs(run),
         "cells": _pilot_cells(run),
         "calibration": {"knobs": CAL_KNOBS, "max_iterations": CAL_MAX_ITERATIONS, "tolerance": CAL_TOLERANCE, "step": CAL_STEP, "apg_shortlist_k": APG_MATCHED_SHORTLIST_K},
-        "power": {"sizes": POWER_SIZES, "sims": POWER_SIMS["offline" if run.offline else "live"]},
+        "power": {"sizes": POWER_SIZES, "sims": POWER_SIMS["offline" if run.tiny else "live"]},
         "lightrag_kind": "oracle" if run.offline else "extract",
         "fake_author": run.offline,
         "env_knobs": _env_knobs(),
@@ -1164,11 +1250,16 @@ def _pilot(run: GateRun, record: dict) -> None:
     record["budget_calibration"] = {a: {"converged": c["converged"], "env": c["env"], "median": c["median"], "iterations": len(c["iterations"])} for a, c in caps.items()}
     if failed := [a for a in capped if not caps[a]["converged"]]:
         detail = "; ".join(f"{a}: " + ", ".join(f"[{_fmt_env(i['env'])}] -> {i['median']}" for i in caps[a]["iterations"]) for a in failed)
-        raise PhaseError(
-            f"budget calibration: {failed} did not land within ±{CAL_TOLERANCE:.0%} of {context} tokens in {CAL_MAX_ITERATIONS} iterations ({detail}); "
-            f"see {_show(cal_dir / 'calibration.json')}. Change the arm's knobs (e.g. explicit APE_LGR_*_TOKENS caps) with the skeptic and re-run pilot."
-        )
+        if run.smoke:  # one world and two tasks per cell cannot pin a median; the search ran, and a smoke run never freezes
+            record["warnings"].append(f"budget calibration (smoke sizes): {failed} did not converge ({detail}); the closest caps are recorded")
+        else:
+            raise PhaseError(
+                f"budget calibration: {failed} did not land within ±{CAL_TOLERANCE:.0%} of {context} tokens in {CAL_MAX_ITERATIONS} iterations ({detail}); "
+                f"see {_show(cal_dir / 'calibration.json')}. Change the arm's knobs (e.g. explicit APE_LGR_*_TOKENS caps) with the skeptic and re-run pilot."
+            )
     for a in capped:
+        if not caps[a]["converged"]:
+            continue
         lo, hi = caps[a]["window"]
         if off := [c for c, m in (caps[a]["per_cell"] or {}).items() if m is not None and not lo <= m <= hi]:
             record["warnings"].append(f"budget calibration: {a}'s pooled median is in the window, but its median in {off} is not")
@@ -1186,7 +1277,7 @@ def _pilot(run: GateRun, record: dict) -> None:
     tm = load_task_means(main_logs, require_cost=not run.offline, delivery="push")
     vc = variance_components(tm, apg, arms["LGR*"])
     power = {"variance_components": vc} | power_report(
-        vc, POWER_SIZES, int(test["worlds"]), int(test["tasks_per_world"]), int(test["epochs"]), POWER_SIMS["offline" if run.offline else "live"]
+        vc, POWER_SIZES, int(test["worlds"]), int(test["tasks_per_world"]), int(test["epochs"]), POWER_SIMS["offline" if run.tiny else "live"]
     )
     _write_json(pdir / "power.json", power)
     if not vc["estimable"]:
@@ -1329,8 +1420,10 @@ def _freeze(run: GateRun, record: dict) -> None:
     placeholders = prereg_placeholders(text)
     record["placeholders"] = placeholders
     prereg, rehearsal = run.prereg_path, None
+    if run.smoke:  # checked first: a smoke run writes nothing here, not even a rehearsal copy
+        problems.append(f"run {run.run_id!r} is a smoke run (SMOKE_SCALE, FIX_PLAN FX-8): smoke runs never freeze, so they never reach the test split")
     if placeholders:
-        if run.offline:
+        if run.offline and not run.smoke:
             items = (json.loads((run.phase_dir("pilot") / "pilot.json").read_text()) or {}).get("prereg_items", {})
             prereg, replaced = _rehearsal_prereg(run, text, items)
             if left := prereg_placeholders(prereg.read_text()):
@@ -1339,7 +1432,7 @@ def _freeze(run: GateRun, record: dict) -> None:
             record["warnings"].append(f"offline rehearsal: {len(replaced)} placeholder(s) in {_show(run.prereg_path)} filled in the copy {_show(prereg)}")
         else:
             listing = "\n".join(f"    line {p['line']}: {p['marker']}" for p in placeholders)
-            problems.append(f"{_show(run.prereg_path)} still has {len(placeholders)} unfilled item(s); fill each (runs/{run.run_id}/pilot/pilot.json lists the pilot values):\n{listing}")
+            problems.append(f"{_show(run.prereg_path)} still has {len(placeholders)} unfilled item(s); fill each ({_show(run.phase_dir('pilot') / 'pilot.json')} lists the pilot values):\n{listing}")
     files = frozen_files(run, prereg)
     if missing := [f"{k} ({_show(p)})" for k, p in files.items() if not p.is_file()]:
         problems.append(f"missing frozen input(s): {missing}")
@@ -1404,6 +1497,8 @@ def _frozen_inputs(run: GateRun) -> dict[str, Path]:
 
 def _refuse_unless_frozen(name: str) -> Callable[[GateRun], str | None]:
     def refuse(run: GateRun) -> str | None:
+        if run.smoke:
+            return f"{name}: run {run.run_id!r} is a smoke run; smoke runs never freeze, so they never reach the test split"
         try:
             require_frozen(run)
         except PhaseError as e:
@@ -1865,13 +1960,14 @@ def run_phase(run: GateRun, name: str) -> str:
         raise PhaseError(reason)
     for req in phase.requires:
         if not is_complete(run, req):
-            raise PhaseError(f"{name} needs {req} first: python -m ape.run_gate {req} --run-id {run.run_id}{' --offline' if run.offline else ''}")
+            raise PhaseError(f"{name} needs {req} first: python -m ape.run_gate {req} --run-id {run.run_id}{' --offline' if run.offline else ''}{' --smoke' if run.smoke else ''}")
     profile = phase.profile(run)
     record: dict[str, Any] = {
         "phase": name,
         "run_id": run.run_id,
         "status": "running",
         "offline": run.offline,
+        "smoke": run.smoke,
         "started": _now(),
         "finished": None,
         "git": git_state(),
@@ -1896,10 +1992,13 @@ def run_phase(run: GateRun, name: str) -> str:
     if knobs := _result_knobs():
         record["warnings"].append(f"APE_* knob(s) set in the environment apply to every arm of this phase: {knobs}")
     _write_json(run.manifest_path(name), record)
-    print(f"[{name}] running{' (offline)' if run.offline else ''}", flush=True)
+    print(f"[{name}] running{' (offline)' if run.offline else ''}{' (smoke)' if run.smoke else ''}", flush=True)
     try:
         record["projected_usd"] = round(phase.projected(run), 4)
-        record["projection_basis"] = "run_plan.yaml cells, conservative" + ("; live sizes (offline runs spend $0)" if run.offline else "")
+        basis = "run_plan.yaml cells, conservative" + ("; smoke sizes (SMOKE_SCALE)" if run.smoke else "")
+        record["projection_basis"] = basis + ("" if not run.offline else "; offline runs spend $0" + ("" if run.smoke else ", priced at live sizes"))
+        if run.budget_usd is not None:
+            record["budget_basis"] = f"run budget ${run.budget_usd:,.2f} (not the plan's budget.total_usd)"
         record["spend_at_start"] = spend(run)
         _write_json(run.manifest_path(name), record)
         require_affordable(record["projected_usd"], record["spend_at_start"]["remaining_usd"], f"phase {name}")
@@ -1947,12 +2046,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("phase", choices=[*PHASES, "all"])
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--offline", action="store_true", help="zero-spend end-to-end run: mock models, fake embeddings, oracle indices, tiny sizes")
+    ap.add_argument("--smoke", action="store_true", help="SMOKE_SCALE: tiny sizes on F7-10 and F3-5, isolated under the runs dir; never freezes (readiness/smoke.py)")
+    ap.add_argument("--budget-usd", type=float, help="lower the guard's budget for this run below the plan's budget.total_usd (never above it)")
     ap.add_argument("--force", action="store_true", help="re-run complete phases even when their inputs are unchanged")
-    ap.add_argument("--runs-dir", type=Path, default=ROOT / "runs", help="where run directories live (default: runs/)")
+    ap.add_argument("--runs-dir", type=Path, help=f"where run directories live (default: runs/; smoke: {_show(SMOKE_RUNS)})")
     ap.add_argument("--config-dir", type=Path, default=ROOT / "config", help="read config inputs from here (offline runs and tests only)")
     a = ap.parse_args(argv)
+    a.runs_dir = a.runs_dir or (SMOKE_RUNS if a.smoke else ROOT / "runs")
     try:
-        run = GateRun(a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir)
+        run = GateRun(a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd)
         statuses = run_phases(run, a.phase)
     except (PhaseError, PreflightError, BudgetError) as e:
         print(f"run_gate: {e}", file=sys.stderr)
@@ -1961,7 +2063,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         traceback.print_exc()
         print(f"run_gate: phase failed; see {a.runs_dir / a.run_id}/<phase>/manifest.json", file=sys.stderr)
         return 1
-    print(json.dumps({"run_id": run.run_id, "offline": run.offline, "phases": statuses, "dir": _show(run.dir)}, indent=1))
+    print(json.dumps({"run_id": run.run_id, "offline": run.offline, "smoke": run.smoke, "phases": statuses, "dir": _show(run.dir)}, indent=1))
     return 0
 
 

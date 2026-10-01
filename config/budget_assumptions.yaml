@@ -91,6 +91,7 @@ build_calls:
 embedding_tokens_per_chunk: 1000  # chunk + APG node + LightRAG entity/relation embeddings [assumed; negligible]
 chunks_per_world:                 # [measured offline]
   F7-10: 8
+  F7-100: 58        # [measured 2026-10-01] the smoke world (readiness/smoke.py); no plan cell builds F7-100
   F7-1000: 550
   F3-5: 8
   F3-60: 68

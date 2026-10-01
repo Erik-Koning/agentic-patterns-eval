@@ -256,6 +256,19 @@ It must produce every manifest, freeze record and report, and the freeze guard m
 
 The cap is raised to `--max-usd 3`, since the anchor index build on Luna is ≈ $0.5. Everything stays in `cache/smoke/`, and `--dry` must keep passing offline.
 
+**Implemented (2026-10-01).**
+- `readiness/smoke.py` runs each row as a named check (`--only`, `--skip`; a check's prerequisites are added). The pass/fail logic is in `readiness/smoke_checks.py`; the probe's effort check is in `readiness/probe_openai.py`. Error recovery uses a smoke-only task wrapper (`readiness/smoke_fault.py`); nothing in `src/ape` changed for it.
+- Anchor and tuning wiring run through the real orchestrator. `python -m ape.run_gate --smoke` (`SMOKE_SCALE`) is OFFLINE_SCALE's sizes on F7-10 and F3-5, live, isolated under `cache/smoke/runs/`, and priced at those sizes. Smoke runs preflight → build-dev → tune → anchor → pilot, then checks that the freeze refuses. A smoke run never freezes. At smoke size, a budget calibration that does not converge is a warning.
+- Spend:
+  - The script prints a projected cost per check and refuses to start over `--max-usd`.
+  - Before each check it stops if spend plus that check's projection would pass the cap.
+  - The orchestrator also runs under run_gate's own guard (`budget_usd`).
+  - The gate profile projects $1.38 (with the GPT-6 Luna anchor fallback, $1.25), so the $3 default stands.
+- Output: `cache/smoke/report.json` and `report.md`.
+- `--dry` passes every check, and `tests/test_smoke.py` runs it end to end (~20 s).
+- Smoke projection prices F7-100 at its measured 58 chunks (`budget_assumptions.yaml`). No plan cell uses F7-100, so the totals are unchanged.
+- L5's criterion is now "≤ `max_total_tokens`, median within 0.1–1.0 × the cap" (READINESS L5).
+
 ---
 
 ## Definition of done

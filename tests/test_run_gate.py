@@ -657,3 +657,11 @@ def test_test_groups_at_live_sizes_follow_the_plan():
         run_gate.test_groups(run, selected, {**calibration, "arms": {**calibration["arms"], "S3s": {"converged": False, "env": {"APE_S3S_BUDGET": "9"}}}}, offline=False)
     # The projection prices what runs: n_tasks-cells as whole worlds (108 tasks for 100).
     assert run_gate._test_projected(run) > run_gate.project(run, [c for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES])
+
+
+def test_a_budget_override_only_lowers_the_plans_budget(clean_env):
+    low = GateRun("cap-low", offline=True, runs_root=clean_env / "runs", budget_usd=3.0)
+    high = GateRun("cap-high", offline=True, runs_root=clean_env / "runs", budget_usd=1e6)
+    plan_total = float(run_gate.plan(low).budget["total_usd"])
+    assert run_gate.spend(low)["budget_usd"] == 3.0
+    assert run_gate.spend(high)["budget_usd"] == plan_total

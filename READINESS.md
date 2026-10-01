@@ -12,8 +12,8 @@ Last updated: 2026-09-30.
 |---|---|---|---|---|
 | E1 (B) | Venv imports all dependencies; lockfile committed | ✅ | Python 3.14.0. inspect-ai 0.3.273, lightrag-hku 1.5.7, apg-core 0.1.0, openai 3.22.1 import cleanly. `uv.lock` is committed. Python 3.12 is **not** usable; see G0 and D-001. | — |
 | E2 (B) | `OPENAI_API_KEY` in gitignored `.env`; `models.list()` succeeds | ❌ | 2026-09-30: the shell's `OPENAI_KEY` is **rejected by OpenAI (401 invalid_api_key)**, meaning it was revoked or has expired. `.env` (gitignored, mode 600) still holds that rejected key; replace it with a new one (O-1). No spend occurred. | user |
-| E3 (B) | Model IDs chosen per role (agent, kg, build, embeddings); honoured params probed | ⛔ | Blocked on E2. Probe script: `readiness/probe_openai.py` (to be written). | — |
-| E4 | Rate-limit tier / TPM fits the concurrency plan | ⛔ | Blocked on E2. | — |
+| E3 (B) | Model IDs chosen per role (agent, kg, build, embeddings); honoured params probed, including reasoning effort | ⛔ | Blocked on E2. `readiness/probe_openai.py --profile gate` probes plain, temperature 0, seed, effort low and strict JSON per role model, and (FX-8) whether effort is honoured: one problem at effort high and low, passing when high uses more reasoning tokens than low (`readiness/smoke_checks.py`; ≈ $0.02 for the gate profile). `readiness/smoke.py`'s `effort` check reads the result. | — |
+| E4 | Rate-limit tier / TPM fits the concurrency plan | ⛔ | Blocked on E2. Closed by `readiness/smoke.py`'s `burst` check (FX-8): 24 samples at the profile's `max_connections`, recording failed samples, retries, rate-limit signals and latency, and writing a recommended `max_connections` (capped by the probe's TPM header). Passes `--dry`. | — |
 | E5 (B) | Price table (source URL + date) in Inspect's model-cost config | ⚠️ | `config/model_costs.yaml` filled with listed GPT-6 and embedding prices (2026-09-30). Cached-input prices are set equal to input (conservative) until confirmed. Model keys are confirmed at E3. | — |
 
 ## APG
@@ -31,10 +31,10 @@ Last updated: 2026-09-30.
 | ID | Check | Status | Evidence / notes | Owner |
 |---|---|---|---|---|
 | L1 (B) | API present in 1.5.7 | ✅ | Present: `aquery_data`, `ainsert_custom_kg`, `initialize_storages`, `initialize_pipeline_status`. `QueryParam` has `mode` (default `mix`), `only_need_context`, `top_k` (40), `chunk_top_k` (20), `max_entity_tokens` (6000), `max_relation_tokens` (8000), `max_total_tokens` (30000). `ainsert(input, ids=, file_paths=)` is available for provenance. Default storages are JSON, NanoVectorDB and NetworkX. **`enable_rerank` defaults to True** (D-004). | — |
-| L2 (B) | 5-document live build: entities non-empty, `source_id` maps to our chunk IDs | ⛔ | Needs E2 and approval (< $1). | — |
+| L2 (B) | 5-document live build: entities non-empty, `source_id` maps to our chunk IDs | ⛔ | Needs E2. `readiness/smoke.py` check `L2` (an F7-100 world, ≈ $0.10). Passes `--dry`. | — |
 | L3 (B) | 20 concurrent in-loop queries, no loop errors; workspaces disjoint | ⚠️ | **Offline half passes:** `tests/test_lgr.py` runs 20 concurrent samples over two worlds inside Inspect's loop with no loop errors, and neither world's workspace leaks the other's facts. **Still needed:** a repeat on a real extraction index after L2. | — |
-| L4 | Query cache off gives two metered keyword calls for two identical queries | ⛔ | Needs E2. | — |
-| L5 | Realized context within ±10% of `max_total_tokens` | ⛔ | Needs E2. | — |
+| L4 | Query cache off gives two metered keyword calls for two identical queries | ⛔ | Needs E2. `readiness/smoke.py` check `L4_L5`: one metered keyword call per compile. Passes `--dry`. | — |
+| L5 | Realized context ≤ `max_total_tokens`, median within the expected band | ⛔ | Needs E2. `readiness/smoke.py` check `L4_L5` (FX-8): fail if any compile exceeds the cap; warn if the median is outside 0.1–1.0 × the cap. This replaces the earlier "±10% of the cap": LightRAG's `max_total_tokens` also budgets its prompt template, so the realized context sits below it by design (offline: 0.29 × the cap). Passes `--dry`. | — |
 | L6 | GraphRAG-Bench data, license, eval script and paper model recorded | ✅ | Repo `GraphRAG-Bench/GraphRAG-Benchmark` @ fdbab59: Medical corpus (1 document, ~218k tokens) and 2,062 questions in 4 types. Official accuracy is `Evaluation/metrics/answer_accuracy.py` (gpt-4o-mini judge, T=0, seed 42). LightRAG setup from paper App. H.2. Anchor: `ape.anchor`, `ape.tasks.anchor_graphragbench`, 11 offline tests. Deviations: D-009. | — |
 
 ## Design documents
@@ -52,9 +52,10 @@ Last updated: 2026-09-30.
 | H1 (B) | API verification table with doc URLs | ✅ (see API verification table below) |
 | H2 (B) | Mock dry run of every arm × family; required log fields present | ⚠️ Offline dry runs pass for S1, S3s, S6, S7, S5o, APGo-q, APG-s (authored, F7/F3), LGRo-q and LGRo-s on F7/F3/F5. LGR-q/s need a real extraction index (after L2). |
 | H3 (B) | Classify/keyword calls appear as ModelEvents, one per compile | ✅ Asserted in `tests/test_gate_dry_run.py` (APG: one per compile, minus embedding bypasses) and `tests/test_lgr.py` (LightRAG: exactly one per compile). |
-| H4 | Live check: OpenAI accepts tool sets that change across turns | ⛔ (needs E2) |
+| H4 | Live check: OpenAI accepts tool sets that change across turns | ⛔ (needs E2). `readiness/smoke.py` check `H4`: S3s on F3-60, whose retrieved tool sets change between steps (warns if they never changed). Passes `--dry`. |
 | H5 | Human spot-check of 20 tasks per family | ⏳ |
 | H6 | One-command gate (FIX_PLAN FX-6): `python -m ape.run_gate all --run-id <id>` runs preflight → build-dev → tune → anchor → pilot → freeze → build-test → test → analyze, each phase resumable, budget-checked and recorded in `runs/<id>/` | ✅ offline end to end (`--offline`: mock models, fake embeddings, oracle indices; `tests/test_run_gate.py`), including the freeze guard on build-test/test, the test split's lock, primary-first budget stops and resume after a failed group. Live needs O-1 and the filled `GATE_PREREG.md`. |
+| H8 | Smoke coverage (FIX_PLAN FX-8): live pull mode, error recovery, a concurrency burst, real-embedding retrieval, and the orchestrator's live wiring | ✅ `--dry` (every check passes offline; `tests/test_smoke.py` runs it end to end and tests each check's pass/fail logic). ⛔ live: needs E2/E3. Checks: `pull` (S3s and APG-s pull on F7-100; `search_kb` in ≥ 75% of samples, no errors), `recovery` (a first-attempt harness fault, retried and recorded), `burst` (E4), `retrieval` (S3s recall and APG shortlist gold rate, no LLM; warn < 0.8), `orchestrator` (`run_gate --smoke` preflight → pilot on F7-10 and F3-5, then the freeze refuses). |
 | H7 | Decision report (FIX_PLAN FX-7): `python -m ape.analyze_gate --run-id <id>` → `runs/<id>/report/decision.json` and `report.md` with PC1–PC6, the verdict per delivery mode and combined, the NO-GO diagnosis, tables and secondaries | ✅ offline: `tests/test_analyze_gate.py` (every verdict label and PC2–PC6 on synthetic rows with known outcomes) and `tests/test_run_gate.py` (the end-to-end report: PRECONDITION_FAIL naming PC1, which the mock anchor fails; a budget-stopped run's missing cells; a missing `pc1.json`). |
 
 ---
@@ -112,9 +113,11 @@ Each API was checked two ways: introspected in the installed **inspect-ai 0.3.27
 ## One-command live readiness (after O-1)
 
 ```
-uv run python readiness/probe_openai.py --list
-uv run python readiness/probe_openai.py --agent gpt-6-luna --kg gpt-6-luna --build gpt-6-luna --embed text-embedding-3-small
-uv run python readiness/smoke.py --agent openai/gpt-6-luna --kg openai/gpt-6-luna --build gpt-6-luna --embed text-embedding-3-small --max-usd 2
+uv run python readiness/probe_openai.py --list --profile gate      # E2-E4, effort honoured (≈ $0.02)
+uv run python readiness/smoke.py                                   # every check below, cap --max-usd 3 (projected ≈ $1.4)
+uv run python readiness/smoke.py --only pull,burst                 # re-run some checks (with the checks they need)
 ```
 
-`readiness/smoke.py` covers L2 (live LightRAG extraction and source mapping), the D-017 build-quality check (authoring `id_coverage` and LightRAG ID coverage ≥ 0.95), H4 (changing tool sets, live), L4 (one keyword call per compile) and L5 (realized context). It stops if spend exceeds `--max-usd` and writes `cache/smoke/report.json`. Its `--dry` mode was verified offline on 2026-09-30: every step succeeds, spend $0.
+`readiness/smoke.py` (FX-8) runs, on the gate profile: `effort` (from the probe), `L2` (live LightRAG extraction and source mapping), `D017` (the build-quality check: authoring `id_coverage` and LightRAG ID coverage ≥ 0.95), `H4` (changing tool sets), `L4_L5` (one keyword call per compile; realized context against `max_total_tokens`), `APG`, `pull`, `recovery`, `burst`, `retrieval` and `orchestrator` (the real `run_gate` at SMOKE_SCALE through pilot, then a refused freeze). Before spending it prints each check's projected cost and refuses a total over `--max-usd`; before each check it stops if spend plus that check's projection would pass the cap. It writes `cache/smoke/report.json` and `report.md`, and exits non-zero when a check fails. Everything lives in `cache/smoke/`; nothing touches `config/`, `PROVENANCE.md` or `runs/`. `--dry` passes every check offline ($0, ~20 s; `tests/test_smoke.py`).
+
+Projected live cost on the gate profile (conservative priors, 2026-10-01): L2 $0.10 · D017 $0.04 · H4 $0.01 · L4_L5 $0.01 · APG $0.01 · pull $0.05 · recovery $0.01 · burst $0.10 · retrieval ~$0 · orchestrator $1.06 (build-dev $0.08, tune $0.13, anchor $0.52, of which $0.47 is the GraphRAG-Bench index, pilot $0.32) = **$1.38**. With the Luna anchor fallback (no gpt-4o-mini in the probe) it is $1.25. The smoke's anchor index is isolated, so the real gate builds its own.
