@@ -6,6 +6,7 @@ loop that created them.
 
 import asyncio
 from functools import lru_cache
+from pathlib import Path
 
 from ..config import ROOT, Config, embedding_cache
 from ..kb.baselines import FlatHybrid, Monolith, OracleContext, RandomUnits
@@ -27,8 +28,22 @@ def _load_path(path: str) -> World:
     return World.load(path)
 
 
+def s7_targets_path() -> Path:
+    import os
+
+    return Path(os.environ.get("APE_S7_TARGETS") or ROOT / "config" / "s7_targets.json")
+
+
+def _s7_targets_stamp() -> tuple:
+    """The targets file's identity, for S7's cache key: a rewritten file (a re-pilot) must not reuse an S7 arm."""
+    path = s7_targets_path()
+    st = path.stat() if path.is_file() else None
+    return (str(path), st.st_mtime_ns if st else None, st.st_size if st else None)
+
+
 def s7_target(cfg: Config, world: World) -> int:
-    """Per-cell S7 size, frozen from APG-s's realized median on the pilot (`config/s7_targets.json`).
+    """Per-cell S7 size, frozen from APG*'s realized median on the pilot: the targets file is
+    APE_S7_TARGETS (the gate orchestrator points it at its run's file), else `config/s7_targets.json`.
 
     Falls back to APE_S7_TARGET, then the context budget (dry runs only); RandomUnits caps it at
     half the corpus either way.
@@ -36,7 +51,7 @@ def s7_target(cfg: Config, world: World) -> int:
     import json
     import os
 
-    path = ROOT / "config" / "s7_targets.json"
+    path = s7_targets_path()
     cell = f"{world.family}-{world.level}"
     if path.exists():
         targets = json.loads(path.read_text())
@@ -81,6 +96,8 @@ def arm_provider(arm: str, cfg: Config | None = None):
 
     async def provide(world: World) -> DeliveryArm:
         key = (arm, world.id, str(cfg.worlds_dir), str(cfg.cache_dir), config_fingerprint(), id(asyncio.get_running_loop()))
+        if arm == "S7":
+            key += _s7_targets_stamp()
         lock = _locks.setdefault(key, asyncio.Lock())
         async with lock:
             if key not in _cache:

@@ -13,7 +13,7 @@ in one process (the gate's test phase):
     APE_LGR_BUDGET   LightRAG arms: the base of `lgr.adapter.query_params` (entity/relation/total caps)
 
 Each defaults to APE_CONTEXT_BUDGET, then 2000. APE_CONTEXT_BUDGET itself remains S7's fallback
-target (after config/s7_targets.json and APE_S7_TARGET).
+target (after the S7 targets file, APE_S7_TARGETS or config/s7_targets.json, and APE_S7_TARGET).
 """
 
 import os

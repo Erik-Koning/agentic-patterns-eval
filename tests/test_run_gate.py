@@ -13,6 +13,7 @@ from inspect_ai.model._model import init_model_roles
 
 from ape import run_gate
 from ape.agent import arms
+from ape.analysis.gate_stats import GATE_CELLS
 from ape.budget import BudgetError
 from ape.build import build
 from ape.config import ROOT, Config
@@ -35,15 +36,22 @@ def clean_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _manifests(run_dir) -> dict[str, dict]:
-    return {p: json.loads((run_dir / p / "manifest.json").read_text()) for p in PHASES}
+PART_A = ("preflight", "build-dev", "tune", "anchor")  # the phases before the pilot; a freeze would block re-tuning
 
 
-def _statuses(run_dir) -> dict[str, str]:
-    return {p: m["status"] for p, m in _manifests(run_dir).items()}
+def _manifests(run_dir, phases=PART_A) -> dict[str, dict]:
+    return {p: json.loads((run_dir / p / "manifest.json").read_text()) for p in phases}
 
 
-def test_offline_all_runs_every_phase_then_skips_forces_and_reruns_on_changed_inputs(clean_env):
+def _statuses(run_dir, phases=PART_A) -> dict[str, str]:
+    return {p: m["status"] for p, m in _manifests(run_dir, phases).items()}
+
+
+def _part_a(argv) -> int:
+    return max(main([p, *argv]) for p in PART_A)
+
+
+def test_offline_part_a_runs_every_phase_then_skips_forces_and_reruns_on_changed_inputs(clean_env):
     tmp = clean_env
     config = tmp / "config"
     shutil.copytree(ROOT / "config", config)
@@ -52,9 +60,9 @@ def test_offline_all_runs_every_phase_then_skips_forces_and_reruns_on_changed_in
     run_dir = tmp / "runs" / "t1"
 
     # 1. Every part-A phase completes, with its manifest.
-    assert main(["all", *argv]) == 0
+    assert _part_a(argv) == 0
     manifests = _manifests(run_dir)
-    assert {p: m["status"] for p, m in manifests.items()} == dict.fromkeys(PHASES, "done")
+    assert {p: m["status"] for p, m in manifests.items()} == dict.fromkeys(PART_A, "done")
     for phase, m in manifests.items():
         assert m["phase"] == phase and m["run_id"] == "t1" and m["offline"] is True and m["errors"] == []
         assert m["started"] <= m["finished"] and m["git"]["commit"] and isinstance(m["git"]["dirty"], bool)
@@ -95,10 +103,10 @@ def test_offline_all_runs_every_phase_then_skips_forces_and_reruns_on_changed_in
     assert "APE_WORLDS" not in os.environ and os.environ.get("OPENAI_API_KEY") != run_gate.OFFLINE_KEY, "the run's environment is restored"
 
     # 2. Re-running skips every complete phase.
-    assert main(["all", *argv]) == 0
+    assert _part_a(argv) == 0
     again = _manifests(run_dir)
-    assert {p: m["status"] for p, m in again.items()} == dict.fromkeys(PHASES, "skipped")
-    assert all(again[p]["finished"] == manifests[p]["finished"] and again[p]["outputs"] == manifests[p]["outputs"] for p in PHASES)
+    assert {p: m["status"] for p, m in again.items()} == dict.fromkeys(PART_A, "skipped")
+    assert all(again[p]["finished"] == manifests[p]["finished"] and again[p]["outputs"] == manifests[p]["outputs"] for p in PART_A)
 
     # 3. --force re-runs one phase (its candidate logs are reused) and leaves the others alone.
     assert main(["tune", "--force", *argv]) == 0
@@ -111,13 +119,13 @@ def test_offline_all_runs_every_phase_then_skips_forces_and_reruns_on_changed_in
     # 4. A changed input config re-runs exactly the phases that read it.
     grid = config / "tuning_grid.yaml"
     grid.write_text(grid.read_text() + "\n# edited after the first run\n")
-    assert main(["all", *argv]) == 0
+    assert _part_a(argv) == 0
     assert _statuses(run_dir) == {"preflight": "skipped", "build-dev": "skipped", "tune": "done", "anchor": "skipped"}
     assert read_manifest(GateRun("t1", offline=True, runs_root=tmp / "runs", config_dir=config), "tune")["inputs"]["config/tuning_grid.yaml"]["sha256"] != forced["tune"]["inputs"]["config/tuning_grid.yaml"]["sha256"]
 
     # 5. A complete phase whose recorded output is gone re-runs.
     (run_dir / "work" / "config" / "selected.yaml").unlink()
-    assert main(["all", *argv]) == 0
+    assert _part_a(argv) == 0
     assert _statuses(run_dir)["tune"] == "done" and (run_dir / "work" / "config" / "selected.yaml").is_file()
     assert any("missing" in w for w in read_manifest(GateRun("t1", offline=True, runs_root=tmp / "runs", config_dir=config), "tune")["warnings"])
 
@@ -251,3 +259,216 @@ def test_the_plan_is_the_one_source_of_dev_worlds_and_anchor_modes(clean_env):
     assert p.cell("gate.build.dev-id-only").spec["worlds"] == {c: n for c, n in gate.items() if c.startswith("F7-")}
     # PC1 compares hybrid with naive: the plan prices exactly the modes the anchor runs.
     assert tuple(p.cell("gate.anchor.runs").spec["modes"]) == run_gate.ANCHOR_MODES
+
+
+# --- FX-6b part 1: pilot and freeze ----------------------------------------------------------------
+
+
+def _body_labels(text: str) -> set[str]:
+    return {p["label"] for p in run_gate.prereg_placeholders(text) if p["kind"] == "PILOT"}
+
+
+def test_offline_all_pilots_calibrates_rehearses_the_freeze_and_then_refuses_changes(clean_env, monkeypatch):
+    tmp = clean_env
+    config = tmp / "config"
+    shutil.copytree(ROOT / "config", config)
+    argv = ["--offline", "--run-id", "t2", "--runs-dir", str(tmp / "runs"), "--config-dir", str(config)]
+    run = GateRun("t2", offline=True, runs_root=tmp / "runs", config_dir=config)
+    run_dir, out = run.dir, run.out_config_dir
+    real_provenance = (ROOT / "PROVENANCE.md").read_bytes()
+
+    # 1. A calibration that cannot land fails the pilot clearly, after recording every iteration; nothing frozen.
+    real_calibrate = run_gate.calibrate_caps
+
+    def never_lands(target, base, start, measure, **kw):
+        return real_calibrate(target, base, start, lambda it, knobs: {a: {"median": 5000.0, "per_cell": {}, "log_dir": None} for a in knobs}, **kw)
+
+    monkeypatch.setattr(run_gate, "calibrate_caps", never_lands)
+    with pytest.raises(PhaseError, match=r"budget calibration: \['LGR\*', 'S3s'\] did not land within ±25% of 300 tokens in 3 iterations"):
+        run_phases(run, "all")
+    assert read_manifest(run, "pilot")["status"] == "failed" and read_manifest(run, "freeze") is None
+    cal = json.loads((run_dir / "pilot" / "budget-cal" / "calibration.json").read_text())
+    assert all(len(cal["arms"][a]["iterations"]) == run_gate.CAL_MAX_ITERATIONS for a in ("LGR*", "S3s"))
+    assert not (out / "budget_calibration.yaml").exists() and not run.freeze_path.exists()
+    monkeypatch.setattr(run_gate, "calibrate_caps", real_calibrate)
+
+    # 2. The re-run resumes the pilot and completes every phase through a rehearsal freeze.
+    assert main(["all", *argv]) == 0
+    m = _manifests(run_dir, PHASES)
+    assert {p: x["status"] for p, x in m.items()} == {**dict.fromkeys(PART_A, "skipped"), "pilot": "done", "freeze": "done"}
+    assert m["pilot"]["upstream"] == {"tune": m["tune"]["fingerprint"]} and m["pilot"]["projected_usd"] > 0
+    assert m["pilot"]["offline_check"]["ledger_entries"] == 0 and m["freeze"]["offline_check"]["ledger_entries"] == 0
+    worlds = json.loads((run_dir / "pilot" / "worlds.json").read_text())["worlds"]
+    assert {(w["family"], w["level"]) for w in worlds} == {("F7", "10"), ("F7", "1000"), ("F3", "5"), ("F3", "60")}
+    assert all("-pilot-" in w["world_id"] for w in worlds)
+
+    # S7 targets: APG*'s median realized context per gate cell, read by S7 through APE_S7_TARGETS.
+    targets = json.loads((out / "s7_targets.json").read_text())
+    assert set(targets) == set(GATE_CELLS) and all(isinstance(t, int) and t > 0 for t in targets.values())
+    s7_index = json.loads(next((run_dir / "pilot" / "logs").glob("s7-*/runner_index.json")).read_text())
+    assert {e["task_args"]["arm"] for e in s7_index["tasks"].values()} == {"S7"} and len(s7_index["tasks"]) == 4
+
+    # Matched-budget calibration: both capped arms land in the window; APG fills.
+    calibration = yaml.safe_load((out / "budget_calibration.yaml").read_text())
+    assert calibration["context"] == 300 and calibration["arms"]["APG*"]["env"]["APE_APG_FILL"] == "1"
+    for arm in ("LGR*", "S3s"):
+        c = calibration["arms"][arm]
+        assert c["converged"] and 225 <= c["median"] <= 375 and 1 <= len(c["iterations"]) <= run_gate.CAL_MAX_ITERATIONS
+        assert set(c["env"]) <= set(run_gate.CAL_KNOBS[arm])
+
+    # Power re-simulation and the analyst's transcription sheet, keyed by every [PILOT: ...] label in the prereg.
+    power = json.loads((run_dir / "pilot" / "power.json").read_text())
+    assert set(power["scenarios"]) == {"pilot", "conservative"} and set(power["scenarios"]["pilot"]["power"]) == {"12", "16"}
+    assert power["variance_components"]["estimable"] is False, "one offline world per cell: the priors are kept"
+    pilot = json.loads((run_dir / "pilot" / "pilot.json").read_text())
+    assert _body_labels((ROOT / "GATE_PREREG.md").read_text()) <= set(pilot["prereg_items"])
+    assert (out / "budget_calibration_measured.yaml").is_file() and pilot["cost_model_entries"] > 0
+
+    # The rehearsal freeze: every body placeholder filled in a copy; the real prereg and PROVENANCE.md untouched.
+    freeze = json.loads(run.freeze_path.read_text())
+    n_markers = len(run_gate.prereg_placeholders((ROOT / "GATE_PREREG.md").read_text()))
+    assert freeze["rehearsal"] is True and len(freeze["placeholders_replaced"]) == n_markers > 0
+    assert run_gate.prereg_placeholders((run.work_dir / "GATE_PREREG.md").read_text()) == []
+    expected = {"GATE_PREREG.md", "GATE_PREREG.md (draft)", *(f"config/{n}" for n in run_gate.FROZEN_CONFIG + run_gate.FROZEN_OUTPUTS)}
+    assert set(freeze["files"]) == expected and all(f["sha256"] for f in freeze["files"].values())
+    assert freeze["apg_core"]["installed_commit"] == run_gate.APG_PIN and freeze["analysis_commit"]
+    assert "OFFLINE REHEARSAL" in (run.work_dir / "PROVENANCE.freeze.md").read_text()
+    assert (ROOT / "PROVENANCE.md").read_bytes() == real_provenance
+    assert run_gate.require_frozen(run)["run_id"] == "t2"
+
+    # 3. Re-running skips everything, freeze included.
+    assert main(["all", *argv]) == 0
+    assert _statuses(run_dir, PHASES) == dict.fromkeys(PHASES, "skipped")
+
+    # 4. A frozen run never re-tunes, re-pilots or re-freezes, even with --force; the manifests are left alone.
+    forced = GateRun("t2", offline=True, force=True, runs_root=tmp / "runs", config_dir=config)
+    for phase in ("tune", "pilot"):
+        with pytest.raises(PhaseError, match=rf"{phase}: run 't2' is frozen .* logged deviation"):
+            run_phases(forced, phase)
+        assert read_manifest(run, phase)["status"] == "skipped"
+    with pytest.raises(PhaseError, match="a run is frozen once"):
+        run_phases(forced, "freeze")
+    assert main(["tune", "--force", *argv]) == 1
+
+    # 5. Editing a frozen file trips the guard (naming the file) and blocks the phases that read it.
+    (out / "selected.yaml").write_text((out / "selected.yaml").read_text() + "\n# edited after the freeze\n")
+    with pytest.raises(PhaseError, match=r"config/selected.yaml \(.*selected.yaml\): changed"):
+        run_gate.require_frozen(run)
+    with pytest.raises(PhaseError, match="pilot: run 't2' is frozen"):
+        run_phases(run, "all")
+
+
+def test_s7_reads_its_targets_from_APE_S7_TARGETS(clean_env, monkeypatch):
+    from ape.worlds.generate import make_world
+
+    world = make_world("F7", "10", "dev", 0, 2)
+    targets = clean_env / "s7_targets.json"
+    targets.write_text(json.dumps({"F7-10": 123}))
+    monkeypatch.setenv("APE_S7_TARGETS", str(targets))
+    assert arms.s7_target(Config(), world) == 123
+    monkeypatch.setenv("APE_S7_TARGET", "77")
+    assert arms.s7_target(Config(), make_world("F3", "5", "dev", 0, 2)) == 77, "a cell the file lacks falls back"
+    monkeypatch.setenv("APE_S7_TARGETS", str(clean_env / "missing.json"))
+    assert arms.s7_target(Config(), world) == 77
+    monkeypatch.delenv("APE_S7_TARGET")
+    monkeypatch.setenv("APE_CONTEXT_BUDGET", "900")
+    assert arms.s7_target(Config(), world) == 900
+
+
+def test_budget_calibration_search_interpolates_across_lightrags_threshold_and_reports_failure():
+    def runner(fn):
+        calls = []
+
+        def measure(it, knobs):
+            calls.append(knobs)
+            return {a: {"median": fn(a, int(next(iter(k.values())))), "per_cell": {}, "log_dir": f"iter{it}"} for a, k in knobs.items()}
+
+        return measure, calls
+
+    # Linear: the first guess (target / start median) lands at once; explicit per-part caps scale with the budget.
+    measure, calls = runner(lambda a, b: 0.75 * b)
+    got = run_gate.calibrate_caps(300, {"S3s": {"APE_S3S_BUDGET": 1000}, "LGR*": {"APE_LGR_BUDGET": 2000, "APE_LGR_TOTAL_TOKENS": 6000}}, {"S3s": 750, "LGR*": 1500}, measure)
+    assert all(g["converged"] for g in got.values()) and len(calls) == 1
+    assert got["LGR*"]["env"] == {"APE_LGR_BUDGET": "400", "APE_LGR_TOTAL_TOKENS": "1200"}
+
+    # A threshold like LightRAG's (below some cap its context collapses): the ratio step undershoots to the
+    # collapsed side, and interpolation between the bracketing points lands.
+    measure, calls = runner(lambda a, b: 16.0 if b < 300 else 1.2 * b - 100)
+    got = run_gate.calibrate_caps(300, {"LGR*": {"APE_LGR_BUDGET": 2000}}, {"LGR*": 2300}, measure)["LGR*"]
+    assert [i["median"] for i in got["iterations"]][1] > 300, "the second step interpolates past the threshold"
+    assert got["converged"] and 225 <= got["median"] <= 375 and len(got["iterations"]) == 3
+
+    # Out of reach: not converged after the cap on iterations; the closest iteration is reported.
+    measure, calls = runner(lambda a, b: 900.0 if b > 10 else 5.0)
+    got = run_gate.calibrate_caps(300, {"S3s": {"APE_S3S_BUDGET": 1000}}, {"S3s": 900}, measure)["S3s"]
+    assert not got["converged"] and len(got["iterations"]) == run_gate.CAL_MAX_ITERATIONS and got["median"] in (900.0, 5.0)
+
+
+def _fake_done(run: GateRun, phase: str, **extra) -> None:
+    run_gate._write_json(run.manifest_path(phase), {"phase": phase, "status": "done", "fingerprint": f"fake-{phase}", "finished": "2026-10-01T00:00:00+00:00", "outputs": {}} | extra)
+
+
+def test_live_freeze_refuses_placeholders_and_uncommitted_changes_and_its_guard_names_changed_files(clean_env, monkeypatch):
+    tmp = clean_env
+    monkeypatch.setenv("APE_CACHE", str(tmp / "cache"))  # the spend check reads this ledger, not the real one
+    out = tmp / "out"
+    monkeypatch.setattr(GateRun, "out_config_dir", property(lambda self: out))  # live outputs, never config/
+    out.mkdir()
+    (out / "selected.yaml").write_text(yaml.safe_dump({k: {"arm": a, "env": {}, "candidate": "c"} for k, a in (("APG*", "APG-s"), ("LGR*", "LGR-s"), ("S3s", "S3s"))}))
+    (out / "s7_targets.json").write_text(json.dumps({c: 120 for c in GATE_CELLS}))
+    (out / "budget_calibration.yaml").write_text("context: 300\n")
+    prereg, provenance = tmp / "GATE_PREREG.md", tmp / "PROVENANCE.md"
+    shutil.copy(ROOT / "GATE_PREREG.md", prereg)
+    shutil.copy(ROOT / "PROVENANCE.md", provenance)
+    paths = {"runs_root": tmp / "runs", "prereg_path": prereg, "provenance_path": provenance}
+    run = GateRun("live-freeze", **paths)
+    run_gate._check_mode(run)
+    for phase in ("preflight", "tune", "pilot"):
+        _fake_done(run, phase)
+    _fake_done(run, "anchor", pc1_pass=True)
+    changes: list[str] = []
+    monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: list(changes))
+
+    # 1. The draft: every unfilled body item is listed with its line; nothing is frozen.
+    with pytest.raises(PhaseError, match=r"unfilled item\(s\)(.|\n)*\[PILOT: test worlds per cell\](.|\n)*\[USER: skeptic\]"):
+        run_phases(run, "freeze")
+    assert not run.freeze_path.exists() and read_manifest(run, "freeze")["status"] == "failed"
+
+    # 2. Filled (the header's own mentions of the markers do not count), but with uncommitted changes.
+    text = prereg.read_text()
+    start = run_gate.prereg_body_start(text)
+    prereg.write_text(text[:start] + run_gate.PLACEHOLDER_ITEM.sub("filled", text[start:]))
+    assert "[PILOT: …]" in prereg.read_text()[:start] and run_gate.prereg_placeholders(prereg.read_text()) == []
+    changes[:] = ["src/ape/analysis/gate_stats.py"]
+    with pytest.raises(PhaseError, match=r"uncommitted changes \['src/ape/analysis/gate_stats.py'\]"):
+        run_phases(run, "freeze")
+
+    # 3. Committed: frozen, recorded in PROVENANCE.md; the real one is untouched.
+    changes.clear()
+    real = (ROOT / "PROVENANCE.md").read_bytes()
+    assert run_phases(run, "freeze") == {"freeze": "done"}
+    freeze = run_gate.require_frozen(run)
+    assert freeze["rehearsal"] is False and freeze["files"]["GATE_PREREG.md"]["sha256"] == run_gate._sha256(prereg)
+    assert "Gate freeze: run `live-freeze`" in provenance.read_text() and (ROOT / "PROVENANCE.md").read_bytes() == real
+
+    # 4. The guard names a changed frozen file; tune, pilot and freeze refuse to run, --force or not.
+    (out / "s7_targets.json").write_text(json.dumps({c: 999 for c in GATE_CELLS}))
+    with pytest.raises(PhaseError, match=r"config/s7_targets.json \(.*\): changed"):
+        run_gate.require_frozen(run)
+    forced = GateRun("live-freeze", force=True, **paths)
+    for phase in ("tune", "pilot"):
+        with pytest.raises(PhaseError, match=f"{phase}: run 'live-freeze' is frozen"):
+            run_phases(forced, phase)
+    with pytest.raises(PhaseError, match=r"frozen once, and frozen file\(s\) changed since: config/s7_targets.json"):
+        run_phases(run, "freeze")
+    (out / "s7_targets.json").unlink()
+    with pytest.raises(PhaseError, match=r"config/s7_targets.json \(.*\): missing"):
+        run_gate.require_frozen(run)
+
+
+def test_the_real_prereg_marks_every_open_item_with_a_label():
+    text = (ROOT / "GATE_PREREG.md").read_text()
+    items = run_gate.prereg_placeholders(text)
+    assert items and all(p["label"] for p in items), "every body marker is a labelled [PILOT: ...] or [USER: ...]"
+    assert {p["label"] for p in items if p["kind"] == "USER"} == {"builder", "APG owner", "skeptic", "analyst"}
+    assert run_gate.PLACEHOLDER.search(text[: run_gate.prereg_body_start(text)]), "the header describes the markers"

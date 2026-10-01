@@ -1,13 +1,20 @@
 # Pre-registration: APG vs LightRAG suitability gate
 
-**Status: DRAFT.** Items marked `[PILOT]` are fixed from pilot data. Items marked `[USER]` need a decision (see `DECISIONS.md`).
+**Status: DRAFT.** Unfilled items in the body are marked `[PILOT: <label>]` or `[USER: <label>]`.
+- `[PILOT: …]` items are fixed from dev tuning and pilot data. `runs/<id>/pilot/pilot.json` gives each value under `prereg_items`, keyed by its label.
+- `[USER: …]` items need a decision (see `DECISIONS.md`).
+- This header is instructions and is never checked. From §1 on, any remaining marker blocks the freeze.
 
 **Freeze procedure:**
-1. Fill every `[PILOT]` and `[USER]` item.
-2. Record the git commit of the analysis code (`src/ape/analysis/gate_stats.py`) and the sha256 of this file in `PROVENANCE.md`.
-3. Only then generate the test split (`python -m ape.build --split test ...`).
+1. Run the gate through the pilot: `python -m ape.run_gate pilot --run-id <id>`.
+2. Fill every `[PILOT: …]` and `[USER: …]` item in the body, set the status to FROZEN, and commit.
+3. Run `python -m ape.run_gate freeze --run-id <id>`.
+   - It refuses while a marker remains in the body, a tracked file has uncommitted changes, or PC1 fails.
+   - It records in `runs/<id>/freeze.json` and `PROVENANCE.md`: the sha256 of this file, `config/selected.yaml`, `config/s7_targets.json`, `config/budget_calibration.yaml`, `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`; the commit; the analysis-code commit (`src/ape/analysis/`); and the APG pin.
+   - Commit `PROVENANCE.md` afterwards.
+4. Only then is the test split generated (`run_gate build-test`). It refuses unless every frozen file still matches its hash.
 
-After the freeze, any change to this file is a logged deviation (see the end of this document).
+After the freeze, any change to this file or to a frozen file is a logged deviation (see the end of this document). `tune` and `pilot` refuse to re-run on a frozen run.
 
 ## 1. Question
 
@@ -43,7 +50,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 | LGRo-* | diagnostic, optional | Oracle LightRAG custom KG |
 | S1 | diagnostic | Whole corpus in the system prompt |
 | S6 | diagnostic | Gold facts only |
-| S7 | diagnostic / placebo | Random chunks, sized per cell to APG*'s realized median context on the pilot (`config/s7_targets.json`), capped at 50% of the corpus |
+| S7 | diagnostic / placebo | Random chunks, sized per cell to APG*'s realized median context on the pilot (`config/s7_targets.json`: [PILOT: S7 targets per cell]), capped at 50% of the corpus |
 
 **Delivery modes** (EXPERIMENT_AUDIT B3; decided D-016).
 - **push:** the harness compiles context (per query or per step) and hands it to the agent.
@@ -61,7 +68,9 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 ## 4. Samples
 
 - **Splits.** `dev` (seeds 1000+) is for tuning, `pilot` (2000+) for calibration, `test` (3000+) for the gate. The test split is generated after the freeze and never inspected before the gate run.
-- **Size** (D-017): **16 worlds per cell × 12 tasks × 3 epochs** (768 tasks per gate arm; power ≈ 0.91 at Δ = 0) if the Luna builder passes the dev quality check; otherwise 12 worlds per cell (power ≈ 0.79).
+- **Size** (D-017): **[PILOT: test worlds per cell] worlds per cell × 12 tasks × 3 epochs.**
+  - Planned: 16 (768 tasks per gate arm; power ≈ 0.91 at Δ = 0 under the prior σ) if the Luna builder passes the dev quality check, otherwise 12 (power ≈ 0.79).
+  - If 12, set the `gate.build.test` and `gate.test.*` worlds in `config/run_plan.yaml` before the freeze.
   - Diagnostic arms (push), drawn from the same test worlds: S1, S5o and S6 at 100 tasks per cell × 2 epochs; the S7 placebo (in the GO rule) at 100 × 3.
   - F5 (PC2; reported separately, never pooled): APG*, LGR* and LightRAG naive × F5-1hop, F5-2hop × 100 tasks × 2 epochs.
   - Secondaries (§3, §6; never pooled), each with APG*, LGR* and S3s at 2 epochs:
@@ -70,16 +79,23 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
     - TE-all: F3-5 and F3-60, 100 tasks per cell.
     - Messy (dev diagnostic): F7-10 and F7-1000 on the 2 messy dev worlds, 50 tasks per cell.
   - These sizes are set by the cost model (FIX_PLAN FX-5, D-021; `config/run_plan.yaml`, `BUDGET.md`).
-  - Re-simulate with pilot σ_w and σ_g (`power/power_sim.py --mode ni`) before freezing `[PILOT]`.
+  - Pilot re-simulation of the NI power: [PILOT: pilot σ_w, σ_g and power].
+    - Source: `ape.run_gate pilot` → `runs/<id>/pilot/power.json`, via `power/power_sim.py`.
+    - σ: method-of-moments estimates from APG* against LGR* on the pilot, with the priors where they cannot be estimated.
 - **Models** (D-015; exact IDs confirmed at E3):
   - agent: GPT-6 Luna, effort high
   - kg (APG classify and LightRAG keywords): GPT-6 Luna, effort low
-  - build (APG authoring and LightRAG extraction): GPT-6 Luna, high, or GPT-6 Sol, medium, per D-017
+  - build (APG authoring and LightRAG extraction): [USER: builder] (D-017: GPT-6 Luna, high, if it passes the dev quality check; otherwise GPT-6 Sol, medium, which needs approval)
   - embeddings: text-embedding-3-small
 
 ## 5. Tuning (dev split only; equal budget)
 
 - **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.run_gate tune --run-id <id>`. Every configuration tried is logged in `runs/<id>/tune/tuning_log.jsonl`; a re-run archives the previous log beside it (`tuning_log.<UTC time>.jsonl`), and archived logs count toward PC6 and are reported. The selections go to `runs/<id>/tune/selected.yaml`, which the freeze hashes. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
+- **Selections** (`config/selected.yaml`, fixed at freeze): APG* = [PILOT: APG* selection]; LGR* = [PILOT: LGR* selection]; S3s = [PILOT: S3s selection].
+- **Roles** (D-018, O-3):
+  - APG owner: [USER: APG owner]
+  - skeptic (not on the APG side; owns the LightRAG and S3s candidates): [USER: skeptic]
+  - analyst (owns this freeze): [USER: analyst]
 - **LightRAG** (tuned by the skeptic): mode ∈ {local, global, hybrid, mix, naive}, per-query vs per-step, `top_k`, `chunk_top_k`, `max_entity_tokens`, `max_relation_tokens`, `max_total_tokens`. Rerank is off (D-004).
 - **APG** (tuned by the APG side): per-query vs per-step, `shortlistK` ∈ {12, 24, 48} (`APE_APG_SHORTLIST_K`), `minConfidence` (`APE_APG_MIN_CONFIDENCE`), routable vs non-routable categories, `maxPromptTokens`. The authoring prompt may be revised on dev only.
 - **S3s** (tuned by the skeptic): token budget and fusion depth.
@@ -87,7 +103,11 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 ## 6. Fairness rules
 
 1. Both KGs consume the identical shared chunk set (`worlds/render.py`).
-2. Context size (EXPERIMENT_AUDIT B1). The primary comparison uses each system's dev-selected configuration ("best foot forward"), with realized context tokens (tiktoken `o200k_base`) and cost reported per arm. APG natively delivers ~100-300 tokens where LightRAG and flat retrieval deliver thousands, so forcing parity would change what APG is. A **matched-budget secondary analysis** runs APG*, LGR* and S3s at one budget, ≈300 realized tokens (the ≈2,000 budget was dropped for cost, D-021): APG fills up with further shortlisted nodes (`APE_APG_FILL=1`, larger `shortlistK`); LightRAG and S3s are capped (LightRAG's per-part budgets calibrated on dev so realized tokens land within ±25% of the budget).
+2. Context size (EXPERIMENT_AUDIT B1). The primary comparison uses each system's dev-selected configuration ("best foot forward"), with realized context tokens (tiktoken `o200k_base`) and cost reported per arm. APG natively delivers ~100-300 tokens where LightRAG and flat retrieval deliver thousands, so forcing parity would change what APG is. A **matched-budget secondary analysis** runs APG*, LGR* and S3s at one budget, ≈300 realized tokens (the ≈2,000 budget was dropped for cost, D-021). Its settings come from `ape.run_gate pilot` → `config/budget_calibration.yaml`:
+   - APG fills up with further shortlisted nodes (`APE_APG_FILL=1`, larger `shortlistK`): [PILOT: APG* matched-budget settings].
+   - LightRAG and S3s are capped. Their caps are calibrated on the pilot split so each arm's median realized context lands within ±25% of the budget.
+   - LGR* caps: [PILOT: LGR* matched-budget caps].
+   - S3s cap: [PILOT: S3s matched-budget cap].
 3. Caching:
    - Query-time LLM caches are off for both KGs.
    - Inspect output caching is off for every arm.
