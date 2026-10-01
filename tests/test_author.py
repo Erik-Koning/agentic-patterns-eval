@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import re
 
 import pytest
 from inspect_ai import eval as inspect_eval
@@ -14,32 +13,8 @@ from ape.build import build
 from ape.config import Config
 from ape.llm.mock_agent import mock_agent, mock_kg
 from ape.tasks.gate import gate
+from ape.llm.fake import perfect_author
 from ape.worlds.spec import World
-
-ID = re.compile(r"(?:Policy|Exception|Procedure|Tool) ([A-Za-z0-9_-]+?)(?=[\s.(,:]|$)")
-
-
-async def perfect_author(system: str, user: str) -> dict:
-    excerpt = user.split("Excerpt:\n", 1)[1].split("\n", 1)[1]  # drop the "[Document title]" header line
-    units = []
-    for para in excerpt.split("\n\n"):
-        if not para.strip():
-            continue
-        ids = ID.findall(para)
-        tools = re.findall(r"call (\w+)", para)
-        units.append(
-            {
-                "declares": ids[:1],
-                "title": " ".join(para.split()[:14]),
-                "description": para[:120],
-                "knowledge": para,
-                "references": ids[1:],
-                "tools": tools,
-            }
-        )
-    units.append({"declares": [], "title": "empty", "description": "", "knowledge": "  ", "references": [], "tools": []})
-    return {"units": units}
-
 
 @pytest.fixture
 def offline_env(tmp_path, monkeypatch):

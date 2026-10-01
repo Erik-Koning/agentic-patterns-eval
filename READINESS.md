@@ -14,7 +14,7 @@ Last updated: 2026-09-30.
 | E2 (B) | `OPENAI_API_KEY` in gitignored `.env`; `models.list()` succeeds | ❌ | 2026-09-30: the shell's `OPENAI_KEY` is **rejected by OpenAI (401 invalid_api_key)**, meaning it was revoked or has expired. `.env` (gitignored, mode 600) still holds that rejected key; replace it with a new one (O-1). No spend occurred. | user |
 | E3 (B) | Model IDs chosen per role (agent, kg, build, embeddings); honoured params probed | ⛔ | Blocked on E2. Probe script: `readiness/probe_openai.py` (to be written). | — |
 | E4 | Rate-limit tier / TPM fits the concurrency plan | ⛔ | Blocked on E2. | — |
-| E5 (B) | Price table (source URL + date) in Inspect's model-cost config | ⛔ | Blocked on E3. | — |
+| E5 (B) | Price table (source URL + date) in Inspect's model-cost config | ⚠️ | `config/model_costs.yaml` filled with listed GPT-6 and embedding prices (2026-09-30). Cached-input prices are set equal to input (conservative) until confirmed. Model keys are confirmed at E3. | — |
 
 ## APG
 
@@ -104,3 +104,15 @@ Each API was checked two ways: introspected in the installed **inspect-ai 0.3.27
 | `mockllm/model` with `custom_outputs` callable | dry-run tests | ✅ | provider list: https://inspect.aisi.org.uk/providers.html.md (mockllm not named there; behaviour verified by tests) |
 | Caching (off for every arm) | gate runs | — (default off) | https://inspect.aisi.org.uk/caching.html.md |
 | Batch mode (not used for agent loops) | — | — | https://inspect.aisi.org.uk/models-batch.html.md |
+
+---
+
+## One-command live readiness (after O-1)
+
+```
+uv run python readiness/probe_openai.py --list
+uv run python readiness/probe_openai.py --agent gpt-6-luna --kg gpt-6-luna --build gpt-6-luna --embed text-embedding-3-small
+uv run python readiness/smoke.py --agent openai/gpt-6-luna --kg openai/gpt-6-luna --build gpt-6-luna --embed text-embedding-3-small --max-usd 2
+```
+
+`readiness/smoke.py` covers L2 (live LightRAG extraction and source mapping), the D-017 build-quality check (authoring `id_coverage` and LightRAG ID coverage ≥ 0.95), H4 (changing tool sets, live), L4 (one keyword call per compile) and L5 (realized context). It stops if spend exceeds `--max-usd` and writes `cache/smoke/report.json`. Its `--dry` mode was verified offline on 2026-09-30: every step succeeds, spend $0.

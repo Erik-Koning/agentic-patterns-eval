@@ -1,6 +1,7 @@
 """Offline stand-ins used by dry runs and tests (never by gate runs)."""
 
 import hashlib
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -30,3 +31,28 @@ class FakeEmbeddingsClient:
             data=[SimpleNamespace(embedding=bow_vector(t)) for t in input],
             usage=SimpleNamespace(prompt_tokens=len(input)),
         )
+
+
+_ID = re.compile(r"(?:Policy|Exception|Procedure|Tool) ([A-Za-z0-9_-]+?)(?=[\s.(,:]|$)")
+
+
+async def perfect_author(system: str, user: str) -> dict:
+    """Scripted APG author: one unit per paragraph, IDs found by regex (the ceiling an LLM author can reach)."""
+    excerpt = user.split("Excerpt:\n", 1)[1].split("\n", 1)[1]  # drop the "[Document title]" header line
+    units = []
+    for para in excerpt.split("\n\n"):
+        if not para.strip():
+            continue
+        ids = _ID.findall(para)
+        units.append(
+            {
+                "declares": ids[:1],
+                "title": " ".join(para.split()[:14]),
+                "description": para[:120],
+                "knowledge": para,
+                "references": ids[1:],
+                "tools": re.findall(r"call (\w+)", para),
+            }
+        )
+    units.append({"declares": [], "title": "empty", "description": "", "knowledge": "  ", "references": [], "tools": []})
+    return {"units": units}
