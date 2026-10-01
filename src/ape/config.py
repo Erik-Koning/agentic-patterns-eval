@@ -10,7 +10,13 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parents[2]
+
+# Inspect loads .env for evals; standalone build CLIs (APG authoring, LightRAG extraction) need it too.
+# Never overrides variables already set in the environment.
+load_dotenv(ROOT / ".env", override=False)
 
 
 @dataclass(frozen=True)

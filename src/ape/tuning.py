@@ -5,7 +5,8 @@ Each system's tuner declares its candidate configurations in advance in
 The runner refuses more than `budget_per_system` candidates. It runs every candidate on
 the same dev cells and appends each result to `cache/tuning_log.jsonl`. Selection rule
 (pre-registered): highest mean dev success; candidates within `tie_pp` of the best go to
-the cheaper one.
+the cheaper one. Cost is Inspect's, priced from `config/model_costs.yaml`; an unpriced call
+fails the candidate rather than reading as $0 and winning the tie-break (mockllm is exempt).
 
     uv run python -m ape.tuning --system LightRAG [--profile gate]   # agent + kg models from config/models.yaml
 """
@@ -50,9 +51,19 @@ def candidates(grid: dict, system: str) -> list[dict]:
     return cands
 
 
+def _priced_cost(log, label: str) -> float:
+    """Inspect $ for one log. A non-mock call without a price would read as $0 and break the
+    cost tie-break, so it is an error; mockllm (offline tests) has no price and counts as $0."""
+    usage = [(m, u) for s in log.samples for m, u in (s.model_usage or {}).items()]
+    if unpriced := sorted({m for m, u in usage if u.total_cost is None and not m.startswith("mockllm/")}):
+        raise RuntimeError(f"{label}: no Inspect cost for {unpriced}; price them in config/model_costs.yaml")
+    return sum(u.total_cost or 0.0 for _, u in usage)
+
+
 def run_candidate(cand: dict, cells: list[str], model, model_roles: dict, limit_worlds: int | None, epochs: int, log_dir: str) -> dict:
     from inspect_ai import eval as inspect_eval
 
+    from .models import eval_cost_kwargs
     from .tasks.gate import gate
 
     per_cell, cost, files = {}, 0.0, []
@@ -66,12 +77,13 @@ def run_candidate(cand: dict, cells: list[str], model, model_roles: dict, limit_
                 epochs=epochs,
                 log_dir=log_dir,
                 display="none",
+                **eval_cost_kwargs(),
             )[0]
             if log.status != "success":
                 raise RuntimeError(f"{cand['id']} {cell}: {log.error}")
             scores = [s.scores["task_success"].value == "C" for s in log.samples]
             per_cell[cell] = sum(scores) / len(scores)
-            cost += sum((u.total_cost or 0.0) for s in log.samples for u in (s.model_usage or {}).values())
+            cost += _priced_cost(log, f"{cand['id']} {cell}")
             files.append(log.location)
     return {"per_cell": per_cell, "mean_success": sum(per_cell.values()) / len(per_cell), "cost_usd": cost, "log_files": files}
 
@@ -101,7 +113,7 @@ def tune(system: str, model, model_roles: dict, limit_worlds: int | None = None,
 
 
 def main() -> None:
-    from .models import agent_model, embedding_model, load_profile, role_models
+    from .models import agent_model, embedding_model, load_profile, require_preflight, role_models
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--system", required=True)
@@ -113,6 +125,7 @@ def main() -> None:
     args = ap.parse_args()
     profile = load_profile(args.profile)
     os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model(profile))
+    require_preflight(profile, live=True, overrides={"agent": args.model, "kg": args.kg})
     agent, roles = agent_model(profile, model=args.model), role_models(profile, ("kg",), model=args.kg)
     chosen = tune(args.system, agent, roles, args.limit_worlds, args.epochs)
     print(json.dumps({"selected": chosen["candidate"], "mean_success": chosen["mean_success"], "cost_usd": chosen["cost_usd"]}, indent=1))

@@ -4,8 +4,10 @@
     uv run python readiness/smoke.py --profile gate --agent openai/gpt-6-sol   # a flag swaps a role's model, keeps its effort
     uv run python readiness/smoke.py --dry      # offline wiring check (mock models, fake embeddings)
 
-Everything runs in an isolated scratch area (`cache/smoke/`) on tiny worlds. The script stops
-before the next step if ledger-plus-Inspect spend exceeds `--max-usd`. It writes
+Everything runs in an isolated scratch area (`cache/smoke/`) on tiny worlds. A preflight
+(`ape.models.require_preflight`) first checks that every model is priced and, for live runs, that
+OPENAI_API_KEY is set. The script stops before the next step if ledger-plus-Inspect spend exceeds
+`--max-usd`; a live call without a price stops it too, rather than counting as $0. It writes
 `cache/smoke/report.json`.
 """
 
@@ -30,22 +32,39 @@ def _isolate(dry: bool) -> None:
         os.environ["APE_EMBEDDINGS"] = "fake"
 
 
-def _spend(logs) -> float:
+def _inspect_spend(logs, dry: bool) -> float:
+    """Inspect-metered $ (agent and role calls), priced via `eval_cost_kwargs()`. An unpriced call is an
+    error on a live run, since counting it as $0 would blind the --max-usd cap. Dry runs use mockllm,
+    which has no price: those count as $0, with a note."""
+    unpriced = sorted({m for log in logs for s in (log.samples or []) for m, u in (s.model_usage or {}).items() if u.total_cost is None})
+    if unpriced and not dry:
+        raise SystemExit(f"no Inspect cost for {unpriced}; refusing to count it as $0 (is the model in config/model_costs.yaml?)")
+    if unpriced:
+        print(f"note: --dry: no price for {unpriced}; counted as $0")
+    return sum(u.total_cost or 0.0 for log in logs for s in (log.samples or []) for u in (s.model_usage or {}).values())
+
+
+def _ledger_spend() -> float:
+    """Ledger-metered $ (build and embedding calls outside Inspect) in this scratch area."""
     from ape.analysis.cost import ledger_frame, load_prices
     from ape.config import Config
     from ape.llm.ledger import Ledger
 
-    inspect_usd = sum((u.total_cost or 0.0) for log in logs for s in (log.samples or []) for u in (s.model_usage or {}).values())
     led = Ledger(Config().ledger_path)
+    if not led.read():
+        return 0.0
     try:
-        ledger_usd = float(ledger_frame(led, load_prices())["usd"].sum()) if led.read() else 0.0
-    except KeyError:
-        ledger_usd = float("nan")
-    return inspect_usd + ledger_usd
+        return float(ledger_frame(led, load_prices())["usd"].sum())
+    except KeyError as e:  # an unpriced build/embedding model: never let it read as $0 (or NaN, which passes the cap)
+        raise SystemExit(f"ledger spend cannot be priced: {e}") from e
 
 
-def _guard(report: dict, logs: list, max_usd: float) -> None:
-    report["spend_usd"] = _spend(logs)
+def _spend(logs, dry: bool = False) -> float:
+    return _inspect_spend(logs, dry) + _ledger_spend()
+
+
+def _guard(report: dict, logs: list, max_usd: float, dry: bool = False) -> None:
+    report["spend_usd"] = _spend(logs, dry)
     if report["spend_usd"] > max_usd:
         raise SystemExit(f"spend {report['spend_usd']:.4f} exceeds --max-usd {max_usd}; stopping")
 
@@ -73,7 +92,7 @@ def main() -> None:
     from ape.config import Config
     from ape.lgr.build import build_index
     from ape.llm.ledger import Ledger
-    from ape.models import agent_model, build_settings, embedding_model, load_profile, role_models
+    from ape.models import agent_model, build_settings, embedding_model, eval_cost_kwargs, load_profile, require_preflight, role_models
     from ape.tasks.gate import gate
     from ape.worlds.render import chunk_world
     from ape.worlds.spec import World
@@ -82,6 +101,8 @@ def main() -> None:
     if args.embed:
         os.environ["APE_EMBEDDING_MODEL"] = args.embed
     os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model(profile))
+    # Dry runs swap in mockllm agent/kg models, so the overrides only count live.
+    require_preflight(profile, live=not args.dry, overrides={} if args.dry else {"agent": args.agent, "kg": args.kg})
     build_model, build_effort = build_settings(profile)
     report: dict = {"dry": args.dry, "models": {"profile": profile.name, "roles": profile.summary(), "overrides": vars(args), "build": [build_model, build_effort]}}
     logs: list = []
@@ -112,7 +133,7 @@ def main() -> None:
         "index_hash": manifest["index_hash"][:12],
         "chunks": len(chunk_ids),
     }
-    _guard(report, logs, args.max_usd)
+    _guard(report, logs, args.max_usd, args.dry)
 
     # D-017: authoring quality with the build model (perfect-author fake when dry).
     if args.dry:
@@ -121,12 +142,14 @@ def main() -> None:
         author = build_llm_author(build_model, Ledger(cfg.ledger_path), world.id, build_effort)
     report["D017_authoring"] = asyncio.run(author_world(world, cfg, author))
     report["D017_pass"] = report["D017_authoring"]["id_coverage"] >= SPEC_THRESHOLD and report["L2"]["policy_ids_as_entities"] >= SPEC_THRESHOLD
-    _guard(report, logs, args.max_usd)
+    _guard(report, logs, args.max_usd, args.dry)
 
     # H4 (changing tool sets) + L4 (one keyword call per compile) + L5 (realized context) on live models.
     runs = {"H4_S3s_F3": dict(family="F3", level="5", arm="S3s"), "L4_L5_LGR_F7": dict(family="F7", level="100", arm="LGR-s" if not args.dry else "LGRo-s"), "APG_F7": dict(family="F7", level="100", arm="APG-s")}
     for name, kw in runs.items():
-        log = inspect_eval(gate(split="dev", **kw), model=agent, model_roles=roles, log_dir=str(OUT / "logs"), display="none", message_limit=40)[0]
+        log = inspect_eval(
+            gate(split="dev", **kw), model=agent, model_roles=roles, log_dir=str(OUT / "logs"), display="none", message_limit=40, **eval_cost_kwargs()
+        )[0]
         logs.append(log)
         recs = [r for s in log.samples for r in s.store.get("compile_log", [])]
         kg_calls = sum(1 for s in log.samples for e in s.events if e.event == "model" and getattr(e, "role", None) == "kg")
@@ -139,7 +162,7 @@ def main() -> None:
             "ctx_tokens": [r["tokens"] for r in recs],
             "exposed_tools_per_step": [st["exposed_tools"] for s in log.samples for st in s.store.get("step_log", [])][:6],
         }
-        _guard(report, logs, args.max_usd)
+        _guard(report, logs, args.max_usd, args.dry)
 
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "report.json").write_text(json.dumps(report, indent=1, default=str))

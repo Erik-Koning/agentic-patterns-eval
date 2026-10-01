@@ -21,6 +21,8 @@ context, which eats the 4000-token KG budgets that the paper's numbers were prod
 
 `build` and `run` take their models and reasoning efforts from `config/models.yaml`
 (`ape.models`): the build role for extraction, the agent role for answers, the judge role for ACC.
+Both first run `ape.models.require_preflight` (every model priced, OPENAI_API_KEY set), and `run`
+prices its Inspect calls from `config/model_costs.yaml`.
 """
 
 import argparse
@@ -43,7 +45,7 @@ from ..lgr.common import embedding_dim, embedding_func, index_dir, read_manifest
 from ..llm.build_client import BuildLlm
 from ..llm.embeddings import EmbeddingCache
 from ..llm.ledger import Ledger
-from ..models import agent_model, build_settings, embedding_model, role_models
+from ..models import agent_model, build_settings, embedding_model, eval_cost_kwargs, require_preflight, role_models
 
 ANCHOR_ID = "graphragbench-medical"
 QUESTION_TYPES = ("Fact Retrieval", "Complex Reasoning", "Contextual Summarize", "Creative Generation")  # labels as in the data
@@ -241,6 +243,7 @@ def main() -> None:
         # Default to the paper-faithful "anchor" profile (gpt-4o-mini); "anchor_luna" if it is retired (E3).
         os.environ["APE_MODEL_PROFILE"] = args.profile or os.environ.get("APE_MODEL_PROFILE") or "anchor"
         os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model())
+        require_preflight(live=True)
     cfg = Config()
     if args.cmd == "pc1":
         result = pc1_from_logs(read_eval_log(args.graph_log), read_eval_log(args.naive_log), args.tolerance)
@@ -250,7 +253,7 @@ def main() -> None:
         from ..tasks.anchor_graphragbench import graphragbench_anchor
 
         task = graphragbench_anchor(mode=args.mode, n_per_type=args.n_per_type, data=args.data)
-        log = inspect_eval(task, model=agent_model(), model_roles=role_models(roles=("judge",)), log_dir=args.log_dir)[0]
+        log = inspect_eval(task, model=agent_model(), model_roles=role_models(roles=("judge",)), log_dir=args.log_dir, **eval_cost_kwargs())[0]
         result = {"status": log.status, "log": log.location, "by_type": results_by_type(log) if log.status == "success" else None}
     else:
         model, effort = build_settings()

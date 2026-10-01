@@ -42,7 +42,7 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
             usage = {role: u for role, u in (s.role_usage or {}).items()}
             missing = [m for m, u in (s.model_usage or {}).items() if u.total_cost is None]
             if missing and require_cost:
-                raise ValueError(f"{f}: no cost for {missing}; run with --model-cost-config config/model_costs.yaml")
+                raise ValueError(f"{f}: no cost for {missing}; run eval() with **ape.models.eval_cost_kwargs() (config/model_costs.yaml)")
             rows.append(
                 {
                     "arm": arm,

@@ -3,7 +3,11 @@
 # on the day of the run and record URL + date in PROVENANCE.md.
 # Model keys must match the IDs Inspect reports (confirmed by readiness/probe_openai.py, E3).
 # input_cache_read is set equal to input until the cached-input price is confirmed (conservative: never understates cost).
-# Pass with:  inspect eval ... --model-cost-config config/model_costs.yaml
+# Every eval entry point applies it with `ape.models.eval_cost_kwargs()`, and the build/embedding ledger is priced
+# from it by `ape.analysis.cost.load_prices()` (bare model names). `ape.models.preflight()` checks before a run that
+# every model of the profile has an entry here. Inspect's bare `--model-cost-config` flag rejects the embedding entry
+# (not in its model database); `eval_cost_kwargs()` registers such models first.
+# Inspect needs all four fields on every entry.
 "openai/gpt-6-luna":
   input: 0.10
   output: 0.50
@@ -19,6 +23,11 @@
   output: 50.00
   input_cache_write: 10.00
   input_cache_read: 10.00  # TODO(E5)
+"openai/gpt-4o-mini":       # GraphRAG-Bench anchor (profile "anchor"). TODO(E5): confirm; may be retired
+  input: 0.15
+  output: 0.60
+  input_cache_write: 0.15
+  input_cache_read: 0.15   # = input (conservative)
 "openai/text-embedding-3-small":
   input: 0.02
   output: 0.0

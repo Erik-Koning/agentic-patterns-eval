@@ -9,19 +9,28 @@ judge's temperature and seed) merge over that base, so they keep the role's effo
 Inspect records the agent's config in `eval.model_generate_config` and each role's in
 `eval.model_roles[role].config`, so every Inspect role's effort is in the eval log.
 Build calls run outside Inspect: their effort goes in the ledger context and the index manifest.
+
+Prices (FX-2) come from one table, `config/model_costs.yaml`: every eval call takes
+`**eval_cost_kwargs()` so Inspect fills `ModelUsage.total_cost` for the agent and every role,
+and `ape.analysis.cost.load_prices()` prices the ledger (build and embedding calls) from the
+same file. `preflight()` checks, before any spend, that every model a profile calls is priced.
 """
 
 import os
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, cast, get_args
 
 import yaml
-from inspect_ai.model import GenerateConfig, Model, get_model
+from inspect_ai.model import GenerateConfig, Model, ModelCost, ModelInfo, get_model, get_model_info, set_model_info
 
 from .config import ROOT
 
 MODELS_PATH = ROOT / "config" / "models.yaml"
+COSTS_PATH = ROOT / "config" / "model_costs.yaml"
+ENV_PATH = ROOT / ".env"
+COST_FIELDS = tuple(ModelCost.model_fields)  # input, output, input_cache_write, input_cache_read
 DEFAULT_PROFILE = "gate"
 Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 INSPECT_ROLES = ("agent", "kg", "judge")
@@ -138,3 +147,108 @@ def build_settings(profile: Profile | None = None, fallback: bool | None = None)
 
 def embedding_model(profile: Profile | None = None) -> str:
     return (profile or load_profile()).role("embeddings").model
+
+
+# --- Prices and preflight (FX-2) ---------------------------------------------------------------
+
+
+class PreflightError(RuntimeError):
+    """A run would spend money it cannot account for, or cannot start; the message lists every problem."""
+
+
+def load_costs(path: Path = COSTS_PATH) -> dict[str, dict]:
+    """The price table as Inspect reads it: {"provider/model": {input, output, input_cache_write, input_cache_read}},
+    USD per 1M tokens. The ledger's view of the same file (bare model names) is `ape.analysis.cost.load_prices`."""
+    raw = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        raise ValueError(f"{path}: expected a mapping of model -> {{{', '.join(COST_FIELDS)}}}")
+    return raw
+
+
+def eval_cost_kwargs(path: Path = COSTS_PATH) -> dict[str, str]:
+    """`eval()` kwargs that price every Inspect call (agent and roles) from the one price table.
+
+    Inspect's cost config only re-prices models in its own database and raises on any other entry,
+    such as the embedding model (never called through Inspect) or `mockllm` priced in a test. Those
+    are registered first, so the whole file applies. Models Inspect knows keep their database info.
+    """
+    for name, entry in load_costs(path).items():
+        if get_model_info(name) is None:
+            set_model_info(name, ModelInfo(cost=ModelCost(**entry)))
+    return {"model_cost_config": str(path)}
+
+
+def _is_price(v: Any) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and v >= 0
+
+
+def _called_models(p: Profile, overrides: Mapping[str, str | None]) -> list[tuple[str, str, bool]]:
+    """(label, model, is_inspect_role) for every model a run with this profile may call: the profile's
+    roles, CLI overrides, and the APE_BUILD_MODEL / APE_EMBEDDING_MODEL environment overrides."""
+    called = [(role, spec.model, role in INSPECT_ROLES) for role, spec in p.roles.items()]
+    called += [(f"{role} (override)", m, role in INSPECT_ROLES) for role, m in overrides.items() if m]
+    for var, role in (("APE_BUILD_MODEL", "build"), ("APE_EMBEDDING_MODEL", "embeddings")):
+        if m := os.environ.get(var):
+            called.append((f"{role} ({var})", m, False))
+    return called
+
+
+def _api_key_present(env_path: Path) -> bool:
+    if os.environ.get("OPENAI_API_KEY"):
+        return True
+    if env_path.is_file():
+        from dotenv import dotenv_values
+
+        return bool(dotenv_values(env_path).get("OPENAI_API_KEY"))
+    return False
+
+
+def preflight(
+    profile: Profile | str | None = None,
+    live: bool = False,
+    *,
+    overrides: Mapping[str, str | None] | None = None,
+    costs_path: Path = COSTS_PATH,
+    env_path: Path = ENV_PATH,
+) -> list[str]:
+    """Problems that should stop a run before it spends money; an empty list means go.
+
+    - the price file parses, and every entry has numeric `COST_FIELDS` (Inspect needs all four);
+    - every Inspect role model (agent, kg, judge) is priced under its full "provider/model" key;
+    - the build, build_fallback and embedding models are priced under their bare names, as the ledger
+      looks them up (`load_prices`);
+    - `overrides` (role -> model, from CLI flags) and the build/embedding env overrides are checked the same way;
+    - live runs only: OPENAI_API_KEY is set in the environment or in `env_path` (never printed).
+    `mockllm` models are exempt from the price requirement unless the file prices them.
+    """
+    try:
+        p = profile if isinstance(profile, Profile) else load_profile(profile)
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        return [f"model profile: {e}"]
+    problems: list[str] = []
+    try:
+        costs = load_costs(costs_path)
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        costs = None
+        problems.append(f"price file {costs_path} does not parse: {e}")
+    if costs is not None:
+        for name, entry in costs.items():
+            if bad := [f for f in COST_FIELDS if not _is_price(entry.get(f))]:
+                problems.append(f"price for {name!r} in {costs_path}: {bad} must be non-negative numbers")
+        bare = {k.split("/", 1)[-1]: v for k, v in costs.items()}  # as ape.analysis.cost.load_prices keys them
+        for label, model, inspect_role in _called_models(p, overrides or {}):
+            key, table = (model, costs) if inspect_role else (model.split("/", 1)[-1], bare)
+            if key in table or model.startswith("mockllm/"):
+                continue
+            where = 'its full "provider/model" key' if inspect_role else "its bare model name (ledger pricing)"
+            problems.append(f"profile {p.name!r} role {label}: no price for {key!r} in {costs_path} (under {where})")
+    if live and not _api_key_present(env_path):
+        problems.append(f"OPENAI_API_KEY is not set in the environment or in {env_path}")
+    return problems
+
+
+def require_preflight(profile: Profile | str | None = None, live: bool = False, **kwargs: Any) -> None:
+    """`preflight()`, raising `PreflightError` that lists every problem."""
+    if problems := preflight(profile, live, **kwargs):
+        name = profile.name if isinstance(profile, Profile) else profile or os.environ.get("APE_MODEL_PROFILE") or DEFAULT_PROFILE
+        raise PreflightError(f"preflight failed for model profile {name!r}:\n" + "\n".join(f"  - {x}" for x in problems))
