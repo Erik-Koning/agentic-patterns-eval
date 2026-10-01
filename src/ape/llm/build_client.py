@@ -1,5 +1,9 @@
 """Build-time OpenAI chat client (APG authoring, LightRAG extraction). Runs outside Inspect,
 so every call is metered in the ledger under role "build".
+
+`reasoning_effort` comes from the model profile (`ape.models.build_settings`, D-015). It is
+sent on every call and recorded in each ledger entry's context; None sends nothing, for
+models that take no effort.
 """
 
 import json
@@ -9,10 +13,11 @@ from .ledger import Ledger, LedgerEntry
 
 
 class BuildLlm:
-    def __init__(self, model: str, ledger: Ledger, context: dict, client: Any = None):
+    def __init__(self, model: str, ledger: Ledger, context: dict, client: Any = None, reasoning_effort: str | None = None):
         self.model = model
         self.ledger = ledger
-        self.context = context
+        self.reasoning_effort = reasoning_effort
+        self.context = {**context, "reasoning_effort": reasoning_effort} if reasoning_effort else context
         self._client = client
 
     def _client_(self):
@@ -23,6 +28,8 @@ class BuildLlm:
         return self._client
 
     async def chat(self, messages: list[dict], **kwargs) -> str:
+        if self.reasoning_effort:
+            kwargs.setdefault("reasoning_effort", self.reasoning_effort)
         resp = await self._client_().chat.completions.create(model=self.model, messages=messages, **kwargs)
         u = resp.usage
         self.ledger.append(

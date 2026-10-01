@@ -12,13 +12,12 @@ plays the author: it sees only the rendered chunks (never the world spec).
 4. `toolAllowlist` goes on leaves only (gap G2).
 5. The raw document is validated once (semantic + JSON-Schema) and embedded.
 
-    python -m ape.apg.author --split dev --family F7     # needs APE_BUILD_MODEL
+    python -m ape.apg.author --split dev --family F7     # build model and effort from config/models.yaml
 """
 
 import argparse
 import asyncio
 import json
-import os
 from collections.abc import Awaitable, Callable
 
 from apg_core import validate_graph
@@ -26,6 +25,7 @@ from apg_core import validate_graph
 from ..config import Config, embedding_cache
 from ..llm.build_client import BuildLlm
 from ..llm.ledger import Ledger
+from ..models import build_settings
 from ..worlds.render import Chunk, chunk_world
 from ..worlds.spec import World
 from .arm import embed_graph, graph_path
@@ -72,8 +72,8 @@ UNIT_SCHEMA = {
 AuthorFn = Callable[[str, str], Awaitable[dict]]  # (system, user) -> {"units": [...]}
 
 
-def build_llm_author(model: str, ledger: Ledger, world_id: str) -> AuthorFn:
-    llm = BuildLlm(model, ledger, {"world": world_id, "system": "apg-author"})
+def build_llm_author(model: str, ledger: Ledger, world_id: str, reasoning_effort: str | None = None) -> AuthorFn:
+    llm = BuildLlm(model, ledger, {"world": world_id, "system": "apg-author"}, reasoning_effort=reasoning_effort)
 
     async def author(system: str, user: str) -> dict:
         return await llm.json(system, user, "units", UNIT_SCHEMA)
@@ -192,15 +192,13 @@ def main() -> None:
     ap.add_argument("--split", required=True)
     ap.add_argument("--family", required=True)
     args = ap.parse_args()
-    model = os.environ.get("APE_BUILD_MODEL")
-    if not model:
-        raise SystemExit("set APE_BUILD_MODEL (chosen at readiness E3)")
+    model, effort = build_settings()
     cfg = Config()
 
     async def run() -> None:
         for p in sorted((cfg.worlds_dir / args.split).glob(f"{args.family}-*.json")):
             w = World.load(p)
-            print(w.id, await author_world(w, cfg, build_llm_author(model, Ledger(cfg.ledger_path), w.id)))
+            print(w.id, await author_world(w, cfg, build_llm_author(model, Ledger(cfg.ledger_path), w.id, effort)))
 
     asyncio.run(run())
 

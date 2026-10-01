@@ -7,7 +7,7 @@ the same dev cells and appends each result to `cache/tuning_log.jsonl`. Selectio
 (pre-registered): highest mean dev success; candidates within `tie_pp` of the best go to
 the cheaper one.
 
-    uv run python -m ape.tuning --system LightRAG --model openai/<agent> --kg openai/<kg>
+    uv run python -m ape.tuning --system LightRAG [--profile gate]   # agent + kg models from config/models.yaml
 """
 
 import argparse
@@ -101,14 +101,20 @@ def tune(system: str, model, model_roles: dict, limit_worlds: int | None = None,
 
 
 def main() -> None:
+    from .models import agent_model, embedding_model, load_profile, role_models
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--system", required=True)
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--kg", required=True)
+    ap.add_argument("--profile", help="config/models.yaml profile (default: $APE_MODEL_PROFILE or gate)")
+    ap.add_argument("--model", help="override the profile's agent model (keeps its effort)")
+    ap.add_argument("--kg", help="override the profile's kg model (keeps its effort)")
     ap.add_argument("--limit-worlds", type=int)
     ap.add_argument("--epochs", type=int, default=1)
     args = ap.parse_args()
-    chosen = tune(args.system, args.model, {"kg": args.kg}, args.limit_worlds, args.epochs)
+    profile = load_profile(args.profile)
+    os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model(profile))
+    agent, roles = agent_model(profile, model=args.model), role_models(profile, ("kg",), model=args.kg)
+    chosen = tune(args.system, agent, roles, args.limit_worlds, args.epochs)
     print(json.dumps({"selected": chosen["candidate"], "mean_success": chosen["mean_success"], "cost_usd": chosen["cost_usd"]}, indent=1))
 
 

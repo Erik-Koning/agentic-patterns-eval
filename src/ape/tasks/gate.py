@@ -1,9 +1,12 @@
 """Inspect task for the APG-vs-LightRAG suitability gate.
 
-    inspect eval src/ape/tasks/gate.py -T family=F7 -T level=1000 -T split=dev -T arm=APG-s \
-        --model openai/<agent-model> --model-role kg=openai/<kg-model> --epochs 3
+    inspect eval src/ape/tasks/gate.py -T family=F7 -T level=1000 -T split=dev -T arm=APG-s --epochs 3 \
+        --model openai/gpt-6-luna --reasoning-effort high \
+        --model-role 'kg={model: openai/gpt-6-luna, reasoning_effort: low}'
 
-Worlds must already be built (`python -m ape.build`).
+Worlds must already be built (`python -m ape.build`). Bare `inspect eval` runs at the efforts its
+flags give (the model default if none). Python callers build the models from `config/models.yaml`
+with `ape.models.agent_model` and `role_models`. Either way the log records each model's config.
 """
 
 import json

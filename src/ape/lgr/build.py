@@ -1,6 +1,6 @@
 """Offline LightRAG index builds, one per world, run in their own process (never inside Inspect).
 
-    python -m ape.lgr.build --split dev --family F7 --kind extract   # LLM extraction (needs the build model)
+    python -m ape.lgr.build --split dev --family F7 --kind extract   # LLM extraction (build model from config/models.yaml)
     python -m ape.lgr.build --split dev --family F7 --kind oracle    # custom KG from the world spec, no LLM
 
 `extract` is the real comparator: LightRAG's own entity/relation extraction over the
@@ -12,11 +12,11 @@ import argparse
 import asyncio
 import hashlib
 import importlib.metadata
-import os
 
 from ..config import Config, embedding_cache
 from ..llm.build_client import BuildLlm
 from ..llm.ledger import Ledger
+from ..models import build_settings
 from ..worlds.render import Chunk, chunk_world
 from ..worlds.spec import World
 from .common import index_dir, open_rag, write_manifest
@@ -73,12 +73,10 @@ async def build_index(world: World, kind: str, cfg: Config) -> dict:
         raise RuntimeError("oracle builds must not call an LLM")
 
     if kind == "extract":
-        model = os.environ.get("APE_BUILD_MODEL")
-        if not model:
-            raise RuntimeError("set APE_BUILD_MODEL (chosen at readiness E3) for extraction builds")
-        llm = BuildLlm(model, Ledger(cfg.ledger_path), {"world": world.id, "system": "lightrag"}).lightrag_func()
+        model, effort = build_settings()
+        llm = BuildLlm(model, Ledger(cfg.ledger_path), {"world": world.id, "system": "lightrag"}, reasoning_effort=effort).lightrag_func()
     else:
-        model, llm = None, no_llm
+        model, effort, llm = None, None, no_llm
     rag = await open_rag(wd, world.id, llm, emb, query_time=False)
     try:
         if kind == "oracle":
@@ -94,6 +92,7 @@ async def build_index(world: World, kind: str, cfg: Config) -> dict:
         "lightrag_version": importlib.metadata.version("lightrag-hku"),
         "embedding_model": emb.model,
         "build_model": model,
+        "build_effort": effort,
         "chunks": len(chunks),
     }
     manifest["index_hash"] = _dir_hash(wd)

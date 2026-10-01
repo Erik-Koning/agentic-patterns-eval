@@ -1,10 +1,13 @@
 """Inspect task for the GraphRAG-Bench Medical anchor (gate precondition PC1).
 
-    APE_BUILD_MODEL=gpt-4o-mini python -m ape.anchor.graphragbench build      # once
-    inspect eval src/ape/tasks/anchor_graphragbench.py -T mode=hybrid -T n_per_type=200 \
-        --model openai/gpt-4o-mini --model-role judge=openai/gpt-4o-mini
-    # repeat with -T mode=mix and -T mode=naive, then:
+    python -m ape.anchor.graphragbench build                  # once
+    python -m ape.anchor.graphragbench run --mode hybrid      # agent + judge models from config/models.yaml
+    # repeat with --mode mix and --mode naive, then:
     python -m ape.anchor.graphragbench pc1 <hybrid-or-mix log> <naive log>
+
+`run` builds the answer (agent) and judge models with their profile efforts. With bare
+`inspect eval`, pass the efforts yourself (`--reasoning-effort`, and the judge as
+`--model-role 'judge={model: ..., reasoning_effort: ...}'`), or they run at the model default.
 
 Answers come from LightRAG's own `aquery_llm`, using the benchmark's system prompt and the
 paper's query settings. Every LightRAG model call goes through Inspect's default model, so
@@ -54,8 +57,9 @@ If the answer is unknown, respond with "I don't know".
 # Entities and relations keep their caps; chunks get the rest of a 12000-token total. Every value is
 # explicit, so LightRAG's env-var defaults cannot move them.
 QUERY_PARAMS = {"chunk_top_k": 20, "max_entity_tokens": 4000, "max_relation_tokens": 4000, "max_total_tokens": 12000, "enable_rerank": False}
-# Official judge settings (generation_eval.py: ChatOpenAI temperature 0, top_p 1, seed 42, no penalties).
-JUDGE_CONFIG = GenerateConfig(temperature=0.0, top_p=1.0, seed=42, presence_penalty=0.0, frequency_penalty=0.0)
+# Sampling settings live on the model roles (config/models.yaml, profile "anchor"): the official
+# judge runs at temperature 0, top_p 1, seed 42 (generation_eval.py) and answers at temperature 0.7.
+# Nothing is hard-coded here, so the "anchor_luna" fallback can omit parameters GPT-6 may reject.
 
 _rags: dict[tuple, LightRAG] = {}
 _locks: dict[tuple, asyncio.Lock] = {}
@@ -67,7 +71,7 @@ def system_prompt_for(mode: str) -> str:
     return SYSTEM_PROMPT.replace("{context_data}", "{content_data}") if mode == "naive" else SYSTEM_PROMPT
 
 
-def answer_llm_func(temperature: float):
+def answer_llm_func(temperature: float | None):
     """LightRAG `llm_model_func` routed through Inspect's default model.
 
     The model is resolved on every call. LightRAG runs each call in a copy of the caller's
@@ -79,13 +83,13 @@ def answer_llm_func(temperature: float):
         schema = None
         if kwargs.get("response_format") or kwargs.get("keyword_extraction"):
             schema = ResponseSchema(name="keywords", json_schema=KEYWORDS_SCHEMA, strict=True)
-        config = GenerateConfig(temperature=temperature, response_schema=schema)
+        config = GenerateConfig(temperature=temperature, response_schema=schema)  # temperature None: the role's own setting
         return (await get_model().generate(messages, config=config)).completion
 
     return llm
 
 
-async def _rag(cfg: Config, temperature: float) -> LightRAG:
+async def _rag(cfg: Config, temperature: float | None) -> LightRAG:
     """One query-time LightRAG per (index, temperature, event loop), because LightRAG binds its locks
     to the loop that created it. The key holds the loop itself, so a dead loop's id is never reused."""
     wd = working_dir(cfg)
@@ -97,7 +101,7 @@ async def _rag(cfg: Config, temperature: float) -> LightRAG:
 
 
 @solver
-def lightrag_answer(cfg: Config, mode: str, top_k: int, temperature: float) -> Solver:
+def lightrag_answer(cfg: Config, mode: str, top_k: int, temperature: float | None) -> Solver:
     prompt = system_prompt_for(mode)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
@@ -156,7 +160,7 @@ def answer_accuracy(cfg: Config) -> Scorer:
         judge = get_model(role="judge", required=True)
 
         async def generate(prompt: str) -> str:
-            return (await judge.generate([ChatMessageUser(content=prompt)], config=JUDGE_CONFIG)).completion
+            return (await judge.generate([ChatMessageUser(content=prompt)])).completion
 
         try:
             r = await answer_correctness(state.input_text, answer, target.text, generate, embed)
@@ -174,10 +178,10 @@ def graphragbench_anchor(
     seed: int = 0,
     data: str | None = None,
     top_k: int = 30,
-    temperature: float = 0.7,
+    temperature: float | None = None,
 ) -> Task:
-    """`mode` = hybrid, `top_k` = 30 and `temperature` = 0.7 follow the paper (App. H.2); the repo's run script
-    defaults to top_k 5. `n_per_type` = 200 (all 166 Creative Generation questions) keeps per-type sampling error
+    """`mode` = hybrid and `top_k` = 30 follow the paper (App. H.2); the repo's run script defaults to top_k 5.
+    `temperature` None uses the answer model's own setting (profile "anchor": 0.7, the paper's). `n_per_type` = 200 (all 166 Creative Generation questions) keeps per-type sampling error
     near 2 pp; at 50 the ±5 pp PC1 tolerance would fail a faithful reproduction more often than not."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")

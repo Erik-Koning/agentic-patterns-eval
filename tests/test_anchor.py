@@ -8,6 +8,7 @@ import re
 import pytest
 from inspect_ai import eval as inspect_eval
 from inspect_ai.log import resolve_sample_attachments
+from ape.models import agent_model, load_profile, role_models
 from inspect_ai.model import ModelOutput, get_model
 from lightrag.prompt import PROMPTS
 
@@ -230,8 +231,8 @@ def _run(mode, anchor_env):
     tmp_path, data, _ = anchor_env
     return inspect_eval(
         graphragbench_anchor(mode=mode, n_per_type=2, data=str(data)),
-        model=get_model(MODEL, custom_outputs=mock_answerer, memoize=False),
-        model_roles={"judge": get_model(MODEL, custom_outputs=mock_judge, memoize=False)},
+        model=agent_model(load_profile("anchor"), model=MODEL, custom_outputs=mock_answerer),
+        model_roles=role_models(load_profile("anchor"), roles=("judge",), model=MODEL, custom_outputs=mock_judge),
         log_dir=str(tmp_path / "logs"),
         display="none",
     )[0]

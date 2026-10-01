@@ -1,7 +1,7 @@
 """Live smoke tests and the Luna build-quality check (readiness E2-E5, L2-L5, H4; DECISIONS D-017).
 
-    uv run python readiness/smoke.py --agent openai/gpt-6-luna --kg openai/gpt-6-luna --build gpt-6-luna \
-        --embed text-embedding-3-small --max-usd 2
+    uv run python readiness/smoke.py --max-usd 2            # models and efforts from config/models.yaml (gate)
+    uv run python readiness/smoke.py --profile gate --agent openai/gpt-6-sol   # a flag swaps a role's model, keeps its effort
     uv run python readiness/smoke.py --dry      # offline wiring check (mock models, fake embeddings)
 
 Everything runs in an isolated scratch area (`cache/smoke/`) on tiny worlds. The script stops
@@ -52,39 +52,48 @@ def _guard(report: dict, logs: list, max_usd: float) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--agent", default="openai/gpt-6-luna")
-    ap.add_argument("--kg", default="openai/gpt-6-luna")
-    ap.add_argument("--build", default="gpt-6-luna")
-    ap.add_argument("--embed", default="text-embedding-3-small")
+    ap.add_argument("--profile", help="config/models.yaml profile (default: $APE_MODEL_PROFILE or gate)")
+    ap.add_argument("--agent", help="override the profile's agent model (keeps its effort)")
+    ap.add_argument("--kg", help="override the profile's kg model (keeps its effort)")
+    ap.add_argument("--build", help="override the build model (sets APE_BUILD_MODEL)")
+    ap.add_argument("--embed", help="override the embedding model")
     ap.add_argument("--max-usd", type=float, default=2.0)
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
     _isolate(args.dry)
-    os.environ.setdefault("APE_EMBEDDING_MODEL", args.embed)
-    os.environ["APE_BUILD_MODEL"] = args.build
+    if args.profile:
+        os.environ["APE_MODEL_PROFILE"] = args.profile
+    if args.build:
+        os.environ["APE_BUILD_MODEL"] = args.build
 
     from inspect_ai import eval as inspect_eval
-    from inspect_ai.model import get_model
 
     from ape.apg.author import author_world, build_llm_author
     from ape.build import build
     from ape.config import Config
     from ape.lgr.build import build_index
     from ape.llm.ledger import Ledger
+    from ape.models import agent_model, build_settings, embedding_model, load_profile, role_models
     from ape.tasks.gate import gate
     from ape.worlds.render import chunk_world
     from ape.worlds.spec import World
 
-    report: dict = {"dry": args.dry, "models": vars(args)}
+    profile = load_profile()
+    if args.embed:
+        os.environ["APE_EMBEDDING_MODEL"] = args.embed
+    os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model(profile))
+    build_model, build_effort = build_settings(profile)
+    report: dict = {"dry": args.dry, "models": {"profile": profile.name, "roles": profile.summary(), "overrides": vars(args), "build": [build_model, build_effort]}}
     logs: list = []
     cfg = Config()
-    if args.dry:
+    if args.dry:  # mock models, still built from the profile so the effort wiring is exercised
         from ape.llm.mock_agent import mock_agent, mock_kg
 
-        agent = get_model("mockllm/model", custom_outputs=mock_agent)
-        roles = {"kg": get_model("mockllm/model", custom_outputs=mock_kg, memoize=False)}
+        agent = agent_model(profile, model="mockllm/model", custom_outputs=mock_agent)
+        roles = role_models(profile, ("kg",), model="mockllm/model", custom_outputs=mock_kg)
     else:
-        agent, roles = args.agent, {"kg": args.kg}
+        agent = agent_model(profile, model=args.agent)
+        roles = role_models(profile, ("kg",), model=args.kg)
 
     # Tiny worlds: F7-100 descriptive (relational) and F3-5.
     f7 = asyncio.run(build("dev", "F7", ["100"], n_worlds=1, n_tasks=2, relational=True, embed=True))[0]
@@ -109,7 +118,7 @@ def main() -> None:
     if args.dry:
         from ape.llm.fake import perfect_author as author
     else:
-        author = build_llm_author(args.build, Ledger(cfg.ledger_path), world.id)
+        author = build_llm_author(build_model, Ledger(cfg.ledger_path), world.id, build_effort)
     report["D017_authoring"] = asyncio.run(author_world(world, cfg, author))
     report["D017_pass"] = report["D017_authoring"]["id_coverage"] >= SPEC_THRESHOLD and report["L2"]["policy_ids_as_entities"] >= SPEC_THRESHOLD
     _guard(report, logs, args.max_usd)

@@ -1,0 +1,47 @@
+# Model roles per run profile (DECISIONS D-015, D-017; FIX_PLAN FX-1). Loaded by `ape.models`.
+# Pick a profile with `--profile` on the CLIs or APE_MODEL_PROFILE (default: gate).
+#
+# Roles:
+#   agent           the eval's main model (Inspect --model)
+#   kg              APG classify and LightRAG keyword extraction (Inspect role "kg")
+#   judge           GraphRAG-Bench anchor ACC judge (Inspect role "judge")
+#   build           APG authoring and LightRAG extraction (OpenAI SDK, outside Inspect; bare model name)
+#   build_fallback  D-017 fallback builder, selected with APE_BUILD_FALLBACK=1
+#   embeddings      chunk, node and query embeddings (OpenAI SDK; bare model name)
+# Each role takes `model` and optional `reasoning_effort`, `max_tokens`, `temperature`, `top_p`, `seed`.
+# Sampling fields are only for models that accept them (the anchor's gpt-4o-mini); gate profiles never set them.
+# Inspect model IDs must match config/model_costs.yaml (confirmed by readiness/probe_openai.py, E3).
+
+profiles:
+  gate: &gate
+    agent: {model: openai/gpt-6-luna, reasoning_effort: high}
+    kg: {model: openai/gpt-6-luna, reasoning_effort: low}
+    judge: {model: openai/gpt-6-luna, reasoning_effort: low}
+    build: {model: gpt-6-luna, reasoning_effort: high}
+    build_fallback: {model: gpt-6-sol, reasoning_effort: medium}
+    embeddings: {model: text-embedding-3-small}
+
+  # Study G tiers (D-015: all at high; the Luna-low capability point comes with FX-5's matrices).
+  # The kg, judge, build and embedding roles stay as in the gate, so only the agent varies.
+  study_g_luna:
+    <<: *gate
+  study_g_sol:
+    <<: *gate
+    agent: {model: openai/gpt-6-sol, reasoning_effort: high}
+  study_g_astra:
+    <<: *gate
+    agent: {model: openai/gpt-6-astra, reasoning_effort: high}
+
+  # GraphRAG-Bench anchor (precondition PC1). Paper-faithful: gpt-4o-mini answers at temperature 0.7,
+  # judged at temperature 0 / top_p 1 / seed 42, index built by gpt-4o-mini. Tolerance ±5 pp.
+  anchor:
+    <<: *gate
+    agent: {model: openai/gpt-4o-mini, temperature: 0.7}
+    judge: {model: openai/gpt-4o-mini, temperature: 0.0, top_p: 1.0, seed: 42}
+    build: {model: gpt-4o-mini}
+  # Fallback when gpt-4o-mini is retired (E3 decides): GPT-6 Luna without sampling parameters. Tolerance ±10 pp.
+  anchor_luna:
+    <<: *gate
+    agent: {model: openai/gpt-6-luna, reasoning_effort: low}
+    judge: {model: openai/gpt-6-luna, reasoning_effort: low}
+    build: {model: gpt-6-luna, reasoning_effort: high}

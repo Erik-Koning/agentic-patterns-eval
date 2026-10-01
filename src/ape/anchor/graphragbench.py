@@ -15,8 +15,12 @@ D-003 (one LightRAG doc per pre-chunked shared chunk, with file_path = chunk ID)
 then renders up to 75 of those paths into every entity and relation line of the query
 context, which eats the 4000-token KG budgets that the paper's numbers were produced under.
 
-    APE_BUILD_MODEL=gpt-4o-mini python -m ape.anchor.graphragbench build [--data DIR]
+    python -m ape.anchor.graphragbench build [--data DIR] [--profile P]     # APE_BUILD_MODEL=gpt-4o-mini matches the paper
+    python -m ape.anchor.graphragbench run --mode hybrid [--n-per-type 200] [--profile P]
     python -m ape.anchor.graphragbench pc1 GRAPH_LOG NAIVE_LOG [--tolerance PP]
+
+`build` and `run` take their models and reasoning efforts from `config/models.yaml`
+(`ape.models`): the build role for extraction, the agent role for answers, the judge role for ACC.
 """
 
 import argparse
@@ -39,6 +43,7 @@ from ..lgr.common import embedding_dim, embedding_func, index_dir, read_manifest
 from ..llm.build_client import BuildLlm
 from ..llm.embeddings import EmbeddingCache
 from ..llm.ledger import Ledger
+from ..models import agent_model, build_settings, embedding_model, role_models
 
 ANCHOR_ID = "graphragbench-medical"
 QUESTION_TYPES = ("Fact Retrieval", "Complex Reasoning", "Contextual Summarize", "Creative Generation")  # labels as in the data
@@ -119,7 +124,7 @@ async def open_anchor_rag(wd: Path, llm_func, emb: EmbeddingCache, query_time: b
     return rag
 
 
-async def build_index(bench: Bench, cfg: Config, llm_func, build_model: str | None) -> dict:
+async def build_index(bench: Bench, cfg: Config, llm_func, build_model: str | None, build_effort: str | None = None) -> dict:
     """LightRAG's own extraction over the whole corpus (offline, never inside Inspect)."""
     wd = working_dir(cfg)
     emb = embedding_cache(cfg)
@@ -137,6 +142,7 @@ async def build_index(bench: Bench, cfg: Config, llm_func, build_model: str | No
         "lightrag_version": importlib.metadata.version("lightrag-hku"),
         "embedding_model": emb.model,
         "build_model": build_model,
+        "build_effort": build_effort,
     }
     manifest["index_hash"] = _dir_hash(wd)
     write_manifest(wd, manifest)
@@ -219,22 +225,38 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
-    b.add_argument("--data", help="dataset dir (default: $APE_CACHE/graphragbench)")
+    r = sub.add_parser("run", help="anchor eval with the profile's agent (answers) and judge models")
+    r.add_argument("--mode", default="hybrid")
+    r.add_argument("--n-per-type", type=int, default=200)
+    r.add_argument("--log-dir")
+    for s in (b, r):
+        s.add_argument("--data", help="dataset dir (default: $APE_CACHE/graphragbench)")
+        s.add_argument("--profile", help="config/models.yaml profile (default: $APE_MODEL_PROFILE or gate)")
     p = sub.add_parser("pc1")
     p.add_argument("graph_log")
     p.add_argument("naive_log")
     p.add_argument("--tolerance", type=float)
     args = ap.parse_args()
+    if args.cmd != "pc1":
+        # Default to the paper-faithful "anchor" profile (gpt-4o-mini); "anchor_luna" if it is retired (E3).
+        os.environ["APE_MODEL_PROFILE"] = args.profile or os.environ.get("APE_MODEL_PROFILE") or "anchor"
+        os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model())
     cfg = Config()
     if args.cmd == "pc1":
         result = pc1_from_logs(read_eval_log(args.graph_log), read_eval_log(args.naive_log), args.tolerance)
+    elif args.cmd == "run":
+        from inspect_ai import eval as inspect_eval
+
+        from ..tasks.anchor_graphragbench import graphragbench_anchor
+
+        task = graphragbench_anchor(mode=args.mode, n_per_type=args.n_per_type, data=args.data)
+        log = inspect_eval(task, model=agent_model(), model_roles=role_models(roles=("judge",)), log_dir=args.log_dir)[0]
+        result = {"status": log.status, "log": log.location, "by_type": results_by_type(log) if log.status == "success" else None}
     else:
-        model = os.environ.get("APE_BUILD_MODEL")
-        if not model:
-            raise RuntimeError(f"set APE_BUILD_MODEL ({PAPER_MODEL} matches the paper)")
+        model, effort = build_settings()
         bench = load_medical(args.data or default_data_dir(cfg), n_per_type=0, seed=0)
-        llm = BuildLlm(model, Ledger(cfg.ledger_path), {"anchor": ANCHOR_ID, "system": "lightrag"}).lightrag_func()
-        result = asyncio.run(build_index(bench, cfg, llm, model))
+        llm = BuildLlm(model, Ledger(cfg.ledger_path), {"anchor": ANCHOR_ID, "system": "lightrag"}, reasoning_effort=effort).lightrag_func()
+        result = asyncio.run(build_index(bench, cfg, llm, model, effort))
     print(json.dumps(result, indent=1))
 
 

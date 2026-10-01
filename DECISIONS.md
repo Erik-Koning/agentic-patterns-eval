@@ -93,6 +93,11 @@ Each entry records the decision, why it was made, and who made it.
 
 **D-019 (2026-09-30).** Single hypothesis registry (`HYPOTHESES.md`), and the custom Inspect harness is the only platform. The nine-pattern public-benchmark study in `EVAL_DESIGN.md` is deferred; its benchmarks are external anchors.
 
+**D-020 (2026-09-30, FX-1).** Models and efforts come from one file, `config/models.yaml` (profiles `gate`, `study_g_*`, `anchor`, `anchor_luna`), through `ape.models`.
+- Effort is set on each Inspect role model, so it survives per-call schema configs.
+- Build effort is sent by `BuildLlm` and recorded in the ledger and manifests.
+- Sampling parameters (temperature, top_p, seed) exist only in the paper-faithful `anchor` profile (gpt-4o-mini). If E3 shows gpt-4o-mini is retired, the anchor uses `anchor_luna`, without sampling parameters and with the ±10 pp tolerance.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
