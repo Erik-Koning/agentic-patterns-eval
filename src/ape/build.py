@@ -3,15 +3,16 @@
     python -m ape.build --split dev --family F7 --levels 10 1000 --worlds 3 --tasks 12
 
 Embeddings for chunks are computed here so gate runs only ever read the cache.
-With APE_EMBEDDINGS=fake everything is offline and free.
+With APE_EMBEDDINGS=fake everything is offline and free. KB artifacts (APG graphs, LightRAG
+indices) are built per world, in parallel, by `python -m ape.artifacts`.
 """
 
 import argparse
 import asyncio
 
+from .artifacts import embed_chunks
 from .config import Config, embedding_cache
 from .worlds.generate import make_world
-from .worlds.render import chunk_world
 
 
 async def build(split: str, family: str, levels: list[str], n_worlds: int, n_tasks: int, relational: bool, embed: bool, exception_style: str = "descriptive") -> list[str]:
@@ -24,7 +25,7 @@ async def build(split: str, family: str, levels: list[str], n_worlds: int, n_tas
             w.save(cfg.world_path(w.id))
             ids.append(w.id)
             if emb is not None:
-                await emb.embed([c.text for c in chunk_world(w)], context={"world": w.id, "system": "chunks"})
+                await embed_chunks(w, emb)
     return ids
 
 

@@ -38,6 +38,48 @@ class Config:
         return self.cache_dir / "ledger.jsonl"
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class BuildConcurrency:
+    """Build-time concurrency (FIX_PLAN FX-4), from the environment. Query time never uses these.
+
+    - `llm` (APE_BUILD_LLM_CONCURRENCY, 16): build-model calls in flight per world: LightRAG's
+      `llm_model_max_async` and the APG authoring semaphore.
+    - `parallel_insert` (APE_BUILD_PARALLEL_INSERT, 8): LightRAG `max_parallel_insert`, i.e. documents
+      (one per shared chunk, D-003) extracted at once.
+    - `embed` (APE_BUILD_EMBED_CONCURRENCY, 16): LightRAG `embedding_func_max_async`.
+    - `workers` (APE_BUILD_WORKERS, 4): worlds built at once by `ape.artifacts`, one process each.
+
+    Peak in-flight build calls are about `workers * llm` (64 by default).
+    """
+
+    llm: int = 16
+    parallel_insert: int = 8
+    embed: int = 16
+    workers: int = 4
+
+    @classmethod
+    def from_env(cls) -> BuildConcurrency:
+        return cls(
+            llm=_positive_int_env("APE_BUILD_LLM_CONCURRENCY", cls.llm),
+            parallel_insert=_positive_int_env("APE_BUILD_PARALLEL_INSERT", cls.parallel_insert),
+            embed=_positive_int_env("APE_BUILD_EMBED_CONCURRENCY", cls.embed),
+            workers=_positive_int_env("APE_BUILD_WORKERS", cls.workers),
+        )
+
+
 def embedding_cache(cfg: Config):
     """The shared embedding cache for this config (fake backend never touches the network)."""
     from .llm.embeddings import EmbeddingCache

@@ -11,6 +11,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from .ledger import Ledger, LedgerEntry
 from .tokens import count_tokens
 
 BATCH = 256
+SQLITE_TIMEOUT_S = 60.0  # how long a write waits for another process's lock on the shared cache
 
 # Attribution for ledger entries made deep inside an arm (APG routing, S3s, LightRAG's own
 # embedding calls). The agent loop sets it around every compile: {"arm", "world", "sample", "epoch"}.
@@ -33,6 +35,21 @@ class EmbeddingMiss(KeyError):
     pass
 
 
+def _enable_wal(db: sqlite3.Connection) -> None:
+    """Switch the file to WAL (a persistent, one-time change). While the file is still in rollback mode
+    (new, or created before WAL) and another process has a write open, SQLite refuses the switch at once
+    with "database is locked" without consulting the busy timeout, so retry until that write commits."""
+    deadline = time.monotonic() + SQLITE_TIMEOUT_S
+    while True:
+        try:
+            db.execute("PRAGMA journal_mode=WAL").fetchone()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+
+
 class EmbeddingCache:
     def __init__(self, path: str | Path, model: str, client: Any = None, ledger: Ledger | None = None):
         """`client` is an `openai.AsyncOpenAI`-compatible object; created lazily if omitted."""
@@ -41,8 +58,12 @@ class EmbeddingCache:
         self._ledger = ledger
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._db = sqlite3.connect(self._path, check_same_thread=False)
+        self._lock = threading.Lock()  # one connection per instance, shared by this process's threads
+        # Several build processes (ape.artifacts workers, FX-4) share one cache file. WAL lets readers
+        # run during another process's write; the busy timeout makes a writer wait for the other
+        # process's commit instead of failing with "database is locked".
+        self._db = sqlite3.connect(self._path, check_same_thread=False, timeout=SQLITE_TIMEOUT_S)
+        _enable_wal(self._db)
         self._db.execute("CREATE TABLE IF NOT EXISTS emb (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
         self._db.commit()
         self.network_calls = 0

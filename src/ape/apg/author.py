@@ -11,21 +11,24 @@ plays the author: it sees only the rendered chunks (never the world spec).
    toward tool-spec leaves (so an exception and its policy bring each other).
 4. `toolAllowlist` goes on leaves only (gap G2).
 5. The raw document is validated once (semantic + JSON-Schema) and embedded.
+6. The graph's open `meta` mapping (and its report) records what it was built from: the
+   world's content hash, the author and the embedding model. `ape.artifacts` skips a world
+   whose graph records the same (`authored_graph_current`).
 
     python -m ape.apg.author --split dev --family F7     # build model and effort from config/models.yaml
+
+The CLI delegates to `ape.artifacts --kinds apg` (parallel worlds, skips current graphs).
 """
 
-import argparse
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
 
 from apg_core import validate_graph
 
-from ..config import Config, embedding_cache
+from ..config import BuildConcurrency, Config, embedding_cache
 from ..llm.build_client import BuildLlm
 from ..llm.ledger import Ledger
-from ..models import build_settings
 from ..worlds.render import Chunk, chunk_world
 from ..worlds.spec import World
 from .arm import embed_graph, graph_path
@@ -70,6 +73,14 @@ UNIT_SCHEMA = {
 }
 
 AuthorFn = Callable[[str, str], Awaitable[dict]]  # (system, user) -> {"units": [...]}
+
+
+FAKE_AUTHOR_ID = "fake:perfect_author"
+
+
+def llm_author_id(model: str, reasoning_effort: str | None = None) -> str:
+    """How a graph records its LLM author (build model and effort): a different author means a rebuild."""
+    return f"{model}@{reasoning_effort}" if reasoning_effort else model
 
 
 def build_llm_author(model: str, ledger: Ledger, world_id: str, reasoning_effort: str | None = None) -> AuthorFn:
@@ -163,10 +174,33 @@ def _id_coverage(world: World, declared: set[str]) -> float:
     return sum(i in declared for i in spec_ids) / len(spec_ids) if spec_ids else 1.0
 
 
-async def author_world(world: World, cfg: Config, author: AuthorFn, concurrency: int = 8) -> dict:
+def build_meta(world: World, author_id: str | None, embedding_model: str) -> dict:
+    """What an authored graph was built from; stored in the graph's open `meta` mapping."""
+    return {"worldHash": world.content_hash(), "author": author_id, "embeddingModel": embedding_model}
+
+
+def authored_graph_current(world: World, cfg: Config, author_id: str | None) -> bool:
+    """True when the authored graph and its report exist and were built from this world version by
+    this author with the current embedding model. A crash before the report is written, a changed
+    world or a different author all mean a rebuild."""
+    path = graph_path(cfg, world.id, "authored")
+    try:
+        meta = json.loads(path.read_text()).get("meta") or {}
+        report = json.loads(path.with_suffix(".report.json").read_text())
+    except (OSError, ValueError):
+        return False
+    want = build_meta(world, author_id, embedding_cache(cfg).model)
+    in_report = {"worldHash": report.get("world_hash"), "author": report.get("author"), "embeddingModel": report.get("embedding_model")}
+    return all(meta.get(k) == v and in_report[k] == v for k, v in want.items())
+
+
+async def author_world(world: World, cfg: Config, author: AuthorFn, concurrency: int | None = None, author_id: str | None = None) -> dict:
+    """Author, validate, embed and write the graph (always; `authored_graph_current` decides skips).
+
+    `concurrency` defaults to APE_BUILD_LLM_CONCURRENCY; `author_id` is recorded in the graph's meta."""
     chunks = chunk_world(world)
     titles = {d.id: d.title for d in world.documents}
-    sem = asyncio.Semaphore(concurrency)
+    sem = asyncio.Semaphore(concurrency or BuildConcurrency.from_env().llm)
 
     async def one(chunk: Chunk) -> list[dict]:
         async with sem:
@@ -175,32 +209,29 @@ async def author_world(world: World, cfg: Config, author: AuthorFn, concurrency:
 
     units = await asyncio.gather(*(one(c) for c in chunks))
     doc, report = assemble(world, chunks, list(units), cfg.context_budget_tokens)
+    emb = embedding_cache(cfg)
+    meta = doc["meta"] = build_meta(world, author_id, emb.model)
     check = validate_graph(doc)
     errors = schema_errors(doc)
     if not check["valid"] or errors:
         raise ValueError(f"authored graph invalid: {check['errors'][:3]} {errors[:3]}")
-    doc = await embed_graph(doc, embedding_cache(cfg), {"world": world.id, "system": "apg-authored"})
+    doc = await embed_graph(doc, emb, {"world": world.id, "system": "apg-authored"})
+    report.update(world_hash=meta["worldHash"], author=author_id, embedding_model=emb.model)
     path = graph_path(cfg, world.id, "authored")
+    report_path = path.with_suffix(".report.json")
     path.parent.mkdir(parents=True, exist_ok=True)
+    # The report goes last, after the old one is gone: a graph without its report (a crash in
+    # between) counts as unbuilt.
+    report_path.unlink(missing_ok=True)
     path.write_text(json.dumps(doc))
-    path.with_suffix(".report.json").write_text(json.dumps(report, indent=1))
+    report_path.write_text(json.dumps(report, indent=1))
     return report
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--split", required=True)
-    ap.add_argument("--family", required=True)
-    args = ap.parse_args()
-    model, effort = build_settings()
-    cfg = Config()
+    from ..artifacts import main as artifacts_main
 
-    async def run() -> None:
-        for p in sorted((cfg.worlds_dir / args.split).glob(f"{args.family}-*.json")):
-            w = World.load(p)
-            print(w.id, await author_world(w, cfg, build_llm_author(model, Ledger(cfg.ledger_path), w.id, effort)))
-
-    asyncio.run(run())
+    artifacts_main(fixed_kinds=("apg",))
 
 
 if __name__ == "__main__":

@@ -4,12 +4,17 @@ so every call is metered in the ledger under role "build".
 `reasoning_effort` comes from the model profile (`ape.models.build_settings`, D-015). It is
 sent on every call and recorded in each ledger entry's context; None sends nothing, for
 models that take no effort.
+
+The lazily created OpenAI client retries a failed call up to `MAX_RETRIES` times (the SDK backs off
+and honours Retry-After), so parallel builds (FX-4) ride out rate limits instead of failing a world.
 """
 
 import json
 from typing import Any
 
 from .ledger import Ledger, LedgerEntry
+
+MAX_RETRIES = 6
 
 
 class BuildLlm:
@@ -24,7 +29,7 @@ class BuildLlm:
         if self._client is None:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI()
+            self._client = AsyncOpenAI(max_retries=MAX_RETRIES)
         return self._client
 
     async def chat(self, messages: list[dict], **kwargs) -> str:

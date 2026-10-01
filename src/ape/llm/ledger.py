@@ -5,6 +5,7 @@ they are appended here and priced later from the same price table.
 """
 
 import json
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -31,9 +32,21 @@ class Ledger:
         self._lock = threading.Lock()
 
     def append(self, entry: LedgerEntry) -> None:
-        line = json.dumps(asdict(entry), sort_keys=True)
-        with self._lock, self.path.open("a") as f:
-            f.write(line + "\n")
+        # Several build processes (ape.artifacts workers, FX-4) append to one ledger, and the thread
+        # lock only orders this process's writers. So each entry goes to the kernel as ONE write() of
+        # one complete line on an O_APPEND descriptor: the kernel moves to end of file and writes the
+        # bytes in a single step, so lines from different processes never interleave. (Buffered text
+        # mode may split a line over several write()s; an unbuffered write leaves nothing to flush.)
+        # Entries are a few hundred bytes, well under the 4 KB that stays whole on any filesystem.
+        data = (json.dumps(asdict(entry), sort_keys=True) + "\n").encode()
+        with self._lock:
+            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                written = os.write(fd, data)
+            finally:
+                os.close(fd)
+        if written != len(data):
+            raise OSError(f"short write to ledger {self.path}: {written} of {len(data)} bytes")
 
     def read(self) -> list[LedgerEntry]:
         if not self.path.exists():
