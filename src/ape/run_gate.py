@@ -28,8 +28,13 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
     test        every enabled run cell of the frozen plan's TEST_RUN_PHASES (`test_groups`), one eval set per
                 cell and environment, PRIMARY_CELLS first; the budget is re-checked before each group, a
                 failing group is recorded and the others still run (the phase then fails; a re-run resumes).
+    analyze     the decision report (FX-7, `ape.analyze_gate`): PC1-PC6, the verdict per delivery mode and
+                combined, the NO-GO diagnosis, tables and secondaries -> report/decision.json and report.md.
+                It needs no other phase complete and reports what exists (a missing input fails its
+                precondition with the reason), so it also runs after a failed or budget-stopped test: `all`
+                runs it then too, before reporting the test's failure.
 
-`analyze` (FX-7) appends a phase to `PHASES`. `all` runs through test.
+`all` runs every phase through analyze.
 
 Freeze. A run is frozen once: after freeze.json exists, `tune` and `pilot` refuse to run (even with
 --force; they would rewrite frozen inputs), and `freeze` re-runs only as a skip. `build-test` and `test`
@@ -57,6 +62,7 @@ Run directory (`runs/<id>/`, git-ignored):
     test/<cell>/<group>-<hash>/   one eval set: Inspect logs + runner_index.json; <cell> the plan cell id,
                              <group> its env group, <hash> of the group's env and arms (knobs are not part of
                              Inspect's task identity, so a new env never reuses another env's logs)
+    report/decision.json     the decision report (`ape.analyze_gate`), and report/report.md
     work/                    offline only: worlds/, indices/, cache/ and config/ (the outputs live mode
                              writes to config/), GATE_PREREG.md (the rehearsal copy) and
                              PROVENANCE.freeze.md, so an offline run never touches live artifacts
@@ -142,7 +148,7 @@ from .runner import INDEX_NAME
 from .worlds.generate import TEST_SPLIT_ENV, require_test_split_unlocked
 
 STUDY = "gate"
-PHASES = ("preflight", "build-dev", "tune", "anchor", "pilot", "freeze", "build-test", "test")  # FX-7 appends analyze
+PHASES = ("preflight", "build-dev", "tune", "anchor", "pilot", "freeze", "build-test", "test", "analyze")
 COMPLETE = ("done", "skipped")
 APG_PIN = "d47f7f3749dac38e9f917429810136e4ec6ebb37"  # PROVENANCE.md: tag apg-eval-baseline
 MOCK = "mockllm/model"
@@ -185,9 +191,10 @@ PLACEHOLDER_ITEM = re.compile(r"\[(PILOT|USER)(?::\s*([^\]\n]*))?\]")
 DEVIATION = "any change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log): record it there and start a new --run-id"
 # The test split (GATE_PREREG §4), built and run only on a frozen run: world groups and their plan build cells.
 TEST_BUILD_CELLS = {"test": "gate.build.test", "id_only": "gate.build.test-id-only", "f5": "gate.build.test-f5"}
-# The test phase runs every enabled run cell of these plan phases; the GO rule's evidence first (GATE_PREREG §7).
+# The test phase runs every enabled run cell of these plan phases, the verdict's evidence first: the GO rule's cells
+# (GATE_PREREG §2, §8) and the cells PC3 (gate.diag) and PC2 (gate.f5) need, so a budget stop only loses secondaries.
 TEST_RUN_PHASES = ("test", "diagnostics", "f5", "secondaries")
-PRIMARY_CELLS = ("gate.test.f7", "gate.test.f3", "gate.diag.s7")
+PRIMARY_CELLS = ("gate.test.f7", "gate.test.f3", "gate.diag.s7", "gate.diag", "gate.f5")
 # Plan arms that run as another arm under extra knobs: LightRAG naive (PC2) is LGR* in naive mode.
 ARM_VARIANTS = {"LGR-naive": ("LGR*", {"APE_LGR_MODE": "naive"})}
 # Environment variables the orchestrator manages itself; every other APE_* knob is recorded in params.
@@ -1446,7 +1453,7 @@ def _build_test(run: GateRun, record: dict) -> None:
 
 
 def _test_cells(p: Plan) -> list[PlanCell]:
-    """The plan's gate run cells the test phase runs, in run order: PRIMARY_CELLS (the GO rule's evidence)
+    """The plan's gate run cells the test phase runs, in run order: PRIMARY_CELLS (the verdict's evidence)
     first, so a budget stop leaves them complete; then the others in plan order."""
     cells = [c for c in p.cells if c.study == STUDY and c.phase in TEST_RUN_PHASES and c.kind == "agent" and c.enabled]
     ids = [c.id for c in cells]
@@ -1691,6 +1698,50 @@ def _test(run: GateRun, record: dict) -> None:
         raise PhaseError(f"{len(failed)} test group(s) failed (re-run to resume; finished logs are reused): " + "; ".join(failed))
 
 
+# analyze -------------------------------------------------------------------------------------------
+
+ANALYSIS_CODE = ("src/ape/analyze_gate.py", "src/ape/analysis/gate_stats.py", "src/ape/analysis/cost.py")
+
+
+def _analyze_inputs(run: GateRun) -> dict[str, Path]:
+    """The files the report reads that a phase writes only when it runs (manifests are rewritten on every skip,
+    so the test results enter through `_analyze_params` instead)."""
+    return {
+        "anchor/pc1.json": run.phase_dir("anchor") / "pc1.json",
+        "tune/tuning_log.jsonl": run.phase_dir("tune") / "tuning_log.jsonl",
+        "freeze.json": run.freeze_path,
+        "build-test/worlds.json": run.phase_dir("build-test") / "worlds.json",
+        "config/selected.yaml": run.selected_path,
+        "config/tuning_grid.yaml": run.config("tuning_grid.yaml"),
+        "config/run_plan.yaml": run.config("run_plan.yaml"),
+        "config/model_costs.yaml": run.costs_path,
+        "ledger": Config().ledger_path,
+    }
+
+
+def _analyze_params(run: GateRun) -> dict:
+    test = read_manifest(run, "test") or {}
+    return {
+        "test_cells": _digest(test.get("cells")),
+        "primary_complete": test.get("primary_complete"),
+        "archived_tuning_logs": sorted(p.name for p in run.phase_dir("tune").glob("tuning_log.*.jsonl")),
+        "code": {f: _sha256(ROOT / f) for f in ANALYSIS_CODE},
+    }
+
+
+def _analyze(run: GateRun, record: dict) -> None:
+    from .analyze_gate import REPORT_DIR, analyze
+
+    decision = analyze(run)
+    out = run.dir / REPORT_DIR
+    record["outputs"] = {"decision": _show(out / "decision.json"), "report": _show(out / "report.md")}
+    record["verdict"] = decision["verdict"]["label"]
+    record["verdict_reasons"] = decision["verdict"]["reasons"]
+    record["modes"] = {m: v["verdict"] for m, v in decision["verdict"]["modes"].items()}
+    if decision["verdict"]["label"] == "PRECONDITION_FAIL":
+        record["warnings"].append("verdict PRECONDITION_FAIL: " + "; ".join(decision["verdict"]["reasons"]))
+
+
 PHASE_DEFS: dict[str, Phase] = {
     "preflight": Phase(
         "preflight",
@@ -1772,6 +1823,14 @@ PHASE_DEFS: dict[str, Phase] = {
         requires=("freeze", "build-test"),
         upstream=("freeze", "build-test"),
         refuse=_refuse_unless_frozen("test"),
+    ),
+    "analyze": Phase(
+        "analyze",
+        _analyze,
+        inputs=_analyze_inputs,
+        params=_analyze_params,
+        projected=lambda r: 0.0,
+        profile=gate_profile,
     ),
 }
 assert tuple(PHASE_DEFS) == PHASES
@@ -1870,7 +1929,16 @@ def run_phases(run: GateRun, phase: str) -> dict[str, str]:
     statuses: dict[str, str] = {}
     with run_environment(run):
         for name in names:
-            statuses[name] = run_phase(run, name)
+            try:
+                statuses[name] = run_phase(run, name)
+            except Exception:
+                # A failed or budget-stopped test still gets its report (`analyze` reports what exists).
+                if phase == "all" and name == "test" and read_manifest(run, "test") is not None:
+                    try:
+                        run_phase(run, "analyze")
+                    except Exception as e:  # noqa: BLE001  (the test's failure is the one to raise)
+                        print(f"[analyze] after the failed test: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                raise
     return statuses
 
 

@@ -59,7 +59,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
   - In push mode, flat retrieval delivered the exception 0/25, with ID-only *and* descriptive rendering.
   - After reading the policy, a pull query ("exceptions to Policy <id>") delivered it 25/25 in both renderings.
   - The delivery mode, not the rendering, decides relational outcomes, and both modes are realistic deployments.
-- **F7 cells:** push and pull are **co-primary**. The verdict (§8) is computed and reported per mode. An unqualified GO requires GO in both; GO in one mode only is reported as **GO_PUSH_ONLY** or **GO_PULL_ONLY**, and the user decides.
+- **F7 cells:** push and pull are **co-primary**. The verdict (§8) is computed and reported per mode. An unqualified GO requires GO in both; GO in one mode only is reported as **GO_PUSH_ONLY** or **GO_PULL_ONLY**, and the user decides. Each mode's verdict pools the same four gate cells with equal weights: the F7 cells in that mode with the F3 cells, which are push only (push = F7 push + F3; pull = F7 pull + F3), against the S7 placebo (push).
 - **F3 cells:** push only (tool procedures carry no cross-references to follow).
 - **Cost:** the F7 half of the gate runs twice, about 1.5× the push-only cost.
 
@@ -128,9 +128,9 @@ A failure here means fix and re-pilot, not NO-GO.
 | ID | Condition |
 |---|---|
 | PC1 | The LightRAG setup reproduces its published GraphRAG-Bench Medical accuracy (arXiv 2506.05690 v3, Table 2: 63.32 / 61.32 / 63.14 / 67.91) for each question type: within ±5 pp if answer, judge and build models are all gpt-4o-mini, ±10 pp otherwise. Uses hybrid mode, `n_per_type` = 200 (all 166 Creative Generation questions), and the official accuracy metric (0.75 × LLM-judged statement F1 + 0.25 × embedding similarity; prompts verbatim). Hybrid must beat naive on the **macro mean** over types; per-type wins are reported but not required, because the paper's own LightRAG loses to vanilla RAG on two types. Implementation: `ape.anchor.graphragbench.pc1_from_logs`. |
-| PC2 | On F5, LGR* ≥ LightRAG naive mode. |
+| PC2 | On F5, LGR* ≥ LightRAG naive mode, with PC3's 3 pp tolerance on the pooled point estimate (F5-1hop and F5-2hop equally weighted). |
 | PC3 | Invariants: S6 ≥ S5o ≥ APG* ≥ S7, each allowing 3 pp tolerance; and S6 > S7 by a world-level sign-flip test, p < 0.05. |
-| PC4 | Sanity bound: no arm's median realized context exceeds 4× its configured budget, and in the matched-budget analysis every capped arm's median lands within ±25% of the budget. (Replaces the earlier APG/LightRAG parity ratio, which APG's design makes unattainable: EXPERIMENT_AUDIT B1.) |
+| PC4 | Sanity bound: no arm's median realized context exceeds 4× its configured budget, Reported, not gated: in the matched-budget secondary every capped arm's median should land within ±25% of the budget. A miss or a missing secondary marks that secondary "not matched" in the report and never blocks the verdict (D-022). (Replaces the earlier APG/LightRAG parity ratio, which APG's design makes unattainable: EXPERIMENT_AUDIT B1.) |
 | PC5 | Harness errors < 2%, and every arm's cap-hit rate < 10%. |
 | PC6 | The tuning log is complete for every system. |
 

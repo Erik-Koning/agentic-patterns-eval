@@ -189,7 +189,7 @@ The pilot replaces all three defaults with measurements.
 | `freeze` | Refuses while `GATE_PREREG.md`'s body (from §1; the header is instructions) still has a `[PILOT` or `[USER` marker, a tracked file or untracked code is uncommitted, or PC1 fails. Records sha256 of `GATE_PREREG.md`, `config/selected.yaml`, `config/s7_targets.json`, `config/budget_calibration.yaml`, `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`, plus the commit, the analysis-code commit and the APG pin, in `runs/<id>/freeze.json` and `PROVENANCE.md`. A run is frozen once: afterwards `tune` and `pilot` refuse (even with `--force`). Offline it is a rehearsal on a filled copy. `require_frozen` is the guard for `build-test` and `test`. |
 | `build-test` | Refuses unless `freeze.json` exists and every frozen file still matches its hash. Then generates the test worlds (`gate.build.test`, `gate.build.test-id-only`, `gate.build.test-f5`) and builds graphs and indices. It is the only way to generate the test split: `python -m ape.build --split test` refuses unless build-test set `APE_TEST_SPLIT_RUN`. |
 | `test` | The same freeze guard. Through FX-3's runner: every run cell of the frozen plan's test, diagnostics, F5 and secondaries phases (arms × cells × deliveries × epochs), with FX-1 models and FX-2 prices. One eval set per cell and environment, in `runs/<id>/test/<cell>/<group>-<hash>/`: the selections' knobs together; the matched-budget cell adds `budget_calibration.yaml`'s knobs on top; LightRAG naive runs as LGR* with `APE_LGR_MODE=naive`. The GO rule's cells (`gate.test.f7`, `gate.test.f3`, `gate.diag.s7`) run first, and the FX-5 budget check runs before every group, so a budget stop leaves the primary complete. A failing group is recorded, the others still run, and a re-run resumes. `test/manifest.json` lists every cell's groups, logs and status for FX-7. |
-| `analyze` | FX-7 report |
+| `analyze` | FX-7 report (`ape.analyze_gate`). Needs no other phase complete: it reports what exists, a missing input fails its precondition by name, and `all` runs it after a failed or budget-stopped test too. |
 
 **Acceptance test.** An end-to-end `all` run in offline mode:
 - tiny sizes
@@ -227,6 +227,13 @@ It must produce every manifest, freeze record and report, and the freeze guard m
 - **Secondaries,** reported separately and never pooled: id_only, matched budget, TE-all, F5, messy (if run).
 
 **Acceptance test.** Synthetic logs from mock evals with known outcomes produce the expected verdict and precondition flags. Missing inputs (e.g. no anchor) produce PRECONDITION_FAIL with a named reason, not a crash.
+
+**Done** (`src/ape/analyze_gate.py`, the `analyze` phase of `ape.run_gate`; statistics in `analysis/gate_stats.py`):
+- Each mode's verdict pools the four gate cells with equal weights: push = F7 push + F3; pull = F7 pull + the same F3 push cells. S7 (push) is the placebo for both. GATE_PREREG §3 now says so.
+- Arms are labelled by their declared plan names (APG*, LGR*, LGR-naive, ...), taken from the test manifest. `gate_stats.task_means` refuses to average one arm's push and pull runs in a cell.
+- The NO-GO diagnosis is always computed: S5o against LGR* on shared tasks, plus each failed sample's pipeline miss (`gate_stats.pipeline_miss`: not in graph, shortlist, classify, compose, evidence, tool exposure, or delivered but failed).
+- Choices where the prereg is silent are in `analyze_gate.CHOICES`, and the report lists them too.
+- Tests: `tests/test_analyze_gate.py` covers synthetic rows with known outcomes for every verdict label, PC1–PC6 passing and failing, pull pooling and the mode-mixing guard. `tests/test_run_gate.py` covers the offline end-to-end report, a budget-stopped run and a missing `pc1.json`.
 
 ---
 

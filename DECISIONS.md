@@ -130,6 +130,12 @@ Each entry records the decision, why it was made, and who made it.
 - **Not affordable as planned:** D-017's Sol build path (+$905; +$957 once FX-6a priced the id_only and F5 dev worlds). It needs approval.
 - **Recalibration:** after the gate pilot and Study G's micro-pilot, `python -m ape.budget calibrate` replaces the priors with measured calls and tokens per (arm, model, effort, cell, delivery). Cuts are then revisited in reverse order (C5 first). FX-6 refuses a phase whose projected cost exceeds `remaining()`.
 
+**D-022 (2026-10-01, FX-7; before any freeze).** Which preconditions can block the verdict, and which test cells run first.
+- **PC4:** only the 4× sanity bound gates. The matched-budget ±25% clause is reported with the matched-budget secondary. A miss, or a secondary the budget stopped, marks that secondary "not matched" and never blocks the verdict, which does not depend on the matched caps. The offline rehearsal showed why: a cap calibrated on pilot worlds drifted outside ±25% on test worlds (303 → 386 tokens).
+- **PC2:** LGR* ≥ LightRAG naive allows PC3's 3 pp tolerance on the point estimate. With no tolerance, a true tie would fail the precondition about half the time from noise.
+- **Run order:** the test phase runs every cell the verdict needs first: the GO rule's cells (gate.test.f7, gate.test.f3, gate.diag.s7) and the cells for PC3 (gate.diag) and PC2 (gate.f5). A budget stop can then only cost secondaries.
+- **Pull verdict:** pools F7 pull with F3 push. F3 runs push only, so both modes cover the same four cells (GATE_PREREG §3).
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

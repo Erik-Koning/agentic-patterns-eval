@@ -494,13 +494,24 @@ def test_offline_all_builds_the_test_split_after_the_freeze_runs_the_primary_fir
     # 1. A budget that only covers the primary: the test phase runs the GO-rule cells first, then stops.
     real_projected = run_gate._group_projected
     monkeypatch.setattr(run_gate, "_group_projected", lambda r, g: real_projected(r, g) if g["cell"] in run_gate.PRIMARY_CELLS else 1e9)
-    with pytest.raises(BudgetError, match=r"test gate.diag \(selected\): projected \$1,000,000,000.00 exceeds(.|\n)*the primary cells are complete"):
+    with pytest.raises(BudgetError, match=r"test gate.sec.id-only \(selected\): projected \$1,000,000,000.00 exceeds(.|\n)*the primary cells are complete"):
         run_phases(run, "all")
     m = read_manifest(run, "test")
     assert m["status"] == "failed" and m["primary_complete"] is True
-    assert list(m["cells"])[:3] == primary and set(m["cells"]) == set(plan_cells)
+    assert list(m["cells"])[: len(primary)] == primary and set(m["cells"]) == set(plan_cells)
     assert {c: x["status"] for c, x in m["cells"].items()} == {c: "done" if c in primary else "stopped" for c in plan_cells}
     monkeypatch.setattr(run_gate, "_group_projected", real_projected)
+    # `all` still writes the report after the budget stop, on what exists: the stopped cells are missing, by name.
+    a = read_manifest(run, "analyze")
+    assert a["status"] == "done" and a["verdict"] == "PRECONDITION_FAIL"
+    d = json.loads((run_dir / "report" / "decision.json").read_text())
+    assert d["header"]["primary_complete"] is True and d["header"]["cells_not_done"] == {c: "stopped" for c in plan_cells if c not in primary}
+    assert d["secondaries"]["gate.sec.messy"]["status"] == "missing" and d["secondaries"]["gate.sec.messy"]["reason"] == "selected: group stopped"
+    pcs = {p["id"]: p for p in d["preconditions"]}
+    # The verdict's cells all ran (PC2 and PC3 have their data); the stopped matched-budget secondary is only noted.
+    assert "no results" not in (pcs["PC2"]["reason"] or "") and "no results" not in (pcs["PC3"]["reason"] or "")
+    assert "matched-budget secondary was not run" in pcs["PC4"]["details"]["matched"]["notes"][0]
+    assert {m: x["verdict"] for m, x in d["verdict"]["modes"].items()} == {"push": "PRECONDITION_FAIL", "pull": "PRECONDITION_FAIL"}
 
     # 2. A failing group is recorded; the other cells still run; the phase fails.
     real_tasks = run_gate.run_gate_tasks
@@ -524,6 +535,18 @@ def test_offline_all_builds_the_test_split_after_the_freeze_runs_the_primary_fir
     assert m["test"]["upstream"] == {"freeze": m["freeze"]["fingerprint"], "build-test": m["build-test"]["fingerprint"]}
     assert set(m["test"]["inputs"]) == set(json.loads(run.freeze_path.read_text())["files"]), "the frozen files are the test's inputs"
     assert m["test"]["offline_check"]["models"] == ["mockllm/model"] and m["test"]["projected_usd"] > 100, "the live projection, whole worlds"
+
+    # The decision report: every section, every cell covered; the mock anchor fails PC1, so PRECONDITION_FAIL.
+    from ape.analyze_gate import SECTIONS
+
+    assert m["analyze"]["status"] == "done" and m["analyze"]["outputs"].keys() == {"decision", "report"}
+    d = json.loads((run_dir / "report" / "decision.json").read_text())
+    report = (run_dir / "report" / "report.md").read_text()
+    assert all(f"\n## {s}\n" in report for s in SECTIONS), [s for s in SECTIONS if f"\n## {s}\n" not in report]
+    assert d["verdict"]["label"] == "PRECONDITION_FAIL" and d["verdict"]["reasons"][0].startswith("PC1: ")
+    assert set(d["verdict"]["modes"]) == {"push", "pull"} and all(c["status"] == "done" for c in d["coverage"])
+    assert {c: s["status"] for c, s in d["secondaries"].items()} == dict.fromkeys(d["secondaries"], "done")
+    assert d["header"]["freeze"]["rehearsal"] is True and set(d["tables"]["arms"]) >= {"APG* (push)", "APG* (pull)", "LGR* (push)", "S7 (push)", "S5o (push)"}
 
     # The test worlds: split "test", built after the freeze; id_only renderings pair the first test seeds.
     worlds = json.loads((run_dir / "build-test" / "worlds.json").read_text())["worlds"]
@@ -565,12 +588,23 @@ def test_offline_all_builds_the_test_split_after_the_freeze_runs_the_primary_fir
     assert main(["all", *argv]) == 0
     assert _statuses(run_dir, PHASES) == dict.fromkeys(PHASES, "skipped")
 
+    from ape.analyze_gate import main as analyze_main
+
+    assert analyze_main(["--run-id", "t3", "--runs-dir", str(tmp / "runs")]) == 0, "the analyze CLI finds the run's mode and config"
+    assert read_manifest(run, "analyze")["status"] == "skipped"
+
     # 5. A frozen file edited after the freeze: build-test and test refuse, naming it; their manifests stay as they were.
     (out / "selected.yaml").write_text((out / "selected.yaml").read_text() + "\n# edited after the freeze\n")
     for phase in ("build-test", "test"):
         with pytest.raises(PhaseError, match=rf"{phase}: frozen file\(s\) changed since the freeze at .*config/selected.yaml \(.*\): changed"):
             run_phases(run, phase)
         assert read_manifest(run, phase)["status"] == "skipped"
+
+    # 6. A missing input fails its precondition by name; the report is still written.
+    (run_dir / "anchor" / "pc1.json").rename(run_dir / "anchor" / "pc1.json.moved")
+    assert run_phases(run, "analyze") == {"analyze": "done"}
+    d = json.loads((run_dir / "report" / "decision.json").read_text())
+    assert d["verdict"]["label"] == "PRECONDITION_FAIL" and "pc1.json missing: run the anchor phase" in d["verdict"]["reasons"][0]
 
 
 def test_the_test_split_is_built_only_by_the_orchestrators_build_test(clean_env, monkeypatch):
@@ -602,7 +636,7 @@ def test_test_groups_at_live_sizes_follow_the_plan():
     calibration = {"context": 300, "arms": {"APG*": {"env": {"APE_APG_FILL": "1", "APE_APG_BUDGET": "300", "APE_APG_SHORTLIST_K": "48"}}, "LGR*": {"converged": True, "env": {"APE_LGR_BUDGET": "350"}}, "S3s": {"converged": True, "env": {"APE_S3S_BUDGET": "310"}}}}
     groups = run_gate.test_groups(run, selected, calibration, offline=False)
     order = list(dict.fromkeys(g["cell"] for g in groups))
-    assert order[:3] == list(run_gate.PRIMARY_CELLS) and set(order) == {c.id for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES}
+    assert order[: len(run_gate.PRIMARY_CELLS)] == list(run_gate.PRIMARY_CELLS) and set(order) == {c.id for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES}
     by = {(g["cell"], g["name"]): g for g in groups}
     tests = p.cell("gate.build.test").spec["worlds"]
     # worlds-cells run the plan's worlds; n_tasks-cells the first whole worlds covering n_tasks (12 tasks each).

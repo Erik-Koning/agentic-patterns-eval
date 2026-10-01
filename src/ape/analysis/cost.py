@@ -37,7 +37,7 @@ def price_entry(e: LedgerEntry, prices: dict[str, dict[str, float]]) -> float:
 
 
 def ledger_frame(ledger: Ledger, prices: dict) -> pd.DataFrame:
-    rows = [{**e.context, "role": e.role, "model": e.model, "kind": e.kind, "usd": price_entry(e, prices)} for e in ledger.read()]
+    rows = [{**e.context, "role": e.role, "model": e.model, "kind": e.kind, "usd": price_entry(e, prices), "ts": e.ts} for e in ledger.read()]
     return pd.DataFrame(rows)
 
 
