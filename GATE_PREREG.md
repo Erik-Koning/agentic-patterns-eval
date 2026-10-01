@@ -79,7 +79,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 
 ## 5. Tuning (dev split only; equal budget)
 
-- **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.tuning`. Every configuration tried is logged in `cache/tuning_log.jsonl`. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
+- **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.run_gate tune --run-id <id>`. Every configuration tried is logged in `runs/<id>/tune/tuning_log.jsonl`; a re-run archives the previous log beside it (`tuning_log.<UTC time>.jsonl`), and archived logs count toward PC6 and are reported. The selections go to `runs/<id>/tune/selected.yaml`, which the freeze hashes. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
 - **LightRAG** (tuned by the skeptic): mode ∈ {local, global, hybrid, mix, naive}, per-query vs per-step, `top_k`, `chunk_top_k`, `max_entity_tokens`, `max_relation_tokens`, `max_total_tokens`. Rerank is off (D-004).
 - **APG** (tuned by the APG side): per-query vs per-step, `shortlistK` ∈ {12, 24, 48} (`APE_APG_SHORTLIST_K`), `minConfidence` (`APE_APG_MIN_CONFIDENCE`), routable vs non-routable categories, `maxPromptTokens`. The authoring prompt may be revised on dev only.
 - **S3s** (tuned by the skeptic): token budget and fusion depth.

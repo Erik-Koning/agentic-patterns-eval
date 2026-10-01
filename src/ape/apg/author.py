@@ -208,7 +208,7 @@ async def author_world(world: World, cfg: Config, author: AuthorFn, concurrency:
         return out.get("units", [])
 
     units = await asyncio.gather(*(one(c) for c in chunks))
-    doc, report = assemble(world, chunks, list(units), cfg.context_budget_tokens)
+    doc, report = assemble(world, chunks, list(units), cfg.apg_budget_tokens)
     emb = embedding_cache(cfg)
     meta = doc["meta"] = build_meta(world, author_id, emb.model)
     check = validate_graph(doc)

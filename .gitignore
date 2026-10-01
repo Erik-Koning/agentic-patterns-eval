@@ -8,5 +8,6 @@ __pycache__/
 /worlds/
 /indices/
 /cache/
+/runs/
 *.sqlite
 .DS_Store

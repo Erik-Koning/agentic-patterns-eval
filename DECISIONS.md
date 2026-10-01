@@ -127,7 +127,7 @@ Each entry records the decision, why it was made, and who made it.
   - multi-agent multipliers (2.5–3×)
   - the cached-input price and cache share
   - F1, F2 and F8 sizes (generators not built)
-- **Not affordable as planned:** D-017's Sol build path (+$905). It needs approval.
+- **Not affordable as planned:** D-017's Sol build path (+$905; +$957 once FX-6a priced the id_only and F5 dev worlds). It needs approval.
 - **Recalibration:** after the gate pilot and Study G's micro-pilot, `python -m ape.budget calibrate` replaces the priors with measured calls and tokens per (arm, model, effort, cell, delivery). Cuts are then revisited in reverse order (C5 first). FX-6 refuses a phase whose projected cost exceeds `remaining()`.
 
 ## Open (needs user input)

@@ -2,6 +2,8 @@
 # LightRAG and S3s candidates are owned by the skeptic, APG candidates by the APG owner.
 # Every candidate runs on the same dev cells. Selection: max mean dev success; candidates within
 # tie_pp of the best go to the lower cost.
+# Budget knobs are per arm (APE_S3S_BUDGET, APE_APG_BUDGET, APE_LGR_BUDGET; see ape.config), so one
+# system's candidates never move another system's budget.
 budget_per_system: 8
 tie_pp: 1.0
 dev_cells: [F7-10, F7-1000, F3-5, F3-60]
@@ -25,6 +27,6 @@ systems:
       - {id: lgr-q-hybrid, arm: LGR-q, env: {APE_LGR_MODE: hybrid}}
   S3s:
     candidates:
-      - {id: s3s-1000, arm: S3s, env: {APE_CONTEXT_BUDGET: "1000"}}
-      - {id: s3s-2000, arm: S3s, env: {APE_CONTEXT_BUDGET: "2000"}}
-      - {id: s3s-4000, arm: S3s, env: {APE_CONTEXT_BUDGET: "4000"}}
+      - {id: s3s-1000, arm: S3s, env: {APE_S3S_BUDGET: "1000"}}
+      - {id: s3s-2000, arm: S3s, env: {APE_S3S_BUDGET: "2000"}}
+      - {id: s3s-4000, arm: S3s, env: {APE_S3S_BUDGET: "4000"}}

@@ -36,16 +36,20 @@ studies:
       anchor:
         - {id: gate.anchor.index, kind: build, profile: anchor, worlds: {anchor-medical: 1}, systems: [lightrag],
            note: "PC1 LightRAG index, paper model gpt-4o-mini (D-009)"}
-        - {id: gate.anchor.runs, kind: anchor, profile: anchor, n_tasks: 766, modes: [hybrid, mix, naive],
-           note: "200 per type, all 166 Creative Generation (D-010); answer + 3 judge calls"}
+        - {id: gate.anchor.runs, kind: anchor, profile: anchor, n_tasks: 766, n_per_type: 200, modes: [hybrid, naive],
+           note: "200 per type, all 166 Creative Generation (D-010); answer + 3 judge calls; PC1 compares hybrid with naive"}
       builds:
         # D-017: Luna builder; ~550 chunks per F7-1000 world, ~68 per F3-60, ~8 for small worlds.
         - {id: gate.build.dev, kind: build, worlds: {F7-10: 2, F7-1000: 2, F3-5: 2, F3-60: 2},
            note: "tuning worlds; D-017 build-quality check"}
-        - {id: gate.build.dev-messy, kind: build, worlds: {F7-10: 1, F7-1000: 1}, note: "messy-exception dev worlds"}
+        - {id: gate.build.dev-messy, kind: build, worlds: {F7-10: 1, F7-1000: 1}, exception_style: messy,
+           note: "messy-exception dev worlds"}
+        - {id: gate.build.dev-id-only, kind: build, worlds: {F7-10: 2, F7-1000: 2}, exception_style: id_only,
+           note: "paired id_only renderings of the gate.build.dev F7 worlds (same seeds)"}
+        - {id: gate.build.dev-f5, kind: build, worlds: {F5-1hop: 2, F5-2hop: 2}, note: "F5 dev worlds for PC2 dev-side checks"}
         - {id: gate.build.pilot, kind: build, worlds: {F7-10: 4, F7-1000: 4, F3-5: 4, F3-60: 4}}
         - {id: gate.build.test, kind: build, worlds: {F7-10: 16, F7-1000: 16, F3-5: 16, F3-60: 16}}
-        - {id: gate.build.test-id-only, kind: build, worlds: {F7-10: 9, F7-1000: 9},
+        - {id: gate.build.test-id-only, kind: build, worlds: {F7-10: 9, F7-1000: 9}, exception_style: id_only,
            note: "paired id_only renderings of 9 test seeds per F7 cell (>= 100 tasks)"}
         - {id: gate.build.test-f5, kind: build, worlds: {F5-1hop: 9, F5-2hop: 9}}
       tuning:

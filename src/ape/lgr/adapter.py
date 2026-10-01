@@ -53,7 +53,8 @@ def kg_llm_func():
 
 
 def query_params(budget: int) -> dict:
-    """Defaults; the skeptic tunes these on dev (GATE_PREREG fairness rule 1)."""
+    """Defaults; the skeptic tunes these on dev (GATE_PREREG fairness rule 1). `budget` is the LightRAG arms'
+    own knob, `Config.lgr_budget_tokens` (APE_LGR_BUDGET, else APE_CONTEXT_BUDGET); explicit APE_LGR_* caps win."""
     return {
         "mode": os.environ.get("APE_LGR_MODE", "mix"),
         "top_k": int(os.environ.get("APE_LGR_TOP_K", "20")),
@@ -112,4 +113,4 @@ async def build_lgr_arm(arm: str, world: World, cfg: Config) -> LgrArm:
         raise RuntimeError(f"{wd} was built from a different world version")
     llm = kg_llm_func()
     rag = await open_rag(wd, world.id, llm, embedding_cache(cfg), query_time=True)
-    return LgrArm(arm, per_step, rag, ChunkIndex(chunk_world(world)), query_params(cfg.context_budget_tokens), manifest, kg_model=llm.model_name)
+    return LgrArm(arm, per_step, rag, ChunkIndex(chunk_world(world)), query_params(cfg.lgr_budget_tokens), manifest, kg_model=llm.model_name)

@@ -52,7 +52,7 @@ async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
     if arm == "S3s":
         emb = embedding_cache(cfg)
         await emb.embed([c.text for c in chunks], context={"world": world.id, "system": "flat"})
-        return FlatHybrid(chunks, emb, cfg.context_budget_tokens)
+        return FlatHybrid(chunks, emb, cfg.s3s_budget_tokens)
     if arm == "S6":
         return OracleContext(world)
     if arm == "S7":

@@ -4,6 +4,16 @@ Inspect tasks, build scripts and tests share one source of truth.
 Model IDs are deliberately unset by default: they are chosen at readiness E3 and
 recorded in PROVENANCE.md. `APE_EMBEDDINGS=fake` swaps in the offline hashed
 bag-of-words embedder used by dry runs and tests.
+
+Context budgets are per arm family, so tuning one system never moves another when all arms run
+in one process (the gate's test phase):
+
+    APE_S3S_BUDGET   S3s flat retrieval: tokens packed per compile
+    APE_APG_BUDGET   APG arms (APG-q/-s, APGo-q, S5o): compose's maxPromptTokens, and the graph default
+    APE_LGR_BUDGET   LightRAG arms: the base of `lgr.adapter.query_params` (entity/relation/total caps)
+
+Each defaults to APE_CONTEXT_BUDGET, then 2000. APE_CONTEXT_BUDGET itself remains S7's fallback
+target (after config/s7_targets.json and APE_S7_TARGET).
 """
 
 import os
@@ -18,6 +28,17 @@ ROOT = Path(__file__).resolve().parents[2]
 # Never overrides variables already set in the environment.
 load_dotenv(ROOT / ".env", override=False)
 
+DEFAULT_CONTEXT_BUDGET = 2000
+
+
+def budget_env(*names: str, default: int = DEFAULT_CONTEXT_BUDGET) -> int:
+    """The first of `names` set (non-empty) in the environment, as an int; else `default`."""
+    for name in names:
+        raw = os.environ.get(name, "").strip()
+        if raw:
+            return int(raw)
+    return default
+
 
 @dataclass(frozen=True)
 class Config:
@@ -26,7 +47,11 @@ class Config:
     cache_dir: Path = field(default_factory=lambda: Path(os.environ.get("APE_CACHE", ROOT / "cache")))
     embeddings_backend: str = field(default_factory=lambda: os.environ.get("APE_EMBEDDINGS", "openai"))
     embedding_model: str = field(default_factory=lambda: os.environ.get("APE_EMBEDDING_MODEL", "UNSET-see-E3"))
-    context_budget_tokens: int = field(default_factory=lambda: int(os.environ.get("APE_CONTEXT_BUDGET", "2000")))
+    # Shared default; arms read their own knob below (see the module docstring). S7 falls back to this one.
+    context_budget_tokens: int = field(default_factory=lambda: budget_env("APE_CONTEXT_BUDGET"))
+    s3s_budget_tokens: int = field(default_factory=lambda: budget_env("APE_S3S_BUDGET", "APE_CONTEXT_BUDGET"))
+    apg_budget_tokens: int = field(default_factory=lambda: budget_env("APE_APG_BUDGET", "APE_CONTEXT_BUDGET"))
+    lgr_budget_tokens: int = field(default_factory=lambda: budget_env("APE_LGR_BUDGET", "APE_CONTEXT_BUDGET"))
     max_turns: int = field(default_factory=lambda: int(os.environ.get("APE_MAX_TURNS", "12")))
 
     def world_path(self, world_id: str) -> Path:

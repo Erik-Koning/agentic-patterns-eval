@@ -49,7 +49,7 @@ def test_tune_logs_every_candidate_and_the_selection(offline_env):
         "budget_per_system": 2,
         "tie_pp": 1.0,
         "dev_cells": ["F7-10"],
-        "systems": {"S3s": {"candidates": [{"id": "small", "arm": "S3s", "env": {"APE_CONTEXT_BUDGET": "300"}}, {"id": "big", "arm": "S3s", "env": {"APE_CONTEXT_BUDGET": "2000"}}]}},
+        "systems": {"S3s": {"candidates": [{"id": "small", "arm": "S3s", "env": {"APE_S3S_BUDGET": "300"}}, {"id": "big", "arm": "S3s", "env": {"APE_S3S_BUDGET": "2000"}}]}},
     }
     log_path = offline_env / "tuning.jsonl"
     chosen = tune(
@@ -64,7 +64,7 @@ def test_tune_logs_every_candidate_and_the_selection(offline_env):
     # Candidates differ only in env knobs, which are not part of Inspect's task identity: each needs its own log dir.
     assert lines[0]["log_files"] != lines[1]["log_files"]
     assert lines[2]["selected"] == chosen["candidate"]["id"]
-    assert "APE_CONTEXT_BUDGET" not in os.environ
+    assert "APE_S3S_BUDGET" not in os.environ
 
 
 def test_failed_candidate_is_logged_and_unselectable():

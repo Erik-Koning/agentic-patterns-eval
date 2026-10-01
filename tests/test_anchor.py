@@ -1,58 +1,22 @@
 """GraphRAG-Bench anchor (PC1): loader, official ACC scorer, pc1_check, and an offline end-to-end run."""
 
 import asyncio
-import hashlib
 import json
 import re
 
 import pytest
 from inspect_ai import eval as inspect_eval
 from inspect_ai.log import resolve_sample_attachments
-from ape.models import agent_model, load_profile, role_models
-from inspect_ai.model import ModelOutput, get_model
-from lightrag.prompt import PROMPTS
 
 from ape.anchor import accuracy as acc
+from ape.anchor import fixture
+from ape.anchor.fixture import CORPUS, MODEL, answer_in, mock_answerer
+from ape.anchor.fixture import all_questions as _questions
+from ape.anchor.fixture import write_dataset as _write_dataset
 from ape.anchor.graphragbench import QUESTION_TYPES, build_index, load_medical, pc1_check, pc1_from_logs, pc1_tolerance
 from ape.config import Config
-from ape.llm.mock_agent import mock_kg
+from ape.models import agent_model, load_profile, role_models
 from ape.tasks.anchor_graphragbench import graphragbench_anchor
-
-MODEL = "mockllm/model"
-TOPICS = ["basal cell carcinoma", "squamous cell carcinoma", "melanoma", "Merkel cell carcinoma", "actinic keratosis"]
-TEMPLATES = {
-    "Fact Retrieval": ("According to the guideline, what is {t}?", "{T} is a skin condition covered by the guideline."),
-    "Complex Reasoning": ("Why does sun exposure raise the risk of {t}?", "Because UV damage accumulates in skin cells, which drives {t}."),
-    "Contextual Summarize": ("Summarize how the guideline manages {t}.", "The guideline recommends biopsy, then surgery or Imiquimod for {t}."),
-    "Creative Generation": ("Write a short patient letter about the guideline for {t}.", "Dear patient, {t} is treatable when found early."),
-}
-# Repeated so LightRAG splits it into 3 chunks, and lexically close enough to the questions that
-# fake bag-of-words vectors clear LightRAG's 0.2 cosine threshold (read at import, so not settable here).
-FACTS = [
-    f"{t[0].upper() + t[1:]} is a skin condition covered by the guideline. Sun exposure raises the risk of {t}. "
-    f"The guideline recommends biopsy, then surgery or Imiquimod for {t}."
-    for t in TOPICS
-]
-CORPUS = " ".join(FACTS * 12)
-
-
-def _questions() -> list[dict]:
-    out = []
-    for qtype, (q, a) in TEMPLATES.items():
-        for t in TOPICS:
-            qid = "Medical-" + hashlib.sha1(f"{qtype}{t}".encode()).hexdigest()[:8]
-            answer = a.format(t=t, T=t[0].upper() + t[1:])
-            out.append({"id": qid, "source": "Medical", "question": q.format(t=t), "answer": answer, "question_type": qtype, "evidence": answer, "evidence_relations": answer})
-    return out
-
-
-def _write_dataset(root, questions=None, corpus=CORPUS):
-    """The repo layout and field names of GraphRAG-Benchmark's Datasets/ folder."""
-    (root / "Datasets" / "Corpus").mkdir(parents=True, exist_ok=True)
-    (root / "Datasets" / "Questions").mkdir(parents=True, exist_ok=True)
-    (root / "Datasets" / "Corpus" / "medical.json").write_text(json.dumps({"corpus_name": "Medical", "context": corpus}))
-    (root / "Datasets" / "Questions" / "medical_questions.json").write_text(json.dumps(questions or _questions()))
-    return root
 
 
 def _ids(bench) -> list[str]:
@@ -80,11 +44,6 @@ def test_loader_is_stratified_deterministic_and_prefix_stable(tmp_path):
 # --- official ACC ---
 
 
-def _answer_in(statement_prompt: str) -> str:
-    """The text under judgement (the prompt's few-shot example has an "Answer:" too)."""
-    return statement_prompt.rsplit("Answer: ", 1)[1].split("\n\nGenerated Statements:")[0]
-
-
 def _judge(statements: dict[str, list[str]], classification: str):
     calls = []
 
@@ -92,7 +51,7 @@ def _judge(statements: dict[str, list[str]], classification: str):
         calls.append(prompt)
         if "Current Analysis:" in prompt:
             return classification
-        return json.dumps(statements[_answer_in(prompt)])
+        return json.dumps(statements[answer_in(prompt)])
 
     return generate, calls
 
@@ -179,41 +138,13 @@ def test_pc1_tolerance_depends_on_the_papers_model():
 
 # --- end to end ---
 
-D, DONE = PROMPTS["DEFAULT_TUPLE_DELIMITER"], PROMPTS["DEFAULT_COMPLETION_DELIMITER"]
-GOLD = {q["question"]: q["answer"] for q in _questions() if q["question_type"] == "Fact Retrieval"}
 extract_calls: list[str] = []
+fake_extract = fixture.fake_extractor(extract_calls)
 
 
-async def fake_extract(prompt: str, system_prompt: str | None = None, history_messages: list | None = None, **_kwargs) -> str:
-    """Build-model stand-in in LightRAG's extraction format: capitalised terms, chained by relations."""
-    extract_calls.append(prompt)
-    m = re.search(r"---Input Text---\n```\n(.*?)\n```", prompt, re.S)
-    if not m:  # gleaning / summary calls
-        return DONE
-    names = sorted(set(re.findall(r"\b[A-Z][a-z]{3,}\b", m.group(1))))
-    rows = [f"entity{D}{n}{D}Concept{D}{n} appears in the guideline." for n in names]
-    rows += [f"relation{D}{a}{D}{b}{D}co-occurs{D}{a} appears with {b}." for a, b in zip(names, names[1:])]
-    return "\n".join(rows + [DONE])
-
-
-def mock_answerer(messages, tools, tool_choice, config) -> ModelOutput:
-    """Default model: LightRAG keywords, then gold answers for Fact Retrieval only."""
-    if config.response_schema is not None:
-        return mock_kg(messages, tools, tool_choice, config)
-    question = next(m.text for m in reversed(messages) if m.role == "user")
-    return ModelOutput.from_content(MODEL, GOLD.get(question, "I don't know"))
-
-
-def mock_judge(messages, tools, tool_choice, config) -> ModelOutput:
-    """Judge that splits sentences and classifies statements by exact match."""
+def mock_judge(messages, tools, tool_choice, config):
     assert config.temperature == 0.0 and config.seed == 42, "official judge settings"
-    prompt = messages[-1].text
-    if "Current Analysis:" in prompt:
-        tail = prompt.split("Current Analysis:")[-1]
-        ans, gt = (json.loads(re.search(rf"{k}: (.*)\n", tail).group(1)) for k in ("Answer Statements", "Ground Truth Statements"))
-        out = {"TP": [s for s in ans if s in gt], "FP": [s for s in ans if s not in gt], "FN": [s for s in gt if s not in ans]}
-        return ModelOutput.from_content(MODEL, json.dumps({k: [{"statement": s, "reason": "mock"} for s in v] for k, v in out.items()}))
-    return ModelOutput.from_content(MODEL, json.dumps([s for s in re.split(r"(?<=\.)\s+", _answer_in(prompt)) if s]))
+    return fixture.mock_judge(messages, tools, tool_choice, config)
 
 
 @pytest.fixture

@@ -6,16 +6,16 @@
 
 | Study | Phases (conservative $) | Conservative | Expected | FX-5 target |
 |---|---|---|---|---|
-| Gate | smoke 3 · anchor 9 · builds 48 · tuning 8 · pilot 11 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **201** | 177 | ≤ 700 |
+| Gate | smoke 3 · anchor 6 · builds 51 · tuning 8 · pilot 11 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **201** | 176 | ≤ 700 |
 | Main study | builds 5 · micro-pilot 10 · tuning 29 · pilot 13 · A 105 · B 142 · C 23 · F 786 | **1,114** | 894 | ≤ 1,000 |
 | Study G | micro-pilot 11 · tuning 24 · capability anchor 51 · context management 1,737 · topology 1,556 | **3,378** | 2,130 | ≤ 2,700 |
 | **Total** | | **4,693** | **3,201** | ≤ 5,000 |
 | Contingency | $5,000 − conservative total | 307 | | ~600 |
 
-- **By tier** (conservative / expected): Sol-high 1,972 / 1,412 · Astra-high 1,955 / 1,222 · Luna-high 711 / 535 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 9 / 8 · smoke cap 3.
+- **By tier** (conservative / expected): Sol-high 1,972 / 1,412 · Astra-high 1,955 / 1,222 · Luna-high 713 / 537 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 6 / 6 · smoke cap 3.
 - **The total fits.** Main study and Study G are over their FX-5 targets by $114 and $678. The gate's underspend covers part of that. The conservative scenario prices every cached token at the full input price, so expected spend is ≈ $3.2K. The orchestrator's budget check (FX-6) stops any phase whose projected cost exceeds what remains.
 - **Biggest drivers:** Study G on Astra ($1,955), Study G on Sol ($1,201), and Study F on Sol ($771).
-- **D-017's Sol build path** would add **$905**. That needs approval.
+- **D-017's Sol build path** would add **$957**. That needs approval.
 
 ## Plan changes and cuts
 

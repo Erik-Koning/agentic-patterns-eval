@@ -52,7 +52,7 @@ async def ensure_graph(world: World, kind: str, cfg: Config, emb: EmbeddingCache
         return json.loads(path.read_text())
     if kind != "oracle":
         raise FileNotFoundError(f"{path} missing: build the authored graph first (ape.apg.author)")
-    doc = await embed_graph(build_oracle(world, cfg.context_budget_tokens), emb, {"world": world.id, "system": "apg-oracle"})
+    doc = await embed_graph(build_oracle(world, cfg.apg_budget_tokens), emb, {"world": world.id, "system": "apg-oracle"})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc))
     return doc
@@ -126,4 +126,4 @@ async def build_apg_arm(arm: str, world: World, cfg: Config) -> ApgArm:
     emb = embedding_cache(cfg)
     doc = await ensure_graph(world, kind, cfg, emb)
     fill = os.environ.get("APE_APG_FILL") == "1"
-    return ApgArm(arm, per_step, doc, emb, ChunkIndex(chunk_world(world)), cfg.context_budget_tokens, fill=fill)
+    return ApgArm(arm, per_step, doc, emb, ChunkIndex(chunk_world(world)), cfg.apg_budget_tokens, fill=fill)

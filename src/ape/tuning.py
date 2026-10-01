@@ -9,10 +9,10 @@ the cheaper one. Cost is Inspect's, priced from `config/model_costs.yaml`; an un
 fails the candidate rather than reading as $0 and winning the tie-break (mockllm is exempt).
 
 Each candidate runs as one `ape.runner.run_evals` set over all dev cells (FX-3: retries, the 2%
-error budget, resume), in its own log dir `cache/tuning_logs/<system>/<id>-<spec hash>`: its env
-knobs are not part of Inspect's task identity, so candidates must not share a dir. Re-running
-`tune` reuses each candidate's finished logs. A sample that errored within the error budget counts
-as a failure.
+error budget, resume), in its own log dir `<log_dir>/<system>/<id>-<spec hash>` (default log_dir
+`cache/tuning_logs`; the gate orchestrator passes its run's): its env knobs are not part of Inspect's
+task identity, so candidates must not share a dir. Re-running `tune` reuses each candidate's finished
+logs. A sample that errored within the error budget counts as a failure.
 
     uv run python -m ape.tuning --system LightRAG [--profile gate]   # agent + kg models from config/models.yaml
 """
@@ -83,7 +83,9 @@ def _succeeded(sample) -> bool:
     return score is not None and score.value == "C"
 
 
-def run_candidate(cand: dict, cells: list[str], model, model_roles: dict, limit_worlds: int | None, epochs: int, log_dir: str | Path, profile=None) -> dict:
+def run_candidate(
+    cand: dict, cells: list[str], model, model_roles: dict, limit_worlds: int | None, epochs: int, log_dir: str | Path, profile=None, costs_path: Path | None = None
+) -> dict:
     from inspect_ai.log import read_eval_log
 
     from .runner import log_path, run_evals
@@ -95,8 +97,9 @@ def run_candidate(cand: dict, cells: list[str], model, model_roles: dict, limit_
             for family, level in (cell.split("-", 1) for cell in cells)
         ]
         # allow_dirty: logs of an earlier run with other models or --limit-worlds may share the dir.
+        prices = {"costs_path": costs_path} if costs_path is not None else {}
         success, logs = run_evals(
-            tasks, candidate_dir(log_dir, cand), profile=profile, model=model, model_roles=model_roles, epochs=epochs, display="none", log_dir_allow_dirty=True
+            tasks, candidate_dir(log_dir, cand), profile=profile, model=model, model_roles=model_roles, epochs=epochs, display="none", log_dir_allow_dirty=True, **prices
         )
     if not success:
         failed = [f"{_cell(h)}: {h.error.message if h.error else h.status}" for h in logs if h.status != "success"]
@@ -132,15 +135,21 @@ def tune(
     grid: dict | None = None,
     log_path: Path | None = None,
     profile=None,
+    log_dir: Path | None = None,
+    costs_path: Path | None = None,
 ) -> dict:
+    """Run every candidate of `system`, log each to `log_path` (default cache/tuning_log.jsonl), and return
+    the selected record. Eval logs go to `<log_dir>/<system>/...` (default cache/tuning_logs); `costs_path`
+    is the price table for Inspect (default config/model_costs.yaml)."""
     grid = grid or load_grid()
     cfg = Config()
     log_path = log_path or cfg.cache_dir / "tuning_log.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    system_dir = Path(log_dir or cfg.cache_dir / "tuning_logs") / system
     records = []
     for cand in candidates(grid, system):
         try:
-            result = {"status": "ok", **run_candidate(cand, grid["dev_cells"], model, model_roles, limit_worlds, epochs, cfg.cache_dir / "tuning_logs" / system, profile)}
+            result = {"status": "ok", **run_candidate(cand, grid["dev_cells"], model, model_roles, limit_worlds, epochs, system_dir, profile, costs_path)}
         except RuntimeError as e:  # run failure: logged (PC6 evidence) and unselectable; config errors still raise
             result = {"status": "failed", "error": str(e)[:500], "mean_success": None, "cost_usd": None}
         rec = {"system": system, "candidate": cand, **result, "ts": time.time()}
