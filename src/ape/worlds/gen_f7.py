@@ -10,9 +10,12 @@ which makes the task multi-step.
 
 `exception_style` controls how an exception refers to its policy (EXPERIMENT_AUDIT B3):
 "descriptive" restates the policy's domain, region and band, so any retriever can find it;
-"id_only" names only the policy ID, so finding it requires following the reference. Both
-styles come from the same random stream: identical policies, tasks and gold answers, so the
-effect of the rendering is a paired comparison.
+"id_only" names only the policy ID, so finding it requires following the reference.
+"messy" drops all IDs and varies the wording (synonyms, templates), and exceptions point at
+their policy only by description: a realistic, harder test of graph authoring and
+extraction. All styles share one random stream for content (identical policies, tasks and
+gold answers); messy wording draws from its own stream. So the effect of the rendering is a
+paired comparison.
 """
 
 import random
@@ -49,7 +52,29 @@ APPROVERS = ["team_lead", "tier2_supervisor", "compliance_officer", "regional_ma
 DOCUMENTS = ["none", "receipt", "photo_id", "police_report", "bank_statement", "delivery_photo"]
 LEVELS = {"10": (2, 1, 5), "100": (5, 2, 10), "1000": (20, 5, 10)}  # (domains, regions, bands)
 EXCEPTION_RATE = 0.3
-EXCEPTION_STYLES = {"descriptive": "desc", "id_only": "idonly"}
+EXCEPTION_STYLES = {"descriptive": "desc", "id_only": "idonly", "messy": "messy"}
+SYNONYMS = {
+    "refund": ["money-back", "reimbursement"],
+    "return": ["send-back", "return-of-goods"],
+    "shipping-delay compensation": ["late-delivery compensation", "delay credit"],
+    "lost-parcel": ["missing-package", "undelivered-parcel"],
+    "account-unlock": ["account-access restoration", "login-lockout"],
+    "data-deletion": ["personal-data erasure", "account-data removal"],
+    "billing-dispute": ["invoice-dispute", "charge-query"],
+    "chargeback": ["card-reversal", "payment-reversal"],
+    "warranty": ["guarantee", "product-warranty"],
+    "price-adjustment": ["price-match", "price-correction"],
+    "subscription-cancellation": ["plan-cancellation", "membership-termination"],
+    "loyalty-points": ["rewards-points", "points-balance"],
+    "gift-card": ["gift-voucher", "store-card"],
+    "damaged-goods": ["broken-item", "damaged-delivery"],
+    "order-modification": ["order-change", "order-amendment"],
+    "address-change": ["delivery-address update", "shipping-address change"],
+    "fraud-review": ["suspected-fraud check", "fraud investigation"],
+    "tax-exemption": ["tax-relief", "VAT-exemption"],
+    "bulk-order": ["wholesale-order", "large-quantity order"],
+    "service-credit": ["service-outage credit", "downtime credit"],
+}
 
 _APPROVER_TEXT = {
     "team_lead": "team lead",
@@ -90,8 +115,30 @@ def _money(x: int) -> str:
     return f"${x:,}"
 
 
+def _messy_policy(mrng: random.Random, phrase: str, region: str, lo: int, hi: int, outcome: str) -> str:
+    name = mrng.choice([phrase, *SYNONYMS[phrase]])
+    return mrng.choice(
+        [
+            f"For {name} requests from {region} customers between {_money(lo)} and {_money(hi)} (upper bound excluded), {outcome}.",
+            f"In {region}, when a customer asks for {name} and the amount is {_money(lo)} up to but not including {_money(hi)}, staff must {outcome}.",
+            f"{name.capitalize()} cases ({region}; {_money(lo)} or more, below {_money(hi)}): {outcome}.",
+        ]
+    )
+
+
+def _messy_exception(mrng: random.Random, phrase: str, region: str, lo: int, hi: int, tier: str, outcome: str) -> str:
+    name = mrng.choice([phrase, *SYNONYMS[phrase]])
+    return mrng.choice(
+        [
+            f"Note for {tier}-status customers: the {name} rule for {region} covering {_money(lo)} to under {_money(hi)} is replaced; instead, {outcome}.",
+            f"Amendment: where a {tier} customer in {region} raises a {name} request of at least {_money(lo)} and under {_money(hi)}, the usual handling does not apply; {outcome}.",
+        ]
+    )
+
+
 def generate(level: str, relational: bool, split: str, seed: int, n_tasks: int, exception_style: str = "descriptive") -> World:
     rng = random.Random(f"F7|{level}|{relational}|{split}|{seed}")  # style-independent: paired worlds
+    mrng = random.Random(f"F7-messy|{level}|{relational}|{split}|{seed}")  # wording only
     n_dom, n_reg, n_band = LEVELS[level]
     domains = sorted(rng.sample(DOMAINS, n_dom))
     regions = sorted(rng.sample(REGIONS, n_reg))
@@ -118,11 +165,14 @@ def generate(level: str, relational: bool, split: str, seed: int, n_tasks: int, 
                 prev = o
                 pid = f"P-{policy_ids[i]}"
                 i += 1
-                text = (
-                    f"Policy {pid} ({dom.replace('_', ' ').title()}, {region} region). For a {dom_phrase} request "
-                    f"from a customer in the {region} region with an amount of at least {_money(lo)} and under "
-                    f"{_money(hi)}, the agent must {outcome_text(o)}."
-                )
+                if exception_style == "messy":
+                    text = _messy_policy(mrng, dom_phrase, region, lo, hi, outcome_text(o))
+                else:
+                    text = (
+                        f"Policy {pid} ({dom.replace('_', ' ').title()}, {region} region). For a {dom_phrase} request "
+                        f"from a customer in the {region} region with an amount of at least {_money(lo)} and under "
+                        f"{_money(hi)}, the agent must {outcome_text(o)}."
+                    )
                 world.add_fact(f"f-{pid}", text, "policy")
                 world.policies.append(Policy(pid, dom, region, lo, hi, o, f"f-{pid}"))
 
@@ -141,10 +191,13 @@ def generate(level: str, relational: bool, split: str, seed: int, n_tasks: int, 
                 if exception_style == "descriptive"
                 else ""
             )
-            text = (
-                f"Exception {xid} (amends Policy {p.id}{scope}). When the customer holds {tier} status, Policy {p.id} "
-                f"does not apply as written: the agent must instead {outcome_text(o)}."
-            )
+            if exception_style == "messy":
+                text = _messy_exception(mrng, dict(DOMAINS)[p.domain], p.region, p.lo, p.hi, tier, outcome_text(o))
+            else:
+                text = (
+                    f"Exception {xid} (amends Policy {p.id}{scope}). When the customer holds {tier} status, Policy {p.id} "
+                    f"does not apply as written: the agent must instead {outcome_text(o)}."
+                )
             world.add_fact(f"f-{xid}", text, "exception")
             world.exceptions.append(Exception_(xid, p.id, tier, o, f"f-{xid}"))
 

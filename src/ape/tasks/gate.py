@@ -16,6 +16,7 @@ from ape.agent.arms import arm_provider, load_world
 from ape.agent.kb_react import kb_agent
 from ape.config import Config
 from ape.scorers.success import delivered_evidence, task_success
+from ape.scorers.taxonomy import error_analysis
 from ape.worlds.gen_f7 import EXCEPTION_STYLES
 from ape.worlds.spec import World
 
@@ -80,7 +81,7 @@ def gate(
     return Task(
         dataset=MemoryDataset(gate_samples(family, level, split, relational, limit_worlds, exception_style), name=f"{family}-{level}-{split}"),
         solver=kb_agent(arm_provider(arm, cfg), load_world, exposure=exposure, max_turns=cfg.max_turns, delivery=delivery),
-        scorer=[task_success(), delivered_evidence()],
+        scorer=[task_success(), delivered_evidence(), error_analysis()],
         metadata={
             "arm": arm,
             "exposure": exposure,

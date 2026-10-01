@@ -134,3 +134,20 @@ def test_apg_fill_adds_context_up_to_the_budget(fake_embeddings):
     assert count_tokens(filled.text) <= 1500
     assert count_tokens(filled.text) > count_tokens(plain.text) and filled.route["filled"]
     assert set(plain.contributors) <= set(filled.contributors)
+
+
+# ---- messy rendering (realistic authoring difficulty) ----
+
+def test_messy_rendering_is_paired_and_carries_no_ids():
+    import re
+
+    clean = make_world("F7", "100", "dev", 0, 40, exception_style="descriptive")
+    messy = make_world("F7", "100", "dev", 0, 40, exception_style="messy")
+    assert "-rel-messy-" in messy.id
+    assert [t.gold for t in clean.tasks] == [t.gold for t in messy.tasks]
+    assert messy.content_hash() == make_world("F7", "100", "dev", 0, 40, exception_style="messy").content_hash()
+    for f in messy.facts.values():
+        assert not re.search(r"\b[PX]-\d+", f.text), f.text
+    from ape.worlds.generate import solve
+
+    assert all(solve(messy, t) == t.gold for t in messy.tasks)

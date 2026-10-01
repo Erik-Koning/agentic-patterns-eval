@@ -68,11 +68,19 @@ async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
     raise ValueError(f"unknown arm {arm}")
 
 
+def config_fingerprint() -> tuple:
+    """Every APE_* setting in force. Part of the arm cache key, so a tuning run never reuses an arm
+    built under a different configuration."""
+    import os
+
+    return tuple(sorted((k, v) for k, v in os.environ.items() if k.startswith("APE_")))
+
+
 def arm_provider(arm: str, cfg: Config | None = None):
     cfg = cfg or Config()
 
     async def provide(world: World) -> DeliveryArm:
-        key = (arm, world.id, str(cfg.worlds_dir), str(cfg.cache_dir), id(asyncio.get_running_loop()))
+        key = (arm, world.id, str(cfg.worlds_dir), str(cfg.cache_dir), config_fingerprint(), id(asyncio.get_running_loop()))
         lock = _locks.setdefault(key, asyncio.Lock())
         async with lock:
             if key not in _cache:

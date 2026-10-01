@@ -37,7 +37,7 @@ def main() -> None:
     ap.add_argument("--tasks", type=int, default=12)
     ap.add_argument("--independent", action="store_true", help="F7 without exceptions")
     ap.add_argument("--no-embed", action="store_true")
-    ap.add_argument("--exception-style", choices=["descriptive", "id_only"], default="descriptive", help="F7 relational only")
+    ap.add_argument("--exception-style", choices=["descriptive", "id_only", "messy"], default="descriptive", help="F7 relational only")
     args = ap.parse_args()
     ids = asyncio.run(build(args.split, args.family, args.levels, args.worlds, args.tasks, not args.independent, not args.no_embed, args.exception_style))
     print("\n".join(ids))

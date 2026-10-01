@@ -39,7 +39,8 @@ def test_baseline_arms_run_end_to_end(offline_env, family, level, arm):
             assert key in s.store, key
         rec = s.store["compile_log"][0]
         assert {"tokens", "prompt_hash", "unit_ids", "fact_ids"} <= set(rec)
-        assert set(s.scores) == {"task_success", "delivered_evidence"}
+        assert set(s.scores) == {"task_success", "delivered_evidence", "error_analysis"}
+        assert s.scores["error_analysis"].metadata["error"]
     if arm == "S6":
         assert all(s.scores["delivered_evidence"].value["evidence_recall"] == 1.0 for s in log.samples)
     per_step = arm == "S3s"

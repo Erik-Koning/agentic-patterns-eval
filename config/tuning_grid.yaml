@@ -1,0 +1,30 @@
+# Dev tuning candidates (GATE_PREREG §5). Declared BEFORE any dev run; at most budget_per_system each.
+# LightRAG and S3s candidates are owned by the skeptic, APG candidates by the APG owner.
+# Every candidate runs on the same dev cells. Selection: max mean dev success; candidates within
+# tie_pp of the best go to the lower cost.
+budget_per_system: 8
+tie_pp: 1.0
+dev_cells: [F7-10, F7-1000, F3-5, F3-60]
+
+systems:
+  APG:
+    candidates:
+      - {id: apg-s-k12, arm: APG-s, env: {APE_APG_SHORTLIST_K: "12"}}
+      - {id: apg-s-k24, arm: APG-s, env: {APE_APG_SHORTLIST_K: "24"}}
+      - {id: apg-s-k48, arm: APG-s, env: {APE_APG_SHORTLIST_K: "48"}}
+      - {id: apg-s-k24-c40, arm: APG-s, env: {APE_APG_SHORTLIST_K: "24", APE_APG_MIN_CONFIDENCE: "0.40"}}
+      - {id: apg-q-k12, arm: APG-q, env: {APE_APG_SHORTLIST_K: "12"}}
+      - {id: apg-q-k24, arm: APG-q, env: {APE_APG_SHORTLIST_K: "24"}}
+  LightRAG:
+    candidates:
+      - {id: lgr-s-mix, arm: LGR-s, env: {APE_LGR_MODE: mix}}
+      - {id: lgr-s-hybrid, arm: LGR-s, env: {APE_LGR_MODE: hybrid}}
+      - {id: lgr-s-local, arm: LGR-s, env: {APE_LGR_MODE: local}}
+      - {id: lgr-s-mix-top40, arm: LGR-s, env: {APE_LGR_MODE: mix, APE_LGR_TOP_K: "40", APE_LGR_CHUNK_TOP_K: "20"}}
+      - {id: lgr-q-mix, arm: LGR-q, env: {APE_LGR_MODE: mix}}
+      - {id: lgr-q-hybrid, arm: LGR-q, env: {APE_LGR_MODE: hybrid}}
+  S3s:
+    candidates:
+      - {id: s3s-1000, arm: S3s, env: {APE_CONTEXT_BUDGET: "1000"}}
+      - {id: s3s-2000, arm: S3s, env: {APE_CONTEXT_BUDGET: "2000"}}
+      - {id: s3s-4000, arm: S3s, env: {APE_CONTEXT_BUDGET: "4000"}}
