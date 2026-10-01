@@ -1,0 +1,168 @@
+# Cost-model assumptions (FIX_PLAN FX-5; read by `ape.budget`). Token counts are per call, tiktoken-ish.
+#
+# Every number here is a PRIOR. Where it comes from:
+#   [measured]  offline measurement in this repo (context sizes, chunk counts)
+#   [given]     FX-5 design value, deliberately conservative
+#   [assumed]   our estimate; no measurement exists yet
+# After the gate pilot (and Study G's micro-pilot), `python -m ape.budget calibrate LOGS...` writes
+# config/budget_calibration_measured.yaml, and the model prefers those measured values per
+# (arm, agent model, effort, cell, delivery). Prices always come from config/model_costs.yaml.
+
+# --- Agent calls (gate and main study: one sample = one task) ---------------------------------------
+
+# Output tokens per call, INCLUDING reasoning tokens, by the role's reasoning effort. [given]
+# `default` is for a model called without an effort (GPT-6 then runs at its default, medium).
+output_tokens_per_call: {high: 1500, medium: 800, low: 400, default: 800}
+
+# Agent generations per sample, by cell (e.g. F1-32) or family (F7) and delivery mode. [given for F7/F3/F5/F8]
+# F1/F2 (main study; generators not built yet) are [assumed]: one call per lookup or hop, batched by
+# parallel tool calls, plus a final answer.
+calls_per_sample:
+  F7: {push: 4, pull: 5}
+  F3: {push: 5, pull: 5}
+  F5: {push: 2, pull: 3}
+  F1-2: {push: 4}
+  F1-32: {push: 12}
+  F2-2: {push: 4}
+  F2-10: {push: 11}
+
+# Input per agent call = base + delivered context (+ pull factor) + history.
+base_input_per_call: 800          # system prompt, tool definitions, task [given]
+history_per_prior_call: 250       # each earlier turn's tool call + tool result left in the history [assumed]
+pull_context_factor: 1.5          # pull: search_kb results stay in the history, ~1.5 blocks in view on average [assumed]
+
+# Monolith (S1 and the MONO-delivery multi-agent arms) context = the whole corpus, per cell. [measured, F7/F3]
+corpus_tokens:
+  F7-10: 940         # [measured 2026-10-01, descriptive rendering]
+  F7-100: 9300       # [measured]
+  F7-1000: 90500     # [measured; descriptive exceptions add ~8% over id_only]
+  F3-5: 900
+  F3-60: 9500
+  F1-2: 2000        # [assumed] generators not built
+  F1-32: 2000
+  F2-2: 2000
+  F2-10: 2000
+
+# TE-all (tool-exposure sensitivity): every tool bound, so tool definitions grow the base input. [assumed]
+tool_definitions_all: {F3-5: 500, F3-60: 6000}
+
+# Arms. context: tokens delivered per compile, or `corpus` (cell's corpus_tokens). [measured: APG ~120, LightRAG
+# ~2,300, S3s ~2,000; S5o/S6/S7 sized like APG*]. compile: per_query (once, in the system prompt, D-005) or
+# per_step (every agent call). kg: the per-compile kg-role call (APG classify, LightRAG keywords) or null.
+# embed: one query embedding per compile. multiplier: generations relative to the single agent [assumed,
+# brief §7.2: multi-agent ~2-3x single-agent tokens]; it scales agent, kg and embedding calls alike.
+# cache: class for the `expected` cache scenario. `like:` copies another arm, then applies the fields given.
+arms:
+  S1: {context: corpus, compile: per_query, kg: null, embed: false, cache: monolith}
+  S3s: {context: 2000, compile: per_step, kg: null, embed: true, cache: per_step}
+  APG-q: {context: 150, compile: per_query, kg: apg_classify, embed: true, cache: per_query}
+  APG-s: {context: 150, compile: per_step, kg: apg_classify, embed: true, cache: per_step}
+  APG*: {like: APG-s}                 # selected on dev; per-step is the costlier variant (a classify per step)
+  APGo-q: {like: APG-q}
+  S5o: {like: APG-s}
+  LGR-q: {context: 2300, compile: per_query, kg: lgr_keywords, embed: true, cache: per_query}
+  LGR-s: {context: 2300, compile: per_step, kg: lgr_keywords, embed: true, cache: per_step}
+  LGR*: {like: LGR-s}
+  LGR-naive: {like: LGR-s, kg: null}  # naive mode makes no keyword call (PC2 comparator on F5)
+  S6: {context: 150, compile: per_query, kg: null, embed: false, cache: per_query}
+  S7: {context: 150, compile: per_query, kg: null, embed: false, cache: per_query}
+  # Main study (ORCHESTRATOR_BRIEF_v2 §4.2). S5 = the KG arm the gate selects (APG* if GO).
+  S5: {like: APG*}
+  S5-P0: {like: APG*}
+  S8k3: {like: S1, multiplier: 3.0}   # self-consistency k=3 as extra runs (Study C)
+  S9: {like: S1, multiplier: 1.3}     # plan-then-execute: one planning pass in the same context
+  M1: {like: S1, multiplier: 2.5, cache: multi_agent}    # orchestrator + 3 workers, monolith delivery
+  M1s: {like: M1}
+  M1k: {like: APG*, multiplier: 2.5, cache: multi_agent}
+  M2: {like: M1k}
+  M7: {like: S1, multiplier: 3.0, cache: multi_agent}    # council k=3, 2 critique rounds, chair
+
+# Per-compile kg-role calls, at the kg role's effort (low). [given]
+kg_calls:
+  apg_classify: {input: 600, output: 350}
+  lgr_keywords: {input: 1000, output: 350}
+query_embedding_tokens: 60        # per compile, text-embedding-3-small [assumed; negligible]
+
+# --- Builds (outside Inspect; one sample = one world) -----------------------------------------------
+
+build_calls:
+  apg_author: {calls_per_chunk: 1.0, input: 600, output: 1200}     # [given] one authoring call per shared chunk
+  lightrag_extract: {calls_per_chunk: 2.2, input: 3000, output: 1000}  # [given] extraction + gleaning, +10% merges
+embedding_tokens_per_chunk: 1000  # chunk + APG node + LightRAG entity/relation embeddings [assumed; negligible]
+chunks_per_world:                 # [measured offline]
+  F7-10: 8
+  F7-1000: 550
+  F3-5: 8
+  F3-60: 68
+  F5-1hop: 8
+  F5-2hop: 8
+  F1-2: 10          # [assumed] main-study families, not built yet
+  F1-32: 40
+  F2-2: 10
+  F2-10: 30
+  anchor-medical: 200   # GraphRAG-Bench Medical, ~218K tokens chunked at 1200/100 (D-009)
+
+# --- GraphRAG-Bench anchor (PC1; one sample = one question in one mode) ------------------------------
+# The paper's models (gpt-4o-mini, no reasoning effort), so explicit token sizes. [assumed from the
+# anchor's query caps: max_total_tokens 12,000, D-009]
+anchor_calls:
+  answer: {calls: 1, input: 12500, output: 400}
+  keywords: {calls: 1, input: 1000, output: 100}   # graph modes only (hybrid, mix); naive makes none
+  judge: {calls: 3, input: 1500, output: 400}
+  embeddings: {calls: 3, input: 200, output: 0}    # query embedding + ACC answer/reference similarity
+
+# --- Study G sessions (F8; one sample = one session of N items) --------------------------------------
+# W is the harness-enforced nominal window (CONTEXT_MANAGEMENT_AUDIT §8, FX-5: W = 32K, threshold 20K).
+# View tokens per agent call, mean over the session: [given]
+#   full    (no management, grows until W): 0.6 W
+#   managed (compaction/pruning/reset hold it below the threshold): 0.4 W
+#   oracle  (O-state: system + task + rendered state + current item): absolute tokens
+study_g:
+  calls_per_item: 6                       # [given] F8
+  view: {full: 0.6, managed: 0.4, oracle_tokens: 4000}
+  probe_checkpoints: [5, 15, 30, 45, 60]  # forked state probes after items <= N (audit §5.3): one call each on
+                                          # the current view, at the agent's model and effort
+  # overhead: management calls (summaries, todo extraction, handoffs) as a fraction of agent calls, priced
+  # like an agent call [assumed]. multiplier: generations relative to one agent (topology arms).
+  arms:
+    CM0: {view: full, overhead: 0.0, cache: session_full}
+    CM-prune: {view: managed, overhead: 0.0, cache: session_managed}
+    CM-trim: {view: managed, overhead: 0.0, cache: session_managed}
+    CM-sum: {view: managed, overhead: 0.08, cache: session_managed}
+    CM-todo: {view: managed, overhead: 0.15, cache: session_managed}
+    CM-reset: {view: managed, overhead: 0.05, cache: session_managed}
+    CM-native: {view: managed, overhead: 0.05, cache: session_managed}
+    O-state: {view: oracle, overhead: 0.0, cache: session_oracle}
+    S1: {view: full, overhead: 0.0, cache: session_full}               # topology block: single agent
+    S-CM*: {view: managed, overhead: 0.15, cache: session_managed}     # best single-agent stack (dev)
+    M1: {view: managed, overhead: 0.0, multiplier: 2.5, cache: multi_agent}
+    M2: {view: managed, overhead: 0.0, multiplier: 2.5, cache: multi_agent}
+
+# --- Prompt caching ------------------------------------------------------------------------------------
+# conservative: cached input billed at the full input price (what config/model_costs.yaml says today:
+#               input_cache_read = input, TODO(E5)). The budget gate (exit code, allocation) uses this one.
+# expected:     ASSUMPTION until E5 confirms GPT-6 cached pricing: a cached share of input per cache class,
+#               billed at `cached_price_ratio` x the input price. OpenAI caches prompt prefixes >= 1,024
+#               tokens; most gate prompts are just around that, so their shares are low. Measured cache
+#               shares from calibration replace these. Set `cached_price: table` once E5 has put the real
+#               cached price in config/model_costs.yaml.
+cache_scenarios:
+  conservative:
+    cached_price: input
+  expected:
+    cached_price: ratio
+    cached_price_ratio: 0.10
+    cached_fraction:
+      per_query: 0.2        # system-prompt context, small prompts (often under the 1,024-token minimum)
+      per_step: 0.3         # history prefix only; the per-step context block is fresh each call (D-005)
+      monolith: 0.85        # same corpus prefix for every task of a world
+      multi_agent: 0.5
+      kg: 0.3               # classify/keyword prompt prefix
+      session_full: 0.85    # append-only history
+      session_managed: 0.6  # compaction/pruning rewrites the prefix
+      session_oracle: 0.5
+      anchor: 0.1
+      judge: 0.0
+      build_apg: 0.3
+      build_lightrag: 0.5   # long fixed extraction prompt; gleaning re-sends the first turn
+      embeddings: 0.0

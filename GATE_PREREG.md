@@ -62,7 +62,14 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 
 - **Splits.** `dev` (seeds 1000+) is for tuning, `pilot` (2000+) for calibration, `test` (3000+) for the gate. The test split is generated after the freeze and never inspected before the gate run.
 - **Size** (D-017): **16 worlds per cell × 12 tasks × 3 epochs** (768 tasks per gate arm; power ≈ 0.91 at Δ = 0) if the Luna builder passes the dev quality check; otherwise 12 worlds per cell (power ≈ 0.79).
-  - Diagnostic arms: 100 tasks × 3 epochs, drawn from the same worlds.
+  - Diagnostic arms (push), drawn from the same test worlds: S1, S5o and S6 at 100 tasks per cell × 2 epochs; the S7 placebo (in the GO rule) at 100 × 3.
+  - F5 (PC2; reported separately, never pooled): APG*, LGR* and LightRAG naive × F5-1hop, F5-2hop × 100 tasks × 2 epochs.
+  - Secondaries (§3, §6; never pooled), each with APG*, LGR* and S3s at 2 epochs:
+    - id_only: F7-10 and F7-1000, push and pull, 100 tasks per cell, on paired id_only renderings of 9 test seeds per cell.
+    - Matched budget: one budget, ≈300 realized tokens, all 4 cells, 100 tasks per cell.
+    - TE-all: F3-5 and F3-60, 100 tasks per cell.
+    - Messy (dev diagnostic): F7-10 and F7-1000 on the 2 messy dev worlds, 50 tasks per cell.
+  - These sizes are set by the cost model (FIX_PLAN FX-5, D-021; `config/run_plan.yaml`, `BUDGET.md`).
   - Re-simulate with pilot σ_w and σ_g (`power/power_sim.py --mode ni`) before freezing `[PILOT]`.
 - **Models** (D-015; exact IDs confirmed at E3):
   - agent: GPT-6 Luna, effort high
@@ -80,7 +87,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 ## 6. Fairness rules
 
 1. Both KGs consume the identical shared chunk set (`worlds/render.py`).
-2. Context size (EXPERIMENT_AUDIT B1). The primary comparison uses each system's dev-selected configuration ("best foot forward"), with realized context tokens (tiktoken `o200k_base`) and cost reported per arm. APG natively delivers ~100-300 tokens where LightRAG and flat retrieval deliver thousands, so forcing parity would change what APG is. A **matched-budget secondary analysis** runs APG*, LGR* and S3s at two budgets, ≈300 and ≈2,000 realized tokens: APG fills up with further shortlisted nodes (`APE_APG_FILL=1`, larger `shortlistK`); LightRAG and S3s are capped (LightRAG's per-part budgets calibrated on dev so realized tokens land within ±25% of the budget).
+2. Context size (EXPERIMENT_AUDIT B1). The primary comparison uses each system's dev-selected configuration ("best foot forward"), with realized context tokens (tiktoken `o200k_base`) and cost reported per arm. APG natively delivers ~100-300 tokens where LightRAG and flat retrieval deliver thousands, so forcing parity would change what APG is. A **matched-budget secondary analysis** runs APG*, LGR* and S3s at one budget, ≈300 realized tokens (the ≈2,000 budget was dropped for cost, D-021): APG fills up with further shortlisted nodes (`APE_APG_FILL=1`, larger `shortlistK`); LightRAG and S3s are capped (LightRAG's per-part budgets calibrated on dev so realized tokens land within ±25% of the budget).
 3. Caching:
    - Query-time LLM caches are off for both KGs.
    - Inspect output caching is off for every arm.

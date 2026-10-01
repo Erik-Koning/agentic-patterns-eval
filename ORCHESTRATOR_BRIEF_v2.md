@@ -25,7 +25,8 @@ kg_ingestion_pipeline: "ape/apg/author.py"  # APG graphs are hand-authored in pr
                                           # LLM authoring from the shared chunks with no world-spec access: taxonomy → leaf policy nodes → bring edges → leaf allowlists,
                                           # validated + human sample review. Oracle APG (S5o) is built from the world spec as an upper bound only. See the APG gate plan.
 team: TODO                                # Roles fixed (D-018): APG owner, skeptic (not on the APG side), analyst. Names pending (O-3).
-compute_budget_usd: 1500                  # Gate phase only (D-018). Study G / main study budgeted after their micro-pilots.
+compute_budget_usd: 5000                  # Whole program (D-021, FX-5; supersedes D-018's gate-only 1,500): gate <= 700,
+                                          # main study <= 1,000, Study G <= 2,700, contingency ~600. See BUDGET.md.
 models_available:                         # Exact provider/model IDs per tier.
   provider: openai                        # Decided 2026-09-29: OpenAI only (chat + embeddings).
   frontier: gpt-6-astra                   # D-015; exact IDs confirmed by readiness/probe_openai.py
@@ -44,7 +45,7 @@ repo_root: ./research-plan
 kg_framework: "APG (Adaptive Prompt Graph), ~/Documents/Work/Code/EvolvingWisdomAgents, apg-core 0.1.0 pinned by tree hash (PROVENANCE.md)"
                                           # NOT ~/Documents/Work/WisdomGraph (a separate preference-hint store). Comparator/control KG: LightRAG 1.5.7.
 micro_pilot_budget_usd: 250               # Spent by humans only, after sign-off on the Phase-5 package (§7.1).
-primary_model_tier: mid_tier              # The MVS runs on one model; other tiers are replication.
+primary_model_tier: small_or_cheap        # GPT-6 Luna (D-021, FX-5). The MVS runs on one model; Study F replicates on Sol.
 nominal_context_window_tokens: 128000     # Harness-enforced window W for F4 and the F7 size cap; NOT the model's native window.
 scaffold_code: false                      # true = also create a minimal Inspect package skeleton (no paid runs).
 
@@ -446,7 +447,9 @@ Compare with Kim et al.'s **task-level** figures (≈ 1.1–1.3), not their trac
 
 ### 7.2 Study modules
 
-The Minimum Viable Study is Studies A + B + C on the primary model tier. Study D and the rest of Study E are Tier B.
+The Minimum Viable Study is Studies A + B + C on the primary model tier, **GPT-6 Luna** (D-021, FX-5). Study D and the rest of Study E are Tier B.
+
+**Tiers** (D-021): Luna is primary. Study F replicates on **Luna and Sol only**; Study G (`CONTEXT_MANAGEMENT_AUDIT.md`) owns the Astra tier. Mechanism results therefore generalize to the Luna and Sol tiers, not to Astra.
 
 | Study | Question | Arms | Families × levels | Tasks per condition | Epochs |
 |---|---|---|---|---|---|
@@ -455,7 +458,7 @@ The Minimum Viable Study is Studies A + B + C on the primary model tier. Study D
 | **C** determinism | RQ4, H5 | S1, S5, S8(k=3), M1, M2, M7 | 30-task subset per MVS condition | — | +2 extra epochs (total 5) |
 | **D** faults (Tier B) | H4 | S1, S5, S8, M1, M5, M6 | F2, F5 | 60 | 3 |
 | **E** latency/cache | RQ3, H1d, H3 | S1, S5, M1s, M1, M2, M7, each ±C | F1-high, F7-high | 30 | 3 |
-| **F** tiers (Tier B) | H6 | S1/S8, S5, M1, M2 | F1-high, F7-high | 100 | 3 |
+| **F** tiers (Tier B) | H6 | S1/S8, S5, M1, M2 on Luna and Sol | F1-high, F7-high | Luna 100 (only S5 and M2 on F1-high are new; the rest reuse A/B); Sol 60 | 3 |
 
 **Study E latency regimes (both required):**
 - **Capacity-limited:** self-hosted vLLM, fixed concurrency, prefix caching on/off.
@@ -467,7 +470,11 @@ The Minimum Viable Study is Studies A + B + C on the primary model tier. Study D
 - **Study B:** 400 tasks × (8 + 3 × 7) = **11,600**.
 - **Study C:** ≈ 120 tasks × 6 arms × 2 extra epochs = **1,440**.
 - **Total ≈ 20,000 rollouts.**
-- Illustrative [estimate]: at $0.10–0.40 per rollout averaged over arms (short synthetic tasks, cheap/mid tier), the MVS costs **≈ $2–8k**.
+- **Cost** (FX-5 cost model, `python -m ape.budget`, `BUDGET.md`; priors until the micro-pilot):
+  - Studies A–C on Luna: ≈ **$270** conservative (A 105, B 142, C 23). Multi-agent arms are priced at 2.5–3× single-agent tokens.
+  - Builds, micro-pilot, tuning and pilot: $57.
+  - Study F: $786. Sol replicates on F1-32 and **F7-100** at the full 100 tasks (D-021: KB scaling is K4's question on Luna, and the 90K F7-1000 monolith at Sol prices dominated the cost). Sol MDE ≈ 13–15 pp.
+  - Main study total: **$1,114** conservative, $894 expected.
 - If the MVS does not fit `compute_budget_usd`, cut in this order, reporting the statistical power each cut costs:
   1. S5-P0 and S7 move to F7-high only.
   2. Drop M7 from Study A.

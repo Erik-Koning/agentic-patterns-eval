@@ -34,7 +34,7 @@ Mechanism names are used throughout. The motivating analogies map to them as fol
    - **Context windows differ by tier:** Inspect's default thresholds are *fractions of the model's window*, so they must be set in absolute tokens.
    - **Model-native context management is itself a bitter-lesson channel:** OpenAI's native compaction runs through Inspect's `CompactionNative`, so it must be its own arm.
    - **Three tiers give three points on the capability axis:** use measured capability, not tier labels, and add reasoning-effort levels as extra points.
-4. **Recommended minimum viable study:** 3 tiers × 7 context arms on F8, plus 4 topology arms for H1/H3. The per-position analysis inside long sessions yields the degradation curve without running every length. Offline consolidation and reflection go in Tier B (costly and low prior).
+4. **Recommended minimum viable study:** 3 tiers × 7 context arms on F8, plus 4 topology arms for H1/H3 (right-sized to the program budget in §8: fewer arms and sessions on Sol and Astra). The per-position analysis inside long sessions yields the degradation curve without running every length. Offline consolidation and reflection go in Tier B (costly and low prior).
 
 ---
 
@@ -263,7 +263,7 @@ The loop keeps the **full history** for logging and ground truth, and sends **mo
 - Items are nested in sessions, and sessions in worlds. Bootstrap over sessions, the same approach as the gate's world-clustered bootstrap.
 - Holm correction within each hypothesis family. Fixed-sequence gatekeeping for H3a → H3b.
 
-**Epochs:** at least 3; 5 for N = 60, where long-horizon variance is highest. Report pass^k for session success.
+**Epochs:** 3 on Luna, 2 on Sol and Astra (budget, §8). Report pass^k for session success.
 
 **Power:** extend `power_sim.py` to (a) session-clustered item outcomes and (b) interaction effects. Calibrate its variances on the micro-pilot. A three-point capability axis has little power for slope differences, which is another reason to add effort levels.
 
@@ -271,26 +271,42 @@ The loop keeps the **full history** for logging and ground truth, and sends **mo
 
 ## 8. Minimum viable study and cost drivers
 
-**Core runs:**
+**Decided** (FIX_PLAN FX-5, D-021):
+- Nominal window **W = 32K** and compaction threshold **T_abs = 20K**, identical across tiers (was 64K / 40K). Context pressure is relative to W, so management effects still show, at about half the tokens per call. Not testable: management beyond 32K of absolute context.
+- Tier B runs only if budget remains after the core, and only on Luna.
 
-| Block | Arms | Family | Cells |
-|---|---|---|---|
-| Context management | CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state | F8, N = 60 (curve from positions); N = 10 control for CM0 and O-state only | 3 tiers × 12 sessions × 3–5 epochs |
-| Topology (G-H1/G-H3) | S1, M1, M2, S-CM* | F8, N = 30 | 3 tiers × 12 sessions × 3 epochs |
-| Tier B | CM-notes (if not in CM*), CM-lesson, CM-subiso, CM-consol (F9) | F8 / F9 | After the core |
+**Core runs** (per arm; `config/run_plan.yaml`):
 
-**Session counts:**
-- Context-management block: 3 × (5 × 1 + 2 × 2) × 12 × 3 ≈ **970 sessions**, most at N = 60.
-- Topology block: 3 × 4 × 12 × 3 ≈ **430 sessions**.
+| Block | Tier (effort) | Arms | F8 N | Sessions × epochs |
+|---|---|---|---|---|
+| Context management | Luna (high) | CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state | 40 | 10 × 3 |
+| | Luna (low) | CM0, CM-sum, CM-todo, O-state | 40 | 10 × 3 |
+| | Luna (high), short-session control | CM0, O-state | 10 | 10 × 3 |
+| | Sol (high) | CM0, CM-prune, CM-sum, CM-todo, O-state | 40 | 6 × 2 |
+| | Astra (high) | CM0, CM-sum, CM-todo, O-state | 24 | 4 × 2 |
+| Topology (G-H1/G-H3) | Luna, Sol (high) | S1, M1, M2, S-CM* | 20 | 8 × 2 |
+| | Astra (high) | S1, M2 | 20 | 5 × 2 |
+| Capability anchor (§2.1) | each point | S1 on F7-10 + F3-5 | — | 96 tasks × 1 |
+| Micro-pilot | Luna (high) | the 7 Luna CM arms | 40 | 3 × 1 |
+| Tuning | Luna (high) | CM-prune, CM-sum, CM-todo, CM-reset, S-CM* | 40 | 3 candidates × 3 sessions |
+| Tier B | Luna | CM-notes, CM-lesson, CM-subiso, CM-consol (F9) | — | only if budget remains |
 
-**Main cost driver: cumulative input tokens.** Without management these grow roughly quadratically with steps. A 60-item session with ~6 calls per item and a view approaching W can reach tens of millions of input tokens, most of them cached.
+- **Capability points:** Luna low, Luna high, Sol high and Astra high. Four arms (CM0, CM-sum, CM-todo, O-state) run at every point.
+- **Session runs:** 482 in the CM block and 148 in the topology block, plus 66 for the pilot and tuning.
 
-The dollar figure depends on:
-- tier prices
-- OpenAI's cached-input discount
-- how much each strategy breaks the cache
+**Cost:** **$3,378** conservative (cached input at the full price): Astra $1,955, Sol $1,201, Luna $222. With the expected caching it is $2,130. See `BUDGET.md`.
+- **Priors:** 6 calls per item; mean view 0.6 W for CM0 and S1, 0.4 W for managed arms, and 4K for O-state; M1 and M2 at 2.5× a single agent.
+- **Right-sizing cuts applied (D-021):**
+  - Sol-low point dropped (the axis has 4 points).
+  - Sol CM sessions 8 → 6.
+  - Astra CM sessions 5 → 4 and N 30 → 24.
+  - The Astra topology cut (5 → 4 sessions) was reversed after the main study's Sol replication moved to F7-100.
+- **What the cuts cost:** Astra context-management estimates rest on 4 sessions per arm, close to descriptive; Astra topology keeps 5. Astra's degradation curve covers positions 1–24 (Luna and Sol: 1–40).
 
-So it must be measured on a **micro-pilot** (≈ 3 sessions per arm at one tier) before committing. No dollar estimate is given here because the E5 price table does not exist yet.
+**Main cost driver: cumulative input tokens.** Without management, the view grows with every call until it reaches W. Compaction and pruning also rewrite the cached prefix.
+- The micro-pilot (≈ 3 sessions per arm on Luna) measures calls per item, view sizes and cache shares.
+- The capability-anchor runs measure each tier's output tokens per call.
+- `python -m ape.budget calibrate` then replaces the priors before the Sol and Astra blocks run.
 
 ---
 
@@ -329,7 +345,7 @@ All offline and testable with `mockllm` plus fake embeddings, like the gate harn
 ## 11. Open decisions
 
 1. **Tiers:** which three OpenAI models, and whether to add effort levels as capability points (recommended).
-2. **Nominal window W and threshold T_abs:** recommend W = 64k and T_abs = 40k. That way long F8 sessions exceed W at mid-session for every tier, whatever its native window.
+2. **Nominal window W and threshold T_abs:** decided (FX-5, D-021): W = 32K, T_abs = 20K (the earlier recommendation was 64K / 40K). Long F8 sessions still exceed W at mid-session for every tier, whatever its native window.
 3. **Primary summarizer:** self-summarization (recommended) or a fixed model.
 4. **Tier B scope:** whether consolidation (F9) and lesson writing are in the first round.
 5. **Ordering:** run Study G alongside the KG gate (it doesn't depend on the gate except for the S1+KG topology arm), or after.

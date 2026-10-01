@@ -28,7 +28,8 @@ profiles:
     build_fallback: {model: gpt-6-sol, reasoning_effort: medium}
     embeddings: {model: text-embedding-3-small}
 
-  # Study G tiers (D-015: all at high; the Luna-low capability point comes with FX-5's matrices).
+  # Study G tiers (D-015: all at high). Low-effort capability points override the agent effort per cell
+  # in config/run_plan.yaml (FX-5).
   # The kg, judge, build and embedding roles stay as in the gate, so only the agent varies.
   study_g_luna:
     <<: *gate
@@ -38,6 +39,14 @@ profiles:
   study_g_astra:
     <<: *gate
     agent: {model: openai/gpt-6-astra, reasoning_effort: high}
+
+  # Main study (ORCHESTRATOR_BRIEF_v2 §7.2, FX-5): primary tier Luna; Study F replicates on Sol only
+  # (Study G owns the Astra tier). Only the agent varies.
+  main_luna:
+    <<: *gate
+  main_sol:
+    <<: *gate
+    agent: {model: openai/gpt-6-sol, reasoning_effort: high}
 
   # GraphRAG-Bench anchor (precondition PC1). Paper-faithful: gpt-4o-mini answers at temperature 0.7,
   # judged at temperature 0 / top_p 1 / seed 42, index built by gpt-4o-mini. Tolerance ±5 pp.

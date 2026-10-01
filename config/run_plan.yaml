@@ -1,0 +1,212 @@
+# Planned run matrices for the whole program (FIX_PLAN FX-5), as data. Priced by `python -m ape.budget`
+# from config/budget_assumptions.yaml and config/model_costs.yaml; the FX-6 orchestrator reads the same file.
+#
+# Cells hold the values that will RUN, i.e. after the right-sizing cuts at the end of this file. Each cut
+# records `from` -> `to` per edited field; `python -m ape.budget --uncut` prices the plan before the cuts.
+#
+# Cell kinds (default `agent`):
+#   agent    one sample = one task. Fields: arms (list, or {arm: candidates}), cells, deliveries (default
+#            [push]), n_tasks or worlds x tasks_per_world (per task cell), epochs; optional context (override,
+#            tokens), exposure (retrieved | all).
+#   session  Study G F8 sessions. Fields: arms, N (items per session), sessions (per arm), epochs; window and
+#            threshold from `study_g` below.
+#   build    one sample = one world. Fields: worlds {cell: count}, systems (default [apg, lightrag]).
+#   anchor   GraphRAG-Bench questions: n_tasks per mode, modes.
+#   fixed    a capped spend (usd).
+# Every cell takes `profile` (config/models.yaml; default: the study's), optional `effort` (agent effort
+# override, e.g. the low-effort capability points), optional `models` (role -> model overrides) and
+# `enabled` (default true).
+
+budget:
+  total_usd: 5000
+  allocations: {gate: 700, main: 1000, study_g: 2700}   # FX-5 targets, conservative scenario
+  contingency_usd: 600
+
+study_g:
+  window: 32000      # nominal W, harness-enforced, identical across tiers (was 64K)
+  threshold: 20000   # absolute compaction threshold T_abs (was 40K)
+
+studies:
+  # ------------------------------------------------------------------------------------------------
+  gate:
+    profile: gate   # agent Luna high, kg Luna low, build Luna high (D-015, D-017)
+    phases:
+      smoke:
+        - {id: gate.smoke, kind: fixed, usd: 3.0, note: "readiness/smoke.py --max-usd 3 (FX-8), incl. E3 probes"}
+      anchor:
+        - {id: gate.anchor.index, kind: build, profile: anchor, worlds: {anchor-medical: 1}, systems: [lightrag],
+           note: "PC1 LightRAG index, paper model gpt-4o-mini (D-009)"}
+        - {id: gate.anchor.runs, kind: anchor, profile: anchor, n_tasks: 766, modes: [hybrid, mix, naive],
+           note: "200 per type, all 166 Creative Generation (D-010); answer + 3 judge calls"}
+      builds:
+        # D-017: Luna builder; ~550 chunks per F7-1000 world, ~68 per F3-60, ~8 for small worlds.
+        - {id: gate.build.dev, kind: build, worlds: {F7-10: 2, F7-1000: 2, F3-5: 2, F3-60: 2},
+           note: "tuning worlds; D-017 build-quality check"}
+        - {id: gate.build.dev-messy, kind: build, worlds: {F7-10: 1, F7-1000: 1}, note: "messy-exception dev worlds"}
+        - {id: gate.build.pilot, kind: build, worlds: {F7-10: 4, F7-1000: 4, F3-5: 4, F3-60: 4}}
+        - {id: gate.build.test, kind: build, worlds: {F7-10: 16, F7-1000: 16, F3-5: 16, F3-60: 16}}
+        - {id: gate.build.test-id-only, kind: build, worlds: {F7-10: 9, F7-1000: 9},
+           note: "paired id_only renderings of 9 test seeds per F7 cell (>= 100 tasks)"}
+        - {id: gate.build.test-f5, kind: build, worlds: {F5-1hop: 9, F5-2hop: 9}}
+      tuning:
+        - {id: gate.tune, arms: {APG-s: 4, APG-q: 2, LGR-s: 4, LGR-q: 2, S3s: 3}, cells: [F7-10, F7-1000, F3-5, F3-60],
+           worlds: 2, tasks_per_world: 12, epochs: 1, note: "15 candidates (config/tuning_grid.yaml) x 4 dev cells x 24 tasks"}
+      pilot:
+        - {id: gate.pilot, arms: [APG*, LGR*, S3s, S1, S5o, S6, S7], cells: [F7-10, F7-1000, F3-5, F3-60],
+           worlds: 4, tasks_per_world: 12, epochs: 1}
+        - {id: gate.pilot.pull, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000], deliveries: [pull],
+           worlds: 4, tasks_per_world: 12, epochs: 1, note: "calibrates pull-mode calls and tokens"}
+        - {id: gate.pilot.budget-cal, arms: [LGR*, S3s], cells: [F7-10, F7-1000, F3-5, F3-60], worlds: 2,
+           tasks_per_world: 12, epochs: 1, context: 300, note: "caps landing within +-25% of 300 tokens (PC4)"}
+      test:
+        - {id: gate.test.f7, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000], deliveries: [push, pull],
+           worlds: 16, tasks_per_world: 12, epochs: 3, note: "primary; push and pull co-primary (D-016)"}
+        - {id: gate.test.f3, arms: [APG*, LGR*, S3s], cells: [F3-5, F3-60], worlds: 16, tasks_per_world: 12, epochs: 3,
+           note: primary}
+      diagnostics:
+        - {id: gate.diag, arms: [S1, S5o, S6], cells: [F7-10, F7-1000, F3-5, F3-60], n_tasks: 100, epochs: 2}
+        - {id: gate.diag.s7, arms: [S7], cells: [F7-10, F7-1000, F3-5, F3-60], n_tasks: 100, epochs: 3,
+           note: "placebo; in the GO rule, keeps 3 epochs"}
+      f5:
+        - {id: gate.f5, arms: [APG*, LGR*, LGR-naive], cells: [F5-1hop, F5-2hop], n_tasks: 100, epochs: 2,
+           note: "PC2 and F5 report; never pooled"}
+      secondaries:
+        - {id: gate.sec.id-only, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000], deliveries: [push, pull],
+           n_tasks: 100, epochs: 2}
+        - {id: gate.sec.matched-300, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000, F3-5, F3-60], n_tasks: 100,
+           epochs: 2, context: 300, note: "one matched budget, ~300 tokens (was 300 and 2,000)"}
+        - {id: gate.sec.te-all, arms: [APG*, LGR*, S3s], cells: [F3-5, F3-60], n_tasks: 100, epochs: 2, exposure: all}
+        - {id: gate.sec.messy, arms: [APG*, LGR*, S3s], cells: [F7-10, F7-1000], n_tasks: 50, epochs: 2,
+           note: "dev diagnostic on the 2 messy worlds"}
+
+  # ------------------------------------------------------------------------------------------------
+  main:
+    profile: main_luna   # ORCHESTRATOR_BRIEF_v2 §7.2: primary tier Luna; replication Luna/Sol (Study G owns Astra)
+    phases:
+      builds:
+        - {id: main.build.kg, kind: build, systems: [apg],
+           worlds: {F7-10: 11, F7-1000: 11, F3-5: 11, F3-60: 11, F1-32: 11},
+           note: "KG arm (S5, M1k, M2) graphs: 9 test + 2 pilot worlds per KG condition; LightRAG instead if the gate is NO-GO"}
+      micro_pilot:
+        - {id: main.micro-pilot, arms: [S1, S5, M1], cells: [F1-2, F1-32, F7-10, F7-1000], n_tasks: 20, epochs: 2,
+           note: "brief §7.1; S5 on F1 as the KG-on-F1 probe"}
+      tuning:
+        - {id: main.tune.a, arms: {S9: 4, M1: 4, M7: 4}, cells: [F1-32, F2-10], n_tasks: 20, epochs: 1}
+        - {id: main.tune.b, arms: {S3s: 4, M1: 4, M1k: 4, M2: 4}, cells: [F3-60, F7-1000], n_tasks: 20, epochs: 1}
+      pilot:
+        - {id: main.pilot.a, arms: [S1, S9, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 20, epochs: 1}
+        - {id: main.pilot.b, arms: [S1, S3s, S5, S5-P0, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
+           n_tasks: 20, epochs: 1}
+      study_a:
+        - {id: main.A.s1-pool, arms: [S1], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 100, epochs: 8,
+           note: "8-run S1 pool -> S8 frontier; S1's 3 epochs drawn from it"}
+        - {id: main.A.arms, arms: [S9, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 100, epochs: 3}
+        - {id: main.A.m1s, arms: [M1s], cells: [F1-32], n_tasks: 50, epochs: 3}
+      study_b:
+        - {id: main.B.s1-pool, arms: [S1], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 100, epochs: 8}
+        - {id: main.B.arms, arms: [S3s, S5, S5-P0, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
+           n_tasks: 100, epochs: 3}
+      study_c:
+        - {id: main.C.a, arms: [S1, S8k3, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 15, epochs: 2,
+           note: "+2 epochs on 15 tasks per MVS condition (brief: ~120 tasks)"}
+        - {id: main.C.b, arms: [S1, S5, S8k3, M1, M2], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 15, epochs: 2}
+      study_f:
+        - {id: main.F.luna, arms: [S5, M2], cells: [F1-32], n_tasks: 100, epochs: 3,
+           note: "Luna cells not already in Studies A/B (S1, M1 on F1-32 and all four on F7-1000 are reused)"}
+        - {id: main.F.sol, profile: main_sol, arms: [S1, S5, M1, M2], cells: [F1-32, F7-100], n_tasks: 100, epochs: 3,
+           note: "tier replication on Sol (4 arms x 2 families x 3 epochs); F7-100 not F7-1000: KB scaling is K4's question (Luna), and the 83K monolith x Sol price dominated the budget"}
+
+  # ------------------------------------------------------------------------------------------------
+  study_g:
+    profile: study_g_luna   # CONTEXT_MANAGEMENT_AUDIT §8 as right-sized by FX-5; Tier B excluded
+    phases:
+      micro_pilot:
+        - {id: g.pilot.luna, kind: session, arms: [CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state],
+           N: 40, sessions: 3, epochs: 1, note: "~3 sessions per arm at one tier (audit §8)"}
+      tuning:
+        - {id: g.tune.luna, kind: session, arms: {CM-prune: 3, CM-sum: 3, CM-todo: 3, CM-reset: 3, S-CM*: 3},
+           N: 40, sessions: 3, epochs: 1, note: "equal dev budget per strategy (audit §6.3)"}
+      capability_anchor:
+        # Measured capability per point (audit §2.1): the baseline on F7-10 + F3-5, short-horizon.
+        - {id: g.cap.luna-high, arms: [S1], cells: [F7-10, F3-5], n_tasks: 48, epochs: 1}
+        - {id: g.cap.luna-low, effort: low, arms: [S1], cells: [F7-10, F3-5], n_tasks: 48, epochs: 1}
+        - {id: g.cap.sol-high, profile: study_g_sol, arms: [S1], cells: [F7-10, F3-5], n_tasks: 48, epochs: 1}
+        - {id: g.cap.sol-low, profile: study_g_sol, effort: low, arms: [S1], cells: [F7-10, F3-5], n_tasks: 48,
+           epochs: 1, enabled: false}
+        - {id: g.cap.astra-high, profile: study_g_astra, arms: [S1], cells: [F7-10, F3-5], n_tasks: 48, epochs: 1}
+      context_management:
+        - {id: g.cm.luna-high, kind: session, arms: [CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state],
+           N: 40, sessions: 10, epochs: 3}
+        - {id: g.cm.luna-low, kind: session, effort: low, arms: [CM0, CM-sum, CM-todo, O-state], N: 40, sessions: 10,
+           epochs: 3, note: "Luna-low capability point, the 4 arms common to every point"}
+        - {id: g.cm.luna-n10, kind: session, arms: [CM0, O-state], N: 10, sessions: 10, epochs: 3,
+           note: "short-session control (audit §8), Luna only"}
+        - {id: g.cm.sol-high, kind: session, profile: study_g_sol, arms: [CM0, CM-prune, CM-sum, CM-todo, O-state],
+           N: 40, sessions: 6, epochs: 2}
+        - {id: g.cm.sol-low, kind: session, profile: study_g_sol, effort: low, arms: [CM0, CM-sum, CM-todo, O-state],
+           N: 40, sessions: 8, epochs: 2, enabled: false}
+        - {id: g.cm.astra-high, kind: session, profile: study_g_astra, arms: [CM0, CM-sum, CM-todo, O-state],
+           N: 24, sessions: 4, epochs: 2}
+      topology:
+        - {id: g.topo.luna, kind: session, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2}
+        - {id: g.topo.sol, kind: session, profile: study_g_sol, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2}
+        - {id: g.topo.astra, kind: session, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2}
+
+# Right-sizing cuts (FX-5), applied IN ORDER while the conservative total exceeded budget.total_usd, stopping as
+# soon as it fit. `applied` cuts are already reflected in the cells above. Never cut: gate primary sizes, epochs of
+# primary cells, the S7 placebo. Conservative totals with the priors (2026-10-01): uncut $6,530 -> C1 $6,058 ->
+# C2 $5,857 -> C3 $5,305 -> C4 $5,117 -> C5 $4,561 (fits; C6 not needed). C5 was needed by $117 only: revisit it
+# after the gate pilot recalibrates (Study F runs after the gate).
+cuts:
+  - id: C1
+    applied: true
+    what: Drop the Sol-low capability point (Study G)
+    set:
+      - {cell: g.cm.sol-low, field: enabled, from: true, to: false}
+      - {cell: g.cap.sol-low, field: enabled, from: true, to: false}
+    quality: >-
+      The capability axis keeps 4 points (Luna low, Luna high, Sol high, Astra high) instead of 5, and the
+      effort-vs-model contrast exists at Luna only. The strategy x capability interactions (G-H1 slope,
+      G-H2 TOST) rest on 4 points, with wider CIs and less power for slope differences.
+  - id: C2
+    applied: true
+    what: Study G Sol context-management sessions 8 -> 6
+    set:
+      - {cell: g.cm.sol-high, field: sessions, from: 8, to: 6}
+    quality: >-
+      Sol CM cells have 6 independent sessions x 2 epochs per arm (was 8 x 2). Session-clustered CIs for
+      Sol's Gap_T, R_x and degradation slopes widen by about sqrt(8/6) = 1.15x.
+  - id: C3
+    applied: true
+    what: Study G Astra context-management sessions 5 -> 4 and N 30 -> 24
+    set:
+      - {cell: g.cm.astra-high, field: sessions, from: 5, to: 4}
+      - {cell: g.cm.astra-high, field: N, from: 30, to: 24}
+    quality: >-
+      Astra CM cells have 4 sessions x 2 epochs per arm: session-clustered CIs widen by about sqrt(5/4) = 1.12x,
+      and item-level estimates by up to ~1.25x with 20% fewer items per session. With 4 independent sessions per
+      arm, Astra-specific estimates are close to descriptive. Sessions of 24 items still cross W = 32K around mid-session, but
+      Astra's degradation curve spans positions 1-24 (Luna/Sol 1-40) and loses the item-30 probe.
+  - id: C4
+    applied: false  # not needed once Study F Sol moved to F7-100 (review 2026-10-01): in-order minimum is C1-C3
+    what: Study G Astra topology sessions 5 -> 4
+    set:
+      - {cell: g.topo.astra, field: sessions, from: 5, to: 4}
+    quality: >-
+      Astra S1 vs M2 (G-H1 at the top tier, already 2 arms only) rests on 4 sessions x 2 epochs per arm;
+      CIs widen by about 1.12x.
+  - id: C5
+    applied: false  # superseded (review 2026-10-01): Sol replication moved to F7-100 at full n instead
+    what: Main-study Study F Sol tasks 100 -> 60
+    set:
+      - {cell: main.F.sol, field: n_tasks, from: 100, to: 60}
+    quality: >-
+      Sol tier replication (H6, `success ~ arm * tier`) uses 60 tasks x 3 epochs per arm and family. The
+      within-condition MDE rises from about 13-15 pp to about 17-19 pp; Luna keeps n = 100, so arm x tier
+      interactions are estimated less precisely on the Sol side only.
+  - id: C6
+    applied: false
+    what: Gate matched-budget secondary 100 -> 60 tasks per cell
+    set:
+      - {cell: gate.sec.matched-300, field: n_tasks, from: 100, to: 60}
+    quality: Descriptive secondary only; per-cell matched-budget CIs would widen by about 1.3x.

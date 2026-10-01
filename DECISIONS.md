@@ -98,6 +98,38 @@ Each entry records the decision, why it was made, and who made it.
 - Build effort is sent by `BuildLlm` and recorded in the ledger and manifests.
 - Sampling parameters (temperature, top_p, seed) exist only in the paper-faithful `anchor` profile (gpt-4o-mini). If E3 shows gpt-4o-mini is retired, the anchor uses `anchor_luna`, without sampling parameters and with the ±10 pp tolerance.
 
+**D-021 (2026-10-01, FX-5; user: whole program ≈ $5,000 "without much result quality loss").** The program is budgeted with one cost model, `ape.budget`. Inputs are the run plan (`config/run_plan.yaml`), per-call priors (`config/budget_assumptions.yaml`) and the price table. Details: `BUDGET.md`.
+- **Totals for the right-sized plan, conservative / expected:**
+  - gate $201 / 177
+  - main study $1,114 / 894
+  - Study G $3,378 / 2,130
+  - **total $4,693 / 3,201**, leaving $307 of conservative contingency
+- **Against the FX-5 targets:** main and Study G are over by $114 and $678. The program total fits. The program target ($5,000) replaces D-018's gate-only $1,500.
+- **Scenarios:**
+  - conservative: cached input at the full input price. This is the budget gate: `python -m ape.budget` exits 1 above $5,000.
+  - expected: 20–85% of input cached at 0.1× the input price. This is an assumption until E5 confirms GPT-6 cached pricing.
+- **Matrices:**
+  - Gate: primary unchanged. Diagnostics run 100 × 2, with the S7 placebo at 100 × 3. There is one matched budget (≈300 tokens). See GATE_PREREG §4.
+  - Main study: Studies A–C on Luna. Study F replicates on Luna and Sol (brief §7.2).
+  - Study G: W = 32K, threshold 20K, N = 40 (Astra 24), Tier B excluded. See CONTEXT_MANAGEMENT_AUDIT §8.
+  - Every pilot, tuning, build and capability-anchor run is budgeted.
+- **Review change:** Study F's Sol replication uses F7-100 at the full 100 tasks, instead of F7-1000 at 60 (C5 superseded). The 90K-token monolith at Sol prices dominated the main study, and KB scaling is K4's question on Luna. The Sol MDE stays at ~13–15 pp.
+- **Cuts,** applied in order until the total fit (uncut $6,530):
+  - C1: Sol-low point dropped, −$471. The capability axis has 4 points.
+  - C2: Study G Sol CM sessions 8 → 6, −$202. CIs ~1.15× wider.
+  - C3: Astra CM sessions 5 → 4 and N 30 → 24, −$552. CIs ~1.12–1.25× wider; Astra close to descriptive; no item-30 probe.
+  - C4 (Astra topology 5 → 4) is reversed: no longer needed after the review change.
+  - C5 is superseded and C6 was not needed.
+  - Never cut: gate primary sizes and epochs, the S7 placebo.
+- **Most uncertain priors:**
+  - output tokens per call at high effort (1,500)
+  - Study G view sizes (0.6 W / 0.4 W) and calls per item (6)
+  - multi-agent multipliers (2.5–3×)
+  - the cached-input price and cache share
+  - F1, F2 and F8 sizes (generators not built)
+- **Not affordable as planned:** D-017's Sol build path (+$905). It needs approval.
+- **Recalibration:** after the gate pilot and Study G's micro-pilot, `python -m ape.budget calibrate` replaces the priors with measured calls and tokens per (arm, model, effort, cell, delivery). Cuts are then revisited in reverse order (C5 first). FX-6 refuses a phase whose projected cost exceeds `remaining()`.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
