@@ -437,3 +437,194 @@ def require_step_fits(step: str, projected: float, spent: float, max_usd: float)
 def plan_fits(projections: Mapping[str, float], max_usd: float) -> tuple[bool, float]:
     total = float(sum(projections.values()))
     return total <= max_usd, total
+
+
+# --- Cost-model check (a live smoke's own logs and ledger against the budget priors) -------------------------
+# The smoke's calls are few, so these numbers are indicative; they flag a prior that is badly off before the
+# gate spends on it. Inspect's output tokens include reasoning tokens (`ape.budget.calibrate`).
+
+AGENT_LIKE_ROLES = ("agent", "probe", "cm")  # priced with the effort table (budget_assumptions output_tokens_per_call)
+BUILD_SYSTEMS = {"apg-author": "apg_author", "lightrag": "lightrag_extract"}  # ledger context system -> build_calls key
+
+
+def _role_effort(role: str, entry_effort: str | None, role_efforts: Mapping[str, str | None]) -> str | None:
+    if role == "agent" or role not in role_efforts:
+        return entry_effort
+    return role_efforts[role]
+
+
+def measured_per_call(entries: Sequence[Mapping], role_efforts: Mapping[str, str | None]) -> dict[str, dict]:
+    """Per role and effort, over `ape.budget.calibrate` entries weighted by calls: calls, and input and output
+    tokens per call. The agent's effort is the entry's; another role's is its profile effort when it has one."""
+    acc: dict[str, dict] = {}
+    for e in entries:
+        for role, r in (e.get("roles") or {}).items():
+            calls = float(r["calls_per_sample"]) * float(e["samples"])
+            if calls <= 0:
+                continue
+            effort = _role_effort(role, e.get("effort"), role_efforts)
+            a = acc.setdefault(f"{role}@{effort or 'default'}", {"role": role, "effort": effort, "model": r.get("model"), "calls": 0.0, "input": 0.0, "output": 0.0})
+            a["calls"] += calls
+            a["input"] += calls * float(r["input_per_call"])
+            a["output"] += calls * float(r["output_per_call"])
+    return {
+        k: {"role": a["role"], "effort": a["effort"], "model": a["model"], "calls": round(a["calls"], 2), "input_per_call": round(a["input"] / a["calls"], 1), "output_per_call": round(a["output"] / a["calls"], 1)}
+        for k, a in sorted(acc.items())
+    }
+
+
+def prior_output_per_call(role: str, effort: str | None, assumptions: Mapping) -> float | None:
+    """The budget's prior output tokens per call (reasoning included) for a role; None where it has none."""
+    if role in AGENT_LIKE_ROLES:
+        table = assumptions["output_tokens_per_call"]
+        return float(table.get(effort or "default", table["default"]))
+    if role == "kg":
+        outs = [float(v["output"]) for v in (assumptions.get("kg_calls") or {}).values()]
+        return statistics.fmean(outs) if outs else None
+    return None
+
+
+def output_vs_prior(measured: Mapping[str, Mapping], assumptions: Mapping, reasoning: Mapping[str, tuple[float, float]] | None = None) -> list[dict]:
+    """Measured against prior output tokens per call, per role and effort; `reasoning` (role -> (reasoning tokens,
+    output tokens)) adds each role's reasoning share of its output."""
+    rows = []
+    for m in measured.values():
+        prior = prior_output_per_call(m["role"], m["effort"], assumptions)
+        r = (reasoning or {}).get(m["role"])
+        rows.append(
+            {
+                "role": m["role"], "effort": m["effort"], "model": m["model"], "calls": m["calls"],
+                "input_per_call": m["input_per_call"], "output_per_call": m["output_per_call"], "prior_output_per_call": prior,
+                "ratio": round(m["output_per_call"] / prior, 3) if prior else None,
+                "reasoning_share": round(r[0] / r[1], 3) if r and r[1] else None,
+            }
+        )  # fmt: skip
+    return rows
+
+
+def prior_calls_per_sample(cell: str, delivery: str, assumptions: Mapping) -> float | None:
+    """The budget's prior agent generations per sample for a measured cell (F8 sessions: N x calls per item)."""
+    family, _, level = cell.partition("-")
+    if family == "F8":
+        try:
+            return float(level) * float(assumptions["study_g"]["calls_per_item"])
+        except (KeyError, ValueError):
+            return None
+    table = assumptions.get("calls_per_sample") or {}
+    for key in (cell, family):
+        if delivery in (table.get(key) or {}):
+            return float(table[key][delivery])
+    return None
+
+
+def calls_vs_prior(entries: Sequence[Mapping], assumptions: Mapping) -> list[dict]:
+    """Per measured (arm, cell, delivery): the agent's calls per sample and input per call against the priors."""
+    rows = []
+    for e in entries:
+        agent = (e.get("roles") or {}).get("agent")
+        if not agent:
+            continue
+        prior = prior_calls_per_sample(e["cell"], e.get("delivery", "push"), assumptions)
+        rows.append(
+            {
+                "arm": e["arm"], "cell": e["cell"], "delivery": e.get("delivery", "push"), "samples": e["samples"],
+                "calls_per_sample": agent["calls_per_sample"], "prior_calls_per_sample": prior,
+                "ratio": round(agent["calls_per_sample"] / prior, 3) if prior else None, "input_per_call": agent["input_per_call"],
+            }
+        )  # fmt: skip
+    return rows
+
+
+def _world_cell(world_id: str) -> str:
+    """`F7-1000-rel-desc-dev-s1000` -> `F7-1000`."""
+    return "-".join(world_id.split("-")[:2])
+
+
+def build_per_call(rows: Sequence[Mapping], assumptions: Mapping) -> dict[str, dict]:
+    """Finished build calls in the ledger (role build; unfinished ones carry a `status`), per system against the
+    build_calls priors: calls, input, output and reasoning tokens per call, and calls per chunk where every
+    world's chunk count is known (budget_assumptions chunks_per_world)."""
+    chunks = assumptions.get("chunks_per_world") or {}
+    acc: dict[str, dict] = {}
+    for r in rows:
+        ctx = r.get("context") or {}
+        key = BUILD_SYSTEMS.get(ctx.get("system"))
+        if r.get("role") != "build" or key is None or ctx.get("status"):
+            continue
+        a = acc.setdefault(key, {"calls": 0, "input": 0.0, "output": 0.0, "reasoning": 0.0, "worlds": set()})
+        a["calls"] += 1
+        a["input"] += float(r.get("input_tokens") or 0)
+        a["output"] += float(r.get("output_tokens") or 0)
+        a["reasoning"] += float(r.get("reasoning_tokens") or 0)
+        if ctx.get("world"):
+            a["worlds"].add(ctx["world"])
+    out = {}
+    for key, a in sorted(acc.items()):
+        prior = (assumptions.get("build_calls") or {}).get(key) or {}
+        cells = [_world_cell(w) for w in sorted(a["worlds"])]
+        known = bool(cells) and all(c in chunks for c in cells)
+        per_chunk = round(a["calls"] / sum(float(chunks[c]) for c in cells), 3) if known else None
+        out[key] = {
+            "calls": a["calls"], "worlds": sorted(a["worlds"]),
+            "input_per_call": round(a["input"] / a["calls"], 1), "output_per_call": round(a["output"] / a["calls"], 1),
+            "reasoning_per_call": round(a["reasoning"] / a["calls"], 1), "calls_per_chunk": per_chunk,
+            "prior": {k: prior.get(k) for k in ("input", "output", "calls_per_chunk")},
+        }  # fmt: skip
+    return out
+
+
+def adjusted_assumptions(assumptions: Mapping, outputs: Sequence[Mapping], builds: Mapping[str, Mapping]) -> dict:
+    """The priors with the smoke's measurements in place, for a whole-program re-projection: the agent's output
+    tokens per call at each measured effort, the kg calls' output, and each measured build system's input,
+    output and calls per chunk. Everything not measured keeps its prior."""
+    import copy
+
+    A = copy.deepcopy(dict(assumptions))
+    for row in outputs:
+        if row["role"] == "agent" and row["effort"]:
+            A["output_tokens_per_call"][row["effort"]] = row["output_per_call"]
+        elif row["role"] == "kg":
+            for spec in (A.get("kg_calls") or {}).values():
+                spec["output"] = row["output_per_call"]
+    for key, b in builds.items():
+        spec = A["build_calls"][key]
+        spec["input"], spec["output"] = b["input_per_call"], b["output_per_call"]
+        if b.get("calls_per_chunk") is not None:
+            spec["calls_per_chunk"] = b["calls_per_chunk"]
+    return A
+
+
+def cost_verdict(projections: Mapping[str, Mapping[str, float]], total_usd: float, gate_usd: float) -> dict:
+    """WARN when a measured re-projection of the program exceeds the program budget, or the gate its allocation.
+    `projections`: name -> {"total": $, "gate": $} (conservative); "baseline" is the current priors' projection."""
+    reasons = []
+    for name, p in projections.items():
+        if name == "baseline":
+            continue
+        if p["total"] > total_usd:
+            reasons.append(f"{name}: program ${p['total']:,.0f} > ${total_usd:,.0f}")
+        if p["gate"] > gate_usd:
+            reasons.append(f"{name}: gate ${p['gate']:,.0f} > its ${gate_usd:,.0f} allocation")
+    return {"status": WARN if reasons else PASS, "reasons": reasons}
+
+
+# --- The live record (cache/smoke/live/checks.json): every check's latest live result ------------------------
+
+
+def update_live_record(record: Mapping | None, report: Mapping, required: Sequence[str]) -> dict:
+    """`record` with this live invocation's checks replacing their earlier entries. Each entry carries what
+    run_gate's preflight checks (`check_live_smoke`): status, finish time, commit, profile, model overrides and
+    the probe's snapshots."""
+    out = dict(record or {})
+    checks = dict(out.get("checks") or {})
+    vcs = report.get("git") or {}
+    models = report.get("models") or {}
+    for name, r in (report.get("checks") or {}).items():
+        checks[name] = {
+            "status": r["status"], "reason": r.get("reason"), "finished_utc": r.get("finished_utc") or report.get("finished_utc"),
+            "git_commit": vcs.get("commit"), "git_dirty": vcs.get("dirty"), "profile": models.get("profile"),
+            "overrides": {k: v for k, v in (models.get("overrides") or {}).items() if v},
+            "snapshots": dict(report.get("snapshots") or {}), "report_started_utc": report.get("started_utc"),
+        }  # fmt: skip
+    out |= {"required": list(required), "checks": checks, "updated_utc": report.get("finished_utc")}
+    return out
