@@ -18,7 +18,8 @@ EFFORT_PROMPT = (
     "Work it out, then reply with the number only."
 )
 EFFORT_MAX_TOKENS = 4096  # room for high effort's reasoning; output is billed, so the cap also bounds cost
-EFFORT_ROLES = ("agent", "kg", "build")
+EFFORT_ROLES = ("agent", "kg", "build")  # every probe must cover these; other probed roles (judge, probe) count too
+PROBE_VERSION = 2  # cache/openai_probe.json layout: roles -> call paths (readiness/probe_openai.py)
 PULL_MIN_RATE = 0.75  # pull mode: share of samples that call search_kb at least once
 RETRY_WARN_RATE = 0.05  # burst: retried calls above this share halve the recommended concurrency
 TPM_HEADROOM = 0.8  # burst: use at most this share of the account's tokens-per-minute limit
@@ -50,8 +51,12 @@ def latency(values: Iterable[float | None]) -> dict:
 
 
 def reasoning_tokens(usage: Mapping | None) -> int | None:
-    details = (usage or {}).get("completion_tokens_details") or {}
-    value = details.get("reasoning_tokens")
+    """Reasoning tokens from either call path's usage: Inspect's `ModelUsage` (`reasoning_tokens`, from the
+    Responses API's output_tokens_details) or a chat completion's (`completion_tokens_details.reasoning_tokens`)."""
+    usage = usage or {}
+    value = usage.get("reasoning_tokens")
+    if value is None:
+        value = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
     return int(value) if value is not None else None
 
 
@@ -64,30 +69,46 @@ def effort_verdict(high: Mapping, low: Mapping) -> dict:
     rh, rl = reasoning_tokens(high.get("usage")), reasoning_tokens(low.get("usage"))
     measured = {"reasoning_tokens_high": rh, "reasoning_tokens_low": rl}
     if rh is None or rl is None:
-        return result(FAIL, measured, reason="usage has no completion_tokens_details.reasoning_tokens: effort cannot be compared")
+        return result(FAIL, measured, reason="usage reports no reasoning tokens: effort cannot be compared")
     if rh <= rl:
         return result(FAIL, measured, reason=f"high used {rh} reasoning tokens, low {rl}: the effort setting does not change reasoning")
     return result(PASS, measured)
 
 
 def effort_from_probe(probe: Mapping, roles: Sequence[str] = EFFORT_ROLES) -> dict:
-    """The effort check from cache/openai_probe.json: every probed role's `effort` verdict must pass."""
-    per_role, missing = {}, []
-    for role in roles:
-        entry = probe.get(role)
-        if not isinstance(entry, Mapping):
-            continue
-        effort = entry.get("effort")
-        if not isinstance(effort, Mapping) or "verdict" not in effort:
-            missing.append(role)
-            continue
-        per_role[role] = {"model": entry.get("model")} | effort["verdict"]
-    if missing:
-        return result(FAIL, {"roles": per_role}, reason=f"the probe has no effort check for {missing}: re-run readiness/probe_openai.py (FX-8)")
-    if not per_role:
-        return result(FAIL, {}, reason="the probe probed no role models: run readiness/probe_openai.py with --agent/--kg/--build")
-    failed = [r for r, v in per_role.items() if v["status"] != PASS]
-    return result(FAIL if failed else PASS, {"roles": per_role}, reason=f"effort not honoured for {failed}" if failed else None)
+    """The effort check from cache/openai_probe.json (version 2: roles -> call paths).
+
+    Every probed role must pass on each call path it uses: the Inspect path (`inspect`, the Responses API for GPT-6)
+    for agent, kg, judge and probe; the build client (`build`) for build. On each, the role's own configuration
+    must be accepted, as must a strict structured-output call, and reasoning effort must be honoured (high uses
+    more reasoning tokens than low; a role that sets no effort is skipped). `roles` must all be probed."""
+    if probe.get("version") != PROBE_VERSION or not isinstance(probe.get("roles"), Mapping):
+        return result(FAIL, {}, reason="cache/openai_probe.json predates the call-path probe: re-run readiness/probe_openai.py")
+    per_path: dict[str, dict] = {}
+    problems: list[str] = []
+    for role, entry in probe["roles"].items():
+        for path, rec in (entry.get("paths") or {}).items():
+            key = f"{role}/{path}"
+            verdict = ((rec.get("effort") or {}).get("verdict")) or result(FAIL, {}, reason="no effort verdict")
+            per_path[key] = {"model": entry.get("model"), "api": rec.get("api"), "snapshot": rec.get("snapshot")} | verdict
+            if verdict["status"] == FAIL:
+                problems.append(f"{key}: effort not honoured ({verdict.get('reason')})")
+            for call in ("as_configured", "structured_output"):
+                if not (rec.get(call) or {}).get("accepted"):
+                    problems.append(f"{key}: {call.replace('_', ' ')} call rejected ({(rec.get(call) or {}).get('error')})")
+    if missing := [r for r in roles if r not in probe["roles"]]:
+        problems.append(f"the probe did not cover {missing}: re-run readiness/probe_openai.py --profile <profile>")
+    snapshots = probe.get("snapshots") or {}
+    measured = {"paths": per_path, "snapshots": {a: (v or {}).get("snapshot") for a, v in snapshots.items()}}
+    if inconsistent := sorted(a for a, v in snapshots.items() if len(set((v or {}).get("snapshots_seen") or [])) > 1):
+        problems.append(f"served by more than one snapshot within the probe: {inconsistent}")
+    return result(FAIL if problems else PASS, measured, reason="; ".join(problems) or None)
+
+
+def ratelimit_headers(probe: Mapping | None, model: str) -> dict | None:
+    """The probe's x-ratelimit-* headers for `model` (bare or "provider/model"), for the burst check's TPM cap."""
+    entry = ((probe or {}).get("ratelimits") or {}).get(model.split("/", 1)[-1]) or {}
+    return entry.get("headers") or None
 
 
 # --- Pull mode live --------------------------------------------------------------------------------
