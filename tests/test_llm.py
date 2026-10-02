@@ -21,7 +21,7 @@ class FakeEmbeddingsClient:
         self.calls = 0
         self.embeddings = SimpleNamespace(create=self._create)
 
-    async def _create(self, model, input):
+    async def _create(self, model, input, encoding_format=None):
         self.calls += 1
         data = [SimpleNamespace(embedding=[float(len(t)), 1.0]) for t in input]
         return SimpleNamespace(data=data, usage=SimpleNamespace(prompt_tokens=7 * len(input)))

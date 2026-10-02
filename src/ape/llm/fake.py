@@ -15,7 +15,8 @@ def bow_vector(text: str) -> list[float]:
     for tok in "".join(c.lower() if c.isalnum() else " " for c in text).split():
         v[int(hashlib.md5(tok.encode()).hexdigest(), 16) % DIM] += 1.0
     n = np.linalg.norm(v)
-    return (v / n if n else v).tolist()
+    # float32 values, as OpenAI returns: the cache stores float32 (ape.llm.embeddings), so fresh and cached agree.
+    return (v / n if n else v).astype(np.float32).tolist()
 
 
 class FakeEmbeddingsClient:
@@ -25,7 +26,7 @@ class FakeEmbeddingsClient:
         self.calls = 0
         self.embeddings = SimpleNamespace(create=self._create)
 
-    async def _create(self, model, input):
+    async def _create(self, model, input, encoding_format=None):  # floats whatever the format, like many clients
         self.calls += 1
         return SimpleNamespace(
             data=[SimpleNamespace(embedding=bow_vector(t)) for t in input],
