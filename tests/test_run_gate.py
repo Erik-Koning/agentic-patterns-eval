@@ -31,8 +31,9 @@ REAL_SELECTED = ROOT / "config" / "selected.yaml"
 
 @pytest.fixture
 def clean_env(tmp_path, monkeypatch):
-    """No stray APE_* knobs from the shell or other tests; the orchestrator sets what it needs."""
-    for k in [k for k in os.environ if k.startswith("APE_")]:
+    """No stray APE_* knobs from the shell or other tests; the orchestrator sets what it needs. The suite's
+    isolated spend registry stays (tests/conftest.py)."""
+    for k in [k for k in os.environ if k.startswith("APE_") and k != "APE_SPEND_REGISTRY"]:
         monkeypatch.delenv(k)
     return tmp_path
 
@@ -136,10 +137,10 @@ def test_budget_guard_refuses_a_phase_projected_over_what_is_left(clean_env, mon
     run = GateRun("guard", offline=True, runs_root=clean_env / "runs")
     assert run_phases(run, "preflight") == {"preflight": "done"}
 
-    def nearly_spent(budget_usd, *_args, **_kwargs):
-        return {"budget_usd": budget_usd, "inspect_usd": 4999.5, "ledger_usd": 0.0, "spent_usd": 4999.5, "remaining_usd": budget_usd - 4999.5}
+    def nearly_spent(budget_usd, *_args, **_kwargs):  # the whole program's spend (ape.budget.program_remaining)
+        return dict.fromkeys(run_gate.SPEND_KEYS) | {"budget_usd": budget_usd, "remaining_usd": budget_usd - 4999.5, "spent_usd": 4999.5}
 
-    monkeypatch.setattr(run_gate, "remaining", nearly_spent)
+    monkeypatch.setattr(run_gate, "program_remaining", nearly_spent)
     with pytest.raises(BudgetError, match=r"phase build-dev: projected \$[\d.]+ exceeds the remaining \$0.50"):
         run_phases(run, "build-dev")
     m = read_manifest(run, "build-dev")
@@ -528,10 +529,10 @@ def test_offline_all_builds_the_test_split_after_the_freeze_runs_the_primary_fir
     # 2. A failing group is recorded; the other cells still run; the phase fails.
     real_tasks = run_gate.run_gate_tasks
 
-    def te_all_breaks(r, gp, models, tasks, log_dir, epochs, what):
+    def te_all_breaks(r, gp, models, tasks, log_dir, epochs, what, sample_cost_usd=None):
         if "gate.sec.te-all" in what:
             raise PhaseError("injected failure")
-        return real_tasks(r, gp, models, tasks, log_dir, epochs, what)
+        return real_tasks(r, gp, models, tasks, log_dir, epochs, what, sample_cost_usd)
 
     monkeypatch.setattr(run_gate, "run_gate_tasks", te_all_breaks)
     with pytest.raises(PhaseError, match=r"1 test group\(s\) failed .*gate.sec.te-all \(selected\): PhaseError: injected failure"):

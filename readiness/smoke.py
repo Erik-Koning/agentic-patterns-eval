@@ -41,7 +41,9 @@ projection (GPT-6 Luna, high; 2026-10-01 priors): L2 $0.10, D017 $0.04, H4 $0.01
 pull $0.05, recovery $0.01, burst $0.10, orchestrator $1.06 (of which $0.47 is the GraphRAG-Bench anchor index,
 built with gpt-4o-mini; $0.93 in all with the Luna fallback), total ≈ $1.38. The effort check reads the probe,
 which costs ≈ $0.02 on its own. `--dry` spends $0. Spend is this invocation's: Inspect-metered calls, plus the
-growth of the build/embedding ledger and of the orchestrator run.
+growth of the build/embedding ledger and of the orchestrator run. A live smoke's log dirs and ledger also
+register in the program spend registry (`ape.spend`, label `smoke`), so they count toward the program's
+$5,000 in run_gate's guard and in `python -m ape.budget spend`.
 
 The orchestrator check runs run_gate's gate profile (run_plan.yaml), not the --agent/--kg/--build overrides.
 
@@ -94,6 +96,10 @@ def _isolate(dry: bool) -> None:
     os.environ["APE_WORLDS"] = str(OUT / "worlds")
     os.environ["APE_INDICES"] = str(OUT / "indices")
     os.environ["APE_CACHE"] = str(OUT / "cache")
+    # Smoke spend is the program's spend too: live log dirs and ledgers register in the program spend registry
+    # (ape.spend) under this label, so run_gate's guard and `python -m ape.budget spend` count them. The
+    # --max-usd cap stays this invocation's own. --dry (mock agent) registers nothing in the real registry.
+    os.environ["APE_SPEND_LABEL"] = "smoke"
     if dry:
         os.environ["APE_EMBEDDINGS"] = "fake"
 

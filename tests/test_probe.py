@@ -315,7 +315,7 @@ def test_run_gate_live_preflight_refuses_a_moved_snapshot(provenance, tmp_path, 
 
     from ape.run_gate import GateRun, read_manifest, run_phases
 
-    for k in [k for k in os.environ if k.startswith("APE_")]:
+    for k in [k for k in os.environ if k.startswith("APE_") and k != "APE_SPEND_REGISTRY"]:
         monkeypatch.delenv(k)
     monkeypatch.setenv("APE_CACHE", str(tmp_path / "cache"))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-never-sent")  # nothing here makes a request
