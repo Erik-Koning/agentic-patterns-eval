@@ -678,3 +678,57 @@ def test_a_budget_override_only_lowers_the_plans_budget(clean_env):
     plan_total = float(run_gate.plan(low).budget["total_usd"])
     assert run_gate.spend(low)["budget_usd"] == 3.0
     assert run_gate.spend(high)["budget_usd"] == plan_total
+
+
+def test_live_freeze_needs_a_written_diagnosis_to_accept_a_failed_pc1(clean_env, monkeypatch):
+    tmp = clean_env
+    monkeypatch.setenv("APE_CACHE", str(tmp / "cache"))
+    out = tmp / "out"
+    monkeypatch.setattr(GateRun, "out_config_dir", property(lambda self: out))
+    out.mkdir()
+    (out / "selected.yaml").write_text(yaml.safe_dump({k: {"arm": a, "env": {}, "candidate": "c"} for k, a in (("APG*", "APG-s"), ("LGR*", "LGR-s"), ("S3s", "S3s"))}))
+    (out / "s7_targets.json").write_text(json.dumps({c: 120 for c in GATE_CELLS}))
+    (out / "budget_calibration.yaml").write_text("context: 300\n")
+    prereg, provenance = tmp / "GATE_PREREG.md", tmp / "PROVENANCE.md"
+    text = (ROOT / "GATE_PREREG.md").read_text()
+    start = run_gate.prereg_body_start(text)
+    prereg.write_text(text[:start] + run_gate.PLACEHOLDER_ITEM.sub("filled", text[start:]))
+    shutil.copy(ROOT / "PROVENANCE.md", provenance)
+    paths = {"runs_root": tmp / "runs", "prereg_path": prereg, "provenance_path": provenance}
+    monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: [])
+    run = GateRun("pc1-fail", **paths)
+    run_gate._check_mode(run)
+    for phase in ("preflight", "tune", "pilot"):
+        _fake_done(run, phase)
+    _fake_done(run, "anchor", pc1_pass=False)
+
+    with pytest.raises(PhaseError, match=r"PC1 does not pass(.|\n)*Diagnose the anchor logs(.|\n)*--accept-pc1-failure"):
+        run_phases(run, "freeze")
+    with pytest.raises(PhaseError, match="at least 40 characters"):
+        run_phases(GateRun("pc1-fail", accept_pc1_failure="looks fine", **paths), "freeze")
+    diagnosis = "judge parse rate 99.8%, no index or harness errors; Luna judges lower than gpt-4o-mini"
+    assert run_phases(GateRun("pc1-fail", accept_pc1_failure=diagnosis, **paths), "freeze") == {"freeze": "done"}
+    freeze = json.loads(run.freeze_path.read_text())
+    assert freeze["pc1_accepted"]["reason"] == diagnosis and freeze["pc1_accepted"]["pc1_pass"] is False
+    assert f"PC1 failed and was accepted at the freeze:** {diagnosis}" in provenance.read_text()
+
+
+def test_backup_runs_after_live_phases_only_and_never_fails_one(clean_env, monkeypatch):
+    calls = []
+    monkeypatch.setattr("ape.backup.backup", lambda dest: calls.append(dest) or type("R", (), {"dest": str(dest), "copied": 3, "skipped": 0, "bytes_copied": 9})())
+    live, offline = GateRun("bk-live", runs_root=clean_env / "runs"), GateRun("bk-off", offline=True, runs_root=clean_env / "runs")
+    for run in (live, offline):
+        run.manifest_path("preflight").parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.delenv("APE_BACKUP_DIR", raising=False)
+    record = {"warnings": []}
+    run_gate.backup_after_phase(live, "preflight", record)
+    assert calls == [] and "backup" not in record
+    monkeypatch.setenv("APE_BACKUP_DIR", str(clean_env / "bk"))
+    run_gate.backup_after_phase(offline, "preflight", record)
+    assert calls == []
+    run_gate.backup_after_phase(live, "preflight", record)
+    assert len(calls) == 1 and record["backup"]["copied"] == 3
+    monkeypatch.setattr("ape.backup.backup", lambda dest: (_ for _ in ()).throw(OSError("disk full")))
+    record = {"warnings": []}
+    run_gate.backup_after_phase(live, "preflight", record)
+    assert "backup to" in record["warnings"][0] and "disk full" in record["warnings"][0]

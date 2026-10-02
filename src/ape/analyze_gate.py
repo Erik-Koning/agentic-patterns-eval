@@ -491,11 +491,13 @@ def mode_verdict(rows: pd.DataFrame, mode: str, preconditions: dict[str, bool], 
 
 
 def verdict(rows: pd.DataFrame, pcs: list[dict], modes: Sequence[str], reps: int = REPS, seed: int = SEED) -> dict:
-    preconditions = {p["id"]: p["pass"] for p in pcs}
+    # A precondition failure accepted at the freeze (only PC1 can be: GATE_PREREG §7) does not block the verdict;
+    # the decision carries it as a caveat instead.
+    preconditions = {p["id"]: bool(p["pass"] or p.get("accepted")) for p in pcs}
     per_mode = {m: mode_verdict(rows, m, preconditions, reps, seed) for m in modes}
     label, reasons = combine_modes({m: v["verdict"] for m, v in per_mode.items()})
     if label == "PRECONDITION_FAIL":
-        reasons = [f"{p['id']}: {p['reason']}" for p in pcs if not p["pass"]] + [r for v in per_mode.values() for r in v["reasons"] if r.startswith("primary data missing")]
+        reasons = [f"{p['id']}: {p['reason']}" for p in pcs if not (p["pass"] or p.get("accepted"))] + [r for v in per_mode.values() for r in v["reasons"] if r.startswith("primary data missing")]
     notes = []
     if label == "INCONCLUSIVE":
         notes.append("§8 allows ONE pre-registered extension on fresh test worlds, with α split 0.0125 / 0.0125.")
@@ -712,13 +714,17 @@ def analyze(run) -> dict:
         pc5(rows),
         pc6(run.phase_dir("tune"), grid, full_grid, selected, rg.TUNED_SYSTEMS),
     ]
+    freeze = rg.read_freeze(run) or {}
+    caveats = []
+    if (acc := freeze.get("pc1_accepted")) and not pcs[0]["pass"]:
+        pcs[0]["accepted"] = acc
+        caveats.append(f"PC1 (the LightRAG anchor) failed and was accepted at the freeze: {acc['reason']}. The LightRAG setup is not validated by the anchor; PC2 is the remaining competence check.")
     f7_groups = [g for g in ((test or {}).get("cells", {}).get(F7_CELL, {}) or {}).get("groups", [])]
     modes = tuple(dict.fromkeys(d for g in f7_groups for d in g.get("deliveries", []))) or ("push", "pull")
     v = verdict(rows, pcs, modes)
     primary_rows = pd.concat([mode_rows(rows, m) for m in modes], ignore_index=True).drop_duplicates(subset=["plan_cell", "label", "delivery", "task", "epoch"]) if len(rows) else rows
     diag_rows = _sel(rows, DIAG_CELL) if len(rows) else rows
     tables_rows = pd.concat([primary_rows, diag_rows], ignore_index=True) if len(rows) else rows
-    freeze = rg.read_freeze(run) or {}
     decision = {
         "header": {
             "run_id": run.run_id,
@@ -733,6 +739,7 @@ def analyze(run) -> dict:
             "cells_not_done": {c: x["status"] for c, x in ((test or {}).get("cells") or {}).items() if x.get("status") != "done"},
         },
         "verdict": v,
+        "caveats": caveats,
         "preconditions": pcs,
         "diagnosis": diagnosis(rows),
         "tables": {
@@ -788,6 +795,7 @@ def render(d: dict) -> str:
     h, v = d["header"], d["verdict"]
     L: list[str] = [f"# Gate decision report: run `{h['run_id']}`{' (OFFLINE)' if h['offline'] else ''}", ""]
     L += ["## Verdict", "", f"**{v['label']}**", ""]
+    L += [f"> **Caveat:** {c}" for c in d.get("caveats") or []] + ([""] if d.get("caveats") else [])
     L += [f"- {r}" for r in v["reasons"]] + [f"- {n}" for n in v["notes"]]
     if v["label"] == "NO_GO" and (dg := d["diagnosis"]).get("label"):
         L += [f"- NO-GO diagnosis: **{dg['label']}** (see below)."]
@@ -807,7 +815,7 @@ def render(d: dict) -> str:
     ]
 
     L += ["## Preconditions", "", "A failure means fix and re-pilot, not NO-GO (§7).", ""]
-    L += [_table(["", "Pass", "Value", "Threshold", "Reason"], [[p["id"], "✅" if p["pass"] else "❌", _short(p["value"]), p["threshold"], p["reason"] or ""] for p in d["preconditions"]])]
+    L += [_table(["", "Pass", "Value", "Threshold", "Reason"], [[p["id"], "✅" if p["pass"] else ("⚠️ accepted" if p.get("accepted") else "❌"), _short(p["value"]), p["threshold"], p["reason"] or ""] for p in d["preconditions"]])]
 
     L += ["## Verdict by delivery mode", ""]
     L += ["Both modes pool the four gate cells with equal weights: push = F7 push + F3; pull = F7 pull + the same F3 push cells (F3 is push only). Δ = success(APG*) − success(LGR*); non-inferiority margin −5 pp, one-sided α = 0.025.", ""]

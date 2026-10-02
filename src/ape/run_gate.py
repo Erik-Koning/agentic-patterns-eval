@@ -217,6 +217,7 @@ FROZEN_OUTPUTS = ("selected.yaml", "s7_targets.json", "budget_calibration.yaml")
 FROZEN_CODE = ("uv.lock", "src/ape/analyze_gate.py", "src/ape/analysis/gate_stats.py", "src/ape/analysis/cost.py", "src/ape/analysis/pilot.py")
 PLACEHOLDER = re.compile(r"\[(PILOT|USER)\b")  # any marker in GATE_PREREG.md's body blocks the freeze
 PLACEHOLDER_ITEM = re.compile(r"\[(PILOT|USER)(?::\s*([^\]\n]*))?\]")
+PC1_REASON_MIN_CHARS = 40  # an acceptance states the diagnosis, not just "ok"
 DEVIATION = "any change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log): record it there and start a new --run-id"
 # The test split (GATE_PREREG §4), built and run only on a frozen run: world groups and their plan build cells.
 TEST_BUILD_CELLS = {"test": "gate.build.test", "id_only": "gate.build.test-id-only", "f5": "gate.build.test-f5"}
@@ -260,6 +261,7 @@ class GateRun:
     smoke: bool = False
     budget_usd: float | None = None  # lowers the guard's budget below the plan's budget.total_usd (smoke: what --max-usd leaves)
     anchor_data_dir: Path | None = None  # GraphRAG-Bench data; default <cache>/graphragbench (smoke: the repo's cache/)
+    accept_pc1_failure: str | None = None  # freeze only: the analyst's recorded reason for freezing despite a failed PC1 (GATE_PREREG §7)
 
     def __post_init__(self) -> None:
         if not _RUN_ID.match(self.run_id):
@@ -1560,9 +1562,22 @@ def _freeze(run: GateRun, record: dict) -> None:
         msg = f"the git tree has uncommitted changes {changes[:10]}{' ...' if len(changes) > 10 else ''}: commit them so the frozen design traces to a commit"
         (record["warnings"] if run.offline else problems).append(msg)
     pc1 = (read_manifest(run, "anchor") or {}).get("pc1_pass")
+    pc1_accepted = None
     if pc1 is not True:
-        msg = f"PC1 does not pass (anchor/pc1.json, pc1_pass={pc1}): fix and re-pilot before freezing (GATE_PREREG §7)"
-        (record["warnings"] if run.offline else problems).append(msg)
+        reason = (run.accept_pc1_failure or "").strip()
+        if reason:
+            if len(reason) < PC1_REASON_MIN_CHARS:
+                problems.append(f"--accept-pc1-failure needs the diagnosis in words (at least {PC1_REASON_MIN_CHARS} characters): what the anchor logs showed and why no harness defect explains the miss")
+            else:
+                pc1_accepted = {"reason": reason, "pc1_pass": pc1, "pc1": _show(run.phase_dir("anchor") / "pc1.json"), "accepted_at": _now()}
+                record["warnings"].append(f"PC1 failed and is accepted at the freeze: {reason!r}; the report carries this caveat")
+        else:
+            msg = (
+                f"PC1 does not pass (anchor/pc1.json, pc1_pass={pc1}). Diagnose the anchor logs first: a harness defect is fixed and "
+                "the anchor re-run (a logged deviation). With no defect found, the analyst may accept the failure explicitly: "
+                "--accept-pc1-failure '<diagnosis>' (GATE_PREREG §7)"
+            )
+            (record["warnings"] if run.offline else problems).append(msg)
     if problems:
         raise PhaseError("freeze refused:\n" + "\n".join(f"  - {x}" for x in problems))
     if not run.offline and (untracked := [_show(run.out_config_dir / n) for n in FROZEN_OUTPUTS if _git("ls-files", "--error-unmatch", str(run.out_config_dir / n)) is None]):
@@ -1580,6 +1595,7 @@ def _freeze(run: GateRun, record: dict) -> None:
         "apg_core": {"installed_commit": _apg_installed_commit(), "pinned_commit": APG_PIN},
         "pilot": {"path": _show(run.phase_dir("pilot") / "pilot.json"), "sha256": _sha256(run.phase_dir("pilot") / "pilot.json")},
         "upstream": record["upstream"],
+        "pc1_accepted": pc1_accepted,
     }
     if rehearsal is not None:
         freeze["files"]["GATE_PREREG.md (draft)"] = {"path": _show(run.prereg_path), "sha256": _sha256(run.prereg_path)}
@@ -1589,6 +1605,7 @@ def _freeze(run: GateRun, record: dict) -> None:
         f"- **Commit:** `{git['commit']}`; analysis code (`src/ape/analysis/`, `src/ape/analyze_gate.py`) at `{freeze['analysis_commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{APG_PIN}`).",
         "- **Frozen files** (sha256):",
         *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
+        *([f"- **PC1 failed and was accepted at the freeze:** {pc1_accepted['reason']}"] if pc1_accepted else []),
         f"- **Record:** `{_show(run.freeze_path)}`. {DEVIATION[0].upper() + DEVIATION[1:]}.",
         "",
     ]
@@ -2008,7 +2025,7 @@ PHASE_DEFS: dict[str, Phase] = {
         "freeze",
         _freeze,
         inputs=_freeze_inputs,
-        params=lambda r: {"scale": scale(r), "frozen": list(frozen_files(r, r.prereg_path)), "rehearsal": r.offline},
+        params=lambda r: {"scale": scale(r), "frozen": list(frozen_files(r, r.prereg_path)), "rehearsal": r.offline, "accept_pc1_failure": r.accept_pc1_failure},
         projected=lambda r: 0.0,
         profile=gate_profile,
         requires=("preflight", "tune", "anchor", "pilot"),
@@ -2129,13 +2146,32 @@ def run_phase(run: GateRun, name: str) -> str:
         with contextlib.suppress(Exception):
             record["spend"] = spend(run)
         _write_json(run.manifest_path(name), record)
+        backup_after_phase(run, name, record)
         raise
     record |= {"status": "done", "finished": _now(), "spend": spend(run)}
     _write_json(run.manifest_path(name), record)
+    backup_after_phase(run, name, record)
     for w in record["warnings"]:
         print(f"[{name}] WARNING: {w}", flush=True)
     print(f"[{name}] done (spent so far ${record['spend']['spent_usd']:,.2f} of ${record['spend']['budget_usd']:,.0f})", flush=True)
     return "done"
+
+
+def backup_after_phase(run: GateRun, name: str, record: dict) -> None:
+    """Live runs with APE_BACKUP_DIR set: copy runs/, cache/ and indices/ there after every finished or failed
+    phase (`ape.backup`, incremental). Best effort: a failed backup is a warning in the manifest, never a failed phase."""
+    from .backup import backup, backup_dir
+
+    dest = backup_dir()
+    if dest is None or run.offline:
+        return
+    try:
+        r = backup(dest)
+        record["backup"] = {"dest": r.dest, "copied": r.copied, "skipped": r.skipped, "bytes_copied": r.bytes_copied}
+    except Exception as e:  # noqa: BLE001  (never fail a phase over its backup)
+        record["warnings"].append(f"backup to {dest} failed: {type(e).__name__}: {e}")
+        print(f"[{name}] WARNING: backup to {dest} failed: {e}", file=sys.stderr, flush=True)
+    _write_json(run.manifest_path(name), record)
 
 
 def run_phases(run: GateRun, phase: str) -> dict[str, str]:
@@ -2169,10 +2205,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--force", action="store_true", help="re-run complete phases even when their inputs are unchanged")
     ap.add_argument("--runs-dir", type=Path, help=f"where run directories live (default: runs/; smoke: {_show(SMOKE_RUNS)})")
     ap.add_argument("--config-dir", type=Path, default=ROOT / "config", help="read config inputs from here (offline runs and tests only)")
+    ap.add_argument("--accept-pc1-failure", metavar="DIAGNOSIS", help="freeze only: freeze despite a failed PC1, recording the analyst's diagnosis (GATE_PREREG §7)")
     a = ap.parse_args(argv)
+    if a.accept_pc1_failure and a.phase not in ("freeze", "all"):
+        ap.error("--accept-pc1-failure applies to the freeze phase")
     a.runs_dir = a.runs_dir or (SMOKE_RUNS if a.smoke else ROOT / "runs")
     try:
-        run = GateRun(a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd)
+        run = GateRun(a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd, accept_pc1_failure=a.accept_pc1_failure)
         statuses = run_phases(run, a.phase)
     except (PhaseError, PreflightError, BudgetError) as e:
         print(f"run_gate: {e}", file=sys.stderr)

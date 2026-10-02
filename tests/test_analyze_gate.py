@@ -263,3 +263,11 @@ def test_pipeline_miss_labels_the_first_lost_stage():
     assert pipeline_miss(apg(), [{"exposed_tools": ["lookup"]}], f3) == "tool_exposure_miss"
     assert pipeline_miss([{"meta": {}, "fact_ids": ["f2"]}], [], f3) == "evidence_miss"
     assert pipeline_miss([{"meta": {}, "fact_ids": ["f1"]}], [{"exposed_tools": ["refund"]}], f3) == "delivered_but_failed"
+
+
+def test_a_pc1_failure_accepted_at_the_freeze_does_not_block_the_verdict():
+    pcs = [dict(p) for p in PC_OK]
+    pcs[0] |= {"pass": False, "reason": "does not reproduce the published accuracy within ±10 pp"}
+    assert _verdict(rows({"push": 0.0, "pull": 0.0}), pcs)["label"] == "PRECONDITION_FAIL"
+    pcs[0]["accepted"] = {"reason": "judge parse rate 99.8%, no index errors; the Luna judge scores lower than gpt-4o-mini"}
+    assert _verdict(rows({"push": 0.0, "pull": 0.0}), pcs)["label"] == "GO"
