@@ -136,6 +136,35 @@ Each entry records the decision, why it was made, and who made it.
 - **Run order:** the test phase runs every cell the verdict needs first: the GO rule's cells (gate.test.f7, gate.test.f3, gate.diag.s7) and the cells for PC3 (gate.diag) and PC2 (gate.f5). A budget stop can then only cost secondaries.
 - **Pull verdict:** pools F7 pull with F3 push. F3 runs push only, so both modes cover the same four cells (GATE_PREREG §3).
 
+**D-023 (2026-10-02, RELIABILITY_REVIEW R1; before any freeze).** The gate's statistics, re-derived on simulated realistic data.
+
+Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45 / 0.75 / 0.60 and 20,000 gates per scenario unless stated. They supersede the PC2 point-estimate rule of D-022.
+
+- **Interval: world-clustered t-interval** (ratio estimator per cell, linearized cluster variance, Satterthwaite df), replacing the percentile cluster bootstrap.
+  - At the margin (Δ = −5 pp) the bootstrap passed 3.0–4.0% of the time at a nominal 2.5%.
+  - The t-interval passes 2.6% (16 worlds), 2.3% (12 worlds), 2.4% (heterogeneous F7-1000) and 2.8% (σ_w = 1.0, σ_g = 0.6).
+  - The bootstrap is still reported.
+- **Minimum worlds:** at least 4 *paired* APG*/LGR* worlds per cell. Before, every arm's worlds were counted, so 2 paired worlds could yield GO.
+- **α budget:** one-sided 0.025 for the whole procedure.
+  - The gate run spends 0.020; the one extension spends 0.005, on fresh worlds analysed alone.
+  - The extension needs a stage 1 that is INCONCLUSIVE and test worlds disjoint from stage 1's (`analyze_gate --extension-of`).
+  - The bound is Bonferroni over disjoint data.
+  - Simulated at the margin: 1.88% overall. P(unqualified GO) at Δ = 0: 0.837, or 0.885 with the extension.
+- **Delivery modes: Holm** across push and pull at the stage's α.
+  - Per-mode tests issued some GO-type label 4.3% of the time at the margin (both modes at α = 0.025, as before). With Holm at 0.020 the rate is 1.8%.
+  - Superiority is tested only after GO in both modes (serial gatekeeping), again with Holm. False superiority at Δ = 0 is 1.8%.
+- **PC2 and PC3 fail only on evidence of a violation.** The test is whether the one-sided upper bound is below −3 pp; PC3 tests each pair at 0.025 / 3.
+  - At a tie: PC2 fails 0.2% of the time (was 18%), and a PC3 chain 0 of 1,000 (was 16%).
+  - The opposite rule, passing only when the lower bound exceeds −3 pp, would fail 88% of ties at F5's size, so it was not used.
+  - Detection of a real 8 pp violation: 26% (PC2) and 42% (PC3).
+- **PC4's 4× bound is descriptive.** It holds by construction for every budgeted arm.
+- **PC5:** S7's cap hits are reported, not gated.
+- **Unpaired tasks** are counted per cell, and the §2 secondary conditions are reported whatever the verdict.
+- **Pilot σ: moment matching** to the power model (Gauss–Hermite), with 80% χ² intervals, replacing the delta method.
+  - Over 300 simulated 4-world pilots, σ_g = 0.8 is estimated at 0.77 (was 0.50), σ_g = 0.3 at 0.28, and σ_w = 1.0 at 0.99.
+  - The recommendation uses the intervals' upper ends. At true σ_g = 0.8 it never claims 16 worlds reach 0.8 (true power 0.38). Under the prior σ it usually says "the analyst decides", because a 4-world pilot cannot bound σ_g tightly.
+- **Power numbers (GATE_PREREG §4):** P(unqualified GO) at Δ = 0 under the prior σ is 0.84 at 16 worlds and 0.68 at 12. The earlier 0.91 / 0.79 were for one mode's bootstrap at 0.025.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

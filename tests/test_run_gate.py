@@ -321,7 +321,7 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
 
     # Power re-simulation and the analyst's transcription sheet, keyed by every [PILOT: ...] label in the prereg.
     power = json.loads((run_dir / "pilot" / "power.json").read_text())
-    assert set(power["scenarios"]) == {"pilot", "conservative"} and set(power["scenarios"]["pilot"]["power"]) == {"12", "16"}
+    assert set(power["scenarios"]) == {"pilot", "conservative", "prior"} and set(power["scenarios"]["pilot"]["power"]) == {"12", "16"}
     assert power["variance_components"]["estimable"] is False, "one offline world per cell: the priors are kept"
     pilot = json.loads((run_dir / "pilot" / "pilot.json").read_text())
     assert _body_labels((ROOT / "GATE_PREREG.md").read_text()) <= set(pilot["prereg_items"])

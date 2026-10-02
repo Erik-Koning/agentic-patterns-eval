@@ -17,10 +17,13 @@ never a crash.
 Contents:
 - Preconditions PC1-PC6 (§7), each with its value, threshold, pass/fail and reason.
 - The verdict per delivery mode (§3): `gate_stats.decide(apg_arm="APG*", lgr_arm="LGR*")` on the four gate cells,
-  equally weighted, with S7 from `gate.diag.s7`. Push pools F7 push with F3 (push); pull pools F7 pull with the
-  same F3 push cells, since F3 is push only. One combined label (`gate_stats.combine_modes`): GO, GO_PUSH_ONLY,
-  GO_PULL_ONLY, GO_WITH_COST_FLAG, INCONCLUSIVE, NO_GO or PRECONDITION_FAIL. Errored samples count as failures
-  (§2); a sensitivity analysis excludes them.
+  equally weighted, with S7 from `gate.diag.s7`, by the world-clustered t-interval. Push pools F7 push with F3
+  (push); pull pools F7 pull with the same F3 push cells, since F3 is push only. The modes are tested with Holm at
+  the gate run's familywise α (`gate_stats.holm_modes`; D-023), then one label (`gate_stats.combine_modes`): GO,
+  GO_PUSH_ONLY, GO_PULL_ONLY, GO_WITH_COST_FLAG, INCONCLUSIVE, NO_GO or PRECONDITION_FAIL. Errored samples count as
+  failures (§2); a sensitivity analysis excludes them.
+- The one pre-registered extension (§8): `--extension-of <stage-1 run>` marks this run as the extension of an
+  INCONCLUSIVE gate run; its fresh worlds are analysed alone at the extension's α (`extension_context`).
 - The NO-GO diagnosis (§8), always computed: S5o against LGR* on their shared tasks, and every failed
   sample's pipeline miss (`gate_stats.pipeline_miss`).
 - Tables: per-cell Δ with 95% CIs; per arm success, partial credit, evidence recall, error labels; cost per
@@ -48,6 +51,7 @@ import pandas as pd
 
 from .analysis import cost as costs
 from .analysis.gate_stats import (
+    ALPHA_TOTAL,
     CELL_FLOOR,
     COST_FLAG_RATIO,
     GATE_CELLS,
@@ -55,15 +59,19 @@ from .analysis.gate_stats import (
     MARGIN,
     MIN_WORLDS_PER_CELL,
     MISS_LABELS,
+    STAGE_ALPHA,
+    Decision,
     combine_modes,
     decide,
     delta_ci,
     epoch_agreement,
+    holm_modes,
     invariants,
     load_results,
     pooled_success,
     shared_tasks,
     task_means,
+    violation_test,
 )
 
 REPORT_DIR = "report"
@@ -81,37 +89,49 @@ CAPPED = (LGR, S3S)  # PC4: the arms the matched-budget calibration caps (APG fi
 F5_CELLS = ("F5-1hop", "F5-2hop")
 MAX_ERROR_RATE = 0.02  # PC5
 MAX_CAP_HIT_RATE = 0.10  # PC5
-CONTEXT_FACTOR = 4.0  # PC4: median realized context <= 4x the configured budget
+CONTEXT_FACTOR = 4.0  # PC4 (descriptive): median realized context vs 4x the configured budget
 MATCHED_TOLERANCE = 0.25  # PC4: capped arms within ±25% of the matched budget
-ALPHA = 0.025  # one-sided, so the CI is the 2.5th-97.5th percentile (§2)
+ALPHA = 0.025  # one-sided level of the reported 95% intervals and of the PC2 / PC3 violation tests
+GATE_ALPHA = STAGE_ALPHA["stage1"]  # the gate run's familywise one-sided α across delivery modes (§2, D-023)
+EXTENSION_ALPHA = STAGE_ALPHA["extension"]  # the one pre-registered extension's α (§8)
+EXTENSION_FILE = "extension.json"  # in a run dir: this run is the extension of the named stage-1 run
 REPS = 10_000  # bootstrap and sign-flip resamples (§2)
 SEED = 0
 
 CHOICES = (
-    "PC2 passes when the point estimate of LGR* − LightRAG naive, pooled over F5-1hop and F5-2hop with equal "
-    "weights, is ≥ −3 pp, PC3's tolerance (the prereg names no test; a tie must not fail on noise); its 95% CI is reported.",
+    "PC2 fails only on evidence that LGR* is worse than LightRAG naive by more than 3 pp (PC3's tolerance): the "
+    "one-sided 97.5% upper bound of LGR* − naive, pooled over F5-1hop and F5-2hop with equal weights (world-clustered "
+    "t), is below −3 pp (D-023). A tie fails at most 2.5% of the time; the earlier point-estimate rule failed 18%.",
     "PC3 compares the four arms on the tasks all of them ran (the diagnostics run on the first worlds of each "
-    "cell), in push mode, the only mode the diagnostic arms run.",
-    "PC4's 4× bound is checked for every arm with a configured budget in every test group (S1 and S6 have "
-    "none); a compile's budget is the one its task recorded (S7: its frozen per-cell target), and the median is "
-    "over compiles of the ratio realized / budget. The ±25% clause uses the median over every compile of each "
-    "capped arm in the matched-budget cell, pooled over cells, as the calibration did; APG*'s matched median is "
-    "reported, not gated. The ±25% clause gates only whether the matched-budget secondary reads as matched; a miss "
-    "or a missing secondary is reported there and never fails PC4 or the verdict (GATE_PREREG §7, D-022).",
+    "cell), in push mode, the only mode the diagnostic arms run. Each adjacent pair fails only on evidence of a "
+    "violation larger than 3 pp, at one-sided 0.025 / 3 per pair (D-023).",
+    "PC4 is descriptive (D-023): its 4× bound holds by construction for every budgeted arm (LightRAG's "
+    "max_total_tokens is 4× its budget, S7's budget is its own target, APG and S3s pack under theirs), so it is "
+    "reported, and an arm over it is flagged as an anomaly, never gated. The ±25% clause uses the median over every "
+    "compile of each capped arm in the matched-budget cell, pooled over cells, as the calibration did; APG*'s "
+    "matched median is reported, not gated. A miss or a missing matched-budget secondary is reported there and "
+    "never blocks the verdict (D-022).",
     "A precondition whose data is missing (cell not run, failed or budget-stopped) fails with that reason: "
     "§7's conditions must be shown, not assumed.",
     "PC5 is gated on the cells the verdict uses (gate.test.f7, gate.test.f3, gate.diag.s7), per arm and delivery "
-    "mode; every other cell's rates are reported.",
+    "mode; every other cell's rates are reported. The S7 placebo is gated on errors only: its cap hits are reported, "
+    "since a random context that leaves the agent searching until the turn cap is the placebo working (D-023).",
     "PC6 counts every configuration in the current and archived tuning logs against budget_per_system, requires "
     "a record for every candidate this run's grid declares, and a selection per system that matches selected.yaml.",
     "The pull verdict compares APG* (pull) with S7 (push): S7 is a placebo context and has no pull mode.",
-    "One mode GO and the other INCONCLUSIVE is GO_<MODE>_ONLY (the other mode's verdict is listed); no mode GO "
-    "and either INCONCLUSIVE is INCONCLUSIVE.",
+    f"The delivery modes' NI hypotheses are tested with Holm at the gate run's familywise one-sided α = {GATE_ALPHA} "
+    "(D-023): each mode is classified at its Holm level (GO, INCONCLUSIVE or NO_GO by its interval at that level). "
+    "One mode GO and the other INCONCLUSIVE is GO_<MODE>_ONLY; no mode GO and either INCONCLUSIVE is INCONCLUSIVE. "
+    "Superiority is tested only after GO in every mode (serial gatekeeping), with Holm at the same α.",
+    f"The one pre-registered extension (§8) analyses its fresh test worlds alone at α = {EXTENSION_ALPHA}, Holm across "
+    f"modes; with the gate run's {GATE_ALPHA} the total one-sided α is {ALPHA_TOTAL} by Bonferroni (D-023).",
+    "Every primary interval is the world-clustered t-interval with Satterthwaite df (D-023); the percentile "
+    "bootstrap is reported alongside it for reference.",
     "The cost ratio is per mode, the mean per-query cost (Inspect-metered agent and kg calls plus query-time "
     "embeddings) of APG* over LGR* on that mode's rows. Query-time embeddings are cached across runs, so the "
     "ledger records only first embeddings; their cost is spread evenly over the arm's test samples.",
     "The NO-GO diagnosis compares S5o (gate.diag) with LGR* (push) on their shared tasks, non-inferior when the "
-    "lower bound of the 95% CI is above −5 pp, the same rule as the gate.",
+    "lower bound of the 95% CI is above −5 pp.",
 )
 
 
@@ -289,8 +309,9 @@ def build_costs(ledger_df: pd.DataFrame, test_worlds: Sequence[str]) -> dict:
 # --- preconditions ---------------------------------------------------------------------------------
 
 
-def _pc(pid: str, ok: bool, value: Any, threshold: str, reason: str | None = None, **details: Any) -> dict:
-    return {"id": pid, "pass": bool(ok), "value": value, "threshold": threshold, "reason": reason, "details": details}
+def _pc(pid: str, ok: bool, value: Any, threshold: str, reason: str | None = None, gated: bool = True, **details: Any) -> dict:
+    """A precondition result. `gated` False: reported only; it always passes and never blocks the verdict."""
+    return {"id": pid, "pass": bool(ok) or not gated, "gated": gated, "value": value, "threshold": threshold, "reason": reason, "details": details}
 
 
 def pc1(pc1_path: Path) -> dict:
@@ -309,20 +330,23 @@ def pc1(pc1_path: Path) -> dict:
 
 
 def pc2(rows: pd.DataFrame, reps: int = REPS) -> dict:
-    thr = f"LGR* ≥ LightRAG naive − {INVARIANT_TOL * 100:.0f} pp on F5 (point estimate, F5 cells equally weighted)"
+    tol = f"{INVARIANT_TOL * 100:.0f} pp"
+    thr = f"no evidence that LGR* < LightRAG naive − {tol} on F5: fails when the one-sided {100 * (1 - ALPHA):.1f}% upper bound of LGR* − naive (F5 cells equally weighted, world-clustered t) is below −{tol}"
     f5 = pd.concat([_sel(rows, F5_CELL, "selected", "push", (LGR,)), _sel(rows, F5_CELL, NAIVE.lower(), "push", (NAIVE,))], ignore_index=True)
     have = set(f5["label"])
     if not {LGR, NAIVE} <= have:
         return _pc("PC2", False, None, thr, f"{F5_CELL}: no results for {sorted({LGR, NAIVE} - have)} (cell not run, failed or stopped)")
-    d = delta_ci(task_means(f5), LGR, NAIVE, cells=F5_CELLS, alpha=ALPHA, reps=reps, seed=SEED)
-    if d["delta"] is None:
-        return _pc("PC2", False, None, thr, d.get("reason"))
-    ok = d["delta"] >= -INVARIANT_TOL
-    return _pc("PC2", ok, d["delta"], thr, None if ok else f"LGR* − naive = {_pp(d['delta'])} < −{INVARIANT_TOL * 100:.0f} pp", ci=[d["lo"], d["hi"]], missing_cells=d["missing_cells"])
+    tm = task_means(f5)
+    t = violation_test(tm, LGR, NAIVE, cells=F5_CELLS, tol=INVARIANT_TOL, alpha=ALPHA)
+    if t["delta"] is None:
+        return _pc("PC2", False, None, thr, f"{F5_CELL}: {LGR} and {NAIVE} share no tasks")
+    d = delta_ci(tm, LGR, NAIVE, cells=F5_CELLS, alpha=ALPHA, reps=reps, seed=SEED)
+    reason = None if t["pass"] else f"LGR* − naive = {_pp(t['delta'])}, upper bound {_pp(t['upper'])} < −{tol} (p = {t['p_violation']:.4f})"
+    return _pc("PC2", t["pass"], t["delta"], thr, reason, test=t, ci=[d["lo"], d["hi"]], missing_cells=d.get("missing_cells"))
 
 
 def pc3(rows: pd.DataFrame, reps: int = REPS) -> dict:
-    thr = f"S6 ≥ S5o ≥ APG* ≥ S7 (each within {INVARIANT_TOL * 100:.0f} pp) and S6 > S7 (world sign-flip p < 0.05), push"
+    thr = f"S6 ≥ S5o ≥ APG* ≥ S7, each pair failing only on evidence of a shortfall > {INVARIANT_TOL * 100:.0f} pp (one-sided, {ALPHA:g} / 3 per pair), and S6 > S7 (world sign-flip p < 0.05), push"
     frame = diag_push_rows(rows)
     have = set(frame["label"])
     if missing := [a for a in CHAIN if a not in have]:
@@ -331,9 +355,10 @@ def pc3(rows: pd.DataFrame, reps: int = REPS) -> dict:
     if tm.empty:
         return _pc("PC3", False, None, thr, f"{list(CHAIN)} share no tasks")
     cells = tuple(c for c in GATE_CELLS if c in set(tm.index.get_level_values("cell")))
-    inv = invariants(tm, chain=CHAIN)
-    failed = [k for k, v in inv["pairs"].items() if not v] + ([] if inv["s6_gt_s7_significant"] else ["S6>S7 not significant"])
-    return _pc("PC3", inv["pass"], inv["success"], thr, "; ".join(failed) or None, pairs=inv["pairs"], s6_gt_s7_significant=inv["s6_gt_s7_significant"], shared_tasks=int(len(tm)), cells=list(cells))
+    inv = invariants(tm, chain=CHAIN, alpha=ALPHA)
+    failed = [f"{k} (Δ {_pp(inv['tests'][k]['delta'])}, upper bound {_pp(inv['tests'][k]['upper'])})" for k, v in inv["pairs"].items() if not v]
+    failed += [] if inv["s6_gt_s7_significant"] else ["S6>S7 not significant"]
+    return _pc("PC3", inv["pass"], inv["success"], thr, "; ".join(failed) or None, pairs=inv["pairs"], tests=inv["tests"], s6_gt_s7_significant=inv["s6_gt_s7_significant"], shared_tasks=int(len(tm)), cells=list(cells))
 
 
 def context_medians(rows: pd.DataFrame) -> pd.DataFrame:
@@ -351,7 +376,9 @@ def context_medians(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def pc4(rows: pd.DataFrame, matched_cell: str, context: int | None, matched_present: bool) -> dict:
-    thr = f"median realized context ≤ {CONTEXT_FACTOR:g}× configured budget (every arm); reported, not gated: matched budget capped arms within ±{MATCHED_TOLERANCE:.0%} of {context}"
+    """Descriptive (D-023): the 4× bound holds by construction for every budgeted arm (CHOICES), so it is reported,
+    with any arm over it flagged as an anomaly, and never gates; the matched-budget ±25% clause likewise (D-022)."""
+    thr = f"reported, not gated (D-023): median realized context against {CONTEXT_FACTOR:g}× the configured budget (every budgeted arm); matched budget: capped arms within ±{MATCHED_TOLERANCE:.0%} of {context}"
     med = context_medians(rows)
     budgeted = med[med["budget"].notna()]
     over = budgeted[budgeted["median_ratio"] > CONTEXT_FACTOR]
@@ -359,7 +386,7 @@ def pc4(rows: pd.DataFrame, matched_cell: str, context: int | None, matched_pres
         {"plan_cell": r.plan_cell, "group": r.group, "arm": _arm_key(r.label, r.delivery), "median_tokens": r.median_tokens, "budget": r.budget, "median_ratio": r.median_ratio, "pass": r.median_ratio <= CONTEXT_FACTOR}
         for r in budgeted.itertuples()
     ]
-    reasons = [f"{b['plan_cell']} {b['arm']}: median {b['median_tokens']:.0f} tokens = {b['median_ratio']:.1f}× its budget {b['budget']:.0f}" for b in bound if not b["pass"]]
+    anomalies = [f"{b['plan_cell']} {b['arm']}: median {b['median_tokens']:.0f} tokens = {b['median_ratio']:.1f}× its budget {b['budget']:.0f}" for b in bound if not b["pass"]]
     matched: dict[str, Any] = {"context": context, "notes": []}
     if not matched_present or context is None:
         matched["notes"].append(f"{matched_cell}: the matched-budget secondary was not run (or failed); its ±{MATCHED_TOLERANCE:.0%} clause cannot be checked")
@@ -378,11 +405,12 @@ def pc4(rows: pd.DataFrame, matched_cell: str, context: int | None, matched_pres
                 matched["notes"].append(f"matched budget {label}: median {_f(median, 0)} tokens outside [{lo:.0f}, {hi:.0f}]")
         matched["status"] = "checked"
         matched["interpretable"] = not matched["notes"]
-    return _pc("PC4", over.empty and not reasons, {"arms_over_bound": int(len(over))}, thr, "; ".join(reasons) or None, bound=bound, matched=matched)
+    reason = ("anomaly (not gated): " + "; ".join(anomalies)) if anomalies else None
+    return _pc("PC4", over.empty, {"arms_over_bound": int(len(over))}, thr, reason, gated=False, bound=bound, anomalies=anomalies, matched=matched)
 
 
 def pc5(rows: pd.DataFrame) -> dict:
-    thr = f"harness error rate < {MAX_ERROR_RATE:.0%} and cap-hit rate < {MAX_CAP_HIT_RATE:.0%}, per arm and mode, in the verdict's cells"
+    thr = f"harness error rate < {MAX_ERROR_RATE:.0%} and cap-hit rate < {MAX_CAP_HIT_RATE:.0%}, per arm and mode, in the verdict's cells (S7: errors only)"
     if rows.empty:
         return _pc("PC5", False, None, thr, "no test results")
     rates = (
@@ -395,8 +423,9 @@ def pc5(rows: pd.DataFrame) -> dict:
     reasons = []
     for r in rates.itertuples():
         gated = r.plan_cell in (F7_CELL, F3_CELL, PLACEBO_CELL)
-        ok = r.error_rate < MAX_ERROR_RATE and r.cap_hit_rate < MAX_CAP_HIT_RATE
-        table.append({"plan_cell": r.plan_cell, "arm": _arm_key(r.label, r.delivery), "samples": r.samples, "error_rate": r.error_rate, "cap_hit_rate": r.cap_hit_rate, "gated": gated, "pass": ok})
+        cap_gated = r.label != PLACEBO  # the placebo's cap hits are the placebo working: reported, not gated (D-023)
+        ok = r.error_rate < MAX_ERROR_RATE and (r.cap_hit_rate < MAX_CAP_HIT_RATE or not cap_gated)
+        table.append({"plan_cell": r.plan_cell, "arm": _arm_key(r.label, r.delivery), "samples": r.samples, "error_rate": r.error_rate, "cap_hit_rate": r.cap_hit_rate, "gated": gated, "cap_hits_gated": cap_gated, "pass": ok})
         if gated and not ok:
             reasons.append(f"{r.plan_cell} {_arm_key(r.label, r.delivery)}: errors {r.error_rate:.1%}, cap hits {r.cap_hit_rate:.1%}")
     if not any(t["gated"] for t in table):
@@ -464,49 +493,74 @@ def _missing_primary(frame: pd.DataFrame) -> list[str]:
     return out
 
 
-def mode_verdict(rows: pd.DataFrame, mode: str, preconditions: dict[str, bool], reps: int = REPS, seed: int = SEED) -> dict:
-    """One delivery mode's decision (`gate_stats.decide`), its per-cell Δs, cost ratio and the error-excluding
-    sensitivity analysis. Missing primary data makes it PRECONDITION_FAIL, with Δ reported on what exists."""
+def _decision(frame: pd.DataFrame, preconditions: dict[str, bool], ratio: float | None, alpha: float, reps: int, seed: int) -> Decision:
+    """`gate_stats.decide` on one mode's rows, or PRECONDITION_FAIL (with Δ on what exists) when primary data is missing."""
+    tm = task_means(frame)
+    if missing := _missing_primary(frame):
+        d = delta_ci(tm, APG, LGR, cells=GATE_CELLS, alpha=ALPHA, reps=reps, seed=seed)
+        return Decision("PRECONDITION_FAIL", d["delta"], (d["lo"], d["hi"]), [f"primary data missing: {', '.join(missing)}"], details={"dropped_tasks": d.get("dropped_tasks", {})})
+    return decide(tm, LGR, preconditions, cost_ratio=ratio, alpha=alpha, reps=reps, seed=seed, apg_arm=APG)
+
+
+def mode_verdict(rows: pd.DataFrame, mode: str, preconditions: dict[str, bool], reps: int = REPS, seed: int = SEED, alpha: float = GATE_ALPHA) -> tuple[dict, Decision | None, Decision | None]:
+    """One delivery mode's unadjusted decision at `alpha` (`gate_stats.decide`; `verdict` then applies Holm across
+    the modes), its per-cell Δs (95% world-clustered t), cost ratio, and the error-excluding sensitivity decision.
+    Missing primary data makes it PRECONDITION_FAIL, with Δ reported on what exists."""
     frame = mode_rows(rows, mode)
     ratio, ratio_note = cost_ratio(frame)
     out: dict[str, Any] = {"mode": mode, "pooling": f"F7-10, F7-1000 ({mode}) + F3-5, F3-60 (push), equal weights", "cost_ratio": ratio, "cost_ratio_note": ratio_note}
     if frame.empty:
-        return out | {"verdict": "PRECONDITION_FAIL", "reasons": [f"no primary results for {mode}"], "delta": None, "ci": [None, None], "cells": {}}
+        return out | {"verdict": "PRECONDITION_FAIL", "reasons": [f"no primary results for {mode}"], "delta": None, "ci": [None, None], "cells": {}}, None, None
     tm = task_means(frame)
     out["cells"] = {c: delta_ci(tm, APG, LGR, cells=(c,), alpha=ALPHA, reps=reps, seed=seed) for c in GATE_CELLS}
     out["worlds_per_cell"] = {c: int(frame.loc[(frame["cell"] == c) & (frame["label"] == APG), "world"].nunique()) for c in GATE_CELLS}
-    if missing := _missing_primary(frame):
-        d = delta_ci(tm, APG, LGR, cells=GATE_CELLS, alpha=ALPHA, reps=reps, seed=seed)
-        return out | {"verdict": "PRECONDITION_FAIL", "reasons": [f"primary data missing: {', '.join(missing)}"], "delta": d["delta"], "ci": [d["lo"], d["hi"]], "superiority": False}
-    # §9: Δ, its CI and the per-cell Δ are reported whatever the verdict (decide() returns them on PRECONDITION_FAIL too).
-    dec = decide(tm, LGR, preconditions, cost_ratio=ratio, alpha=ALPHA, reps=reps, seed=seed, apg_arm=APG)
-    out |= {"verdict": dec.verdict, "reasons": dec.reasons, "delta": dec.delta, "ci": list(dec.ci), "superiority": dec.superiority, "details": dec.details}
+    dec = _decision(frame, preconditions, ratio, alpha, reps, seed)
     sens = frame[~frame["error"].astype(bool)]
-    if len(sens) and not _missing_primary(sens):
-        s = decide(task_means(sens), LGR, preconditions, cost_ratio=ratio, alpha=ALPHA, reps=reps, seed=seed, apg_arm=APG)
-        out["sensitivity_excluding_errors"] = {"verdict": s.verdict, "delta": s.delta, "ci": list(s.ci), "excluded_samples": int(len(frame) - len(sens))}
-    else:
-        out["sensitivity_excluding_errors"] = {"verdict": None, "note": "not computable: excluding errored samples leaves a primary cell empty"}
-    return out
+    sdec = _decision(sens, preconditions, ratio, alpha, reps, seed) if len(sens) and not _missing_primary(sens) else None
+    out["excluded_samples"] = int(len(frame) - len(sens))
+    return out, dec, sdec
 
 
-def verdict(rows: pd.DataFrame, pcs: list[dict], modes: Sequence[str], reps: int = REPS, seed: int = SEED) -> dict:
+def _mode_fields(dec: Decision) -> dict:
+    d = {k: v for k, v in dec.details.items() if k != "_stats"}
+    return {"verdict": dec.verdict, "reasons": dec.reasons, "delta": dec.delta, "ci": list(dec.ci), "superiority": dec.superiority, "details": d}
+
+
+def verdict(rows: pd.DataFrame, pcs: list[dict], modes: Sequence[str], reps: int = REPS, seed: int = SEED, alpha: float = GATE_ALPHA, stage: str = "gate run") -> dict:
+    """The decision (§8): every mode decided at `alpha`, then Holm across the modes (`gate_stats.holm_modes`, with
+    superiority by serial gatekeeping), then one label (`gate_stats.combine_modes`). The error-excluding
+    sensitivity analysis goes through the same steps."""
     # A precondition failure accepted at the freeze (only PC1 can be: GATE_PREREG §7) does not block the verdict;
     # the decision carries it as a caveat instead.
     preconditions = {p["id"]: bool(p["pass"] or p.get("accepted")) for p in pcs}
-    per_mode = {m: mode_verdict(rows, m, preconditions, reps, seed) for m in modes}
+    raw = {m: mode_verdict(rows, m, preconditions, reps, seed, alpha) for m in modes}
+    per_mode = {m: r[0] for m, r in raw.items()}
+    decs = {m: r[1] for m, r in raw.items() if r[1] is not None}
+    adjusted, holm = holm_modes(decs, alpha)
+    for m, d in adjusted.items():
+        per_mode[m] |= {"unadjusted_verdict": decs[m].verdict} | _mode_fields(d)
+    sens = {m: r[2] for m, r in raw.items() if r[2] is not None}
+    sens_adj, _ = holm_modes(sens, alpha) if sens else ({}, None)
+    for m in per_mode:
+        s = sens_adj.get(m)
+        per_mode[m]["sensitivity_excluding_errors"] = (
+            {"verdict": s.verdict, "delta": s.delta, "ci": list(s.ci), "excluded_samples": per_mode[m].get("excluded_samples", 0)}
+            if s is not None
+            else {"verdict": None, "note": "not computable: excluding errored samples leaves a primary cell empty"}
+        )
     label, reasons = combine_modes({m: v["verdict"] for m, v in per_mode.items()})
+    sens_label = combine_modes({m: s.verdict for m, s in sens_adj.items()})[0] if len(sens_adj) == len(per_mode) else None
     if label == "PRECONDITION_FAIL":
         reasons = [f"{p['id']}: {p['reason']}" for p in pcs if not (p["pass"] or p.get("accepted"))] + [r for v in per_mode.values() for r in v["reasons"] if r.startswith("primary data missing")]
-    notes = []
-    if label == "INCONCLUSIVE":
-        notes.append("§8 allows ONE pre-registered extension on fresh test worlds, with α split 0.0125 / 0.0125.")
+    notes = [f"{stage}: familywise one-sided α = {alpha} across delivery modes (Holm); per-mode levels {', '.join(f'{m} {lvl:g}' for m, lvl in holm['levels'].items()) or 'n/a'}."]
+    if label == "INCONCLUSIVE" and stage == "gate run":
+        notes.append(f"§8 allows ONE pre-registered extension on fresh test worlds, analysed alone at α = {EXTENSION_ALPHA} (Holm across modes): `python -m ape.analyze_gate --run-id <extension run> --extension-of <this run>`.")
     if label in ("GO_PUSH_ONLY", "GO_PULL_ONLY", "GO_WITH_COST_FLAG"):
         notes.append("§8: the user decides.")
     sup = [m for m, v in per_mode.items() if v.get("superiority")]
     if sup:
-        notes.append(f"Superiority (lower bound > 0, fixed-sequence) in: {', '.join(sup)}.")
-    return {"label": label, "reasons": reasons, "notes": notes, "modes": per_mode}
+        notes.append(f"Superiority (after GO in every mode; Holm at {alpha}) in: {', '.join(sup)}.")
+    return {"label": label, "reasons": reasons, "notes": notes, "modes": per_mode, "alpha": alpha, "holm": holm, "sensitivity_label": sens_label}
 
 
 def diagnosis(rows: pd.DataFrame, reps: int = REPS) -> dict:
@@ -516,8 +570,11 @@ def diagnosis(rows: pd.DataFrame, reps: int = REPS) -> dict:
     if {"S5o", LGR} <= set(frame["label"]):
         tm = shared_tasks(task_means(frame), ("S5o", LGR))
         d = delta_ci(tm, "S5o", LGR, cells=GATE_CELLS, alpha=ALPHA, reps=reps, seed=SEED)
-        ni = d["delta"] is not None and d["lo"] > -MARGIN
-        out |= {"s5o_vs_lgr": d, "s5o_non_inferior": ni, "label": "extraction" if ni else "runtime or representation"}
+        if d["lo"] is None:  # no clustered variance (fewer than 2 paired worlds in a cell): no diagnosis
+            out |= {"s5o_vs_lgr": d, "s5o_non_inferior": None, "label": None, "reason": d.get("reason") or "S5o and LGR* share too few worlds for an interval"}
+        else:
+            ni = d["lo"] > -MARGIN
+            out |= {"s5o_vs_lgr": d, "s5o_non_inferior": ni, "label": "extraction" if ni else "runtime or representation"}
     else:
         out |= {"s5o_vs_lgr": None, "label": None, "reason": f"no results for {sorted({'S5o', LGR} - set(frame['label']))}"}
     failed = rows[(rows["success"] == 0) & ~rows["error"].astype(bool) & rows["plan_cell"].isin((F7_CELL, F3_CELL, PLACEBO_CELL, DIAG_CELL))] if len(rows) else rows
@@ -666,6 +723,49 @@ def te_pairing(rows: pd.DataFrame) -> dict:
 # --- the report ------------------------------------------------------------------------------------
 
 
+def _world_ids(run_dir: Path) -> set[str]:
+    f = run_dir / "build-test" / "worlds.json"
+    return {w["world_id"] for w in json.loads(f.read_text())["worlds"]} if f.is_file() else set()
+
+
+def extension_context(run) -> dict | None:
+    """If `run` is the one pre-registered extension (§8; `extension.json` in its run dir, written by
+    `analyze_gate --extension-of`), the stage-1 facts it rests on, with `problems` when it is not admissible:
+    stage 1 must be analysed and INCONCLUSIVE, and the two runs' test worlds (`build-test/worlds.json`) must
+    be disjoint, so the extension's worlds are fresh (no seed arithmetic is assumed)."""
+    f = run.dir / EXTENSION_FILE
+    if not f.is_file():
+        return None
+    spec = json.loads(f.read_text())
+    stage1_dir = Path(spec["stage1_dir"])
+    problems = []
+    dec_path = stage1_dir / REPORT_DIR / "decision.json"
+    stage1 = json.loads(dec_path.read_text()) if dec_path.is_file() else None
+    if stage1 is None:
+        problems.append(f"stage 1 ({stage1_dir}) has no decision.json: analyse it first")
+    elif stage1["verdict"]["label"] != "INCONCLUSIVE":
+        problems.append(f"stage 1's verdict is {stage1['verdict']['label']}, not INCONCLUSIVE: §8 allows the extension only after INCONCLUSIVE")
+    if stage1 is not None and stage1.get("extension"):
+        problems.append("stage 1 is itself an extension: §8 allows ONE extension")
+    w1, w2 = _world_ids(stage1_dir), _world_ids(run.dir)
+    if not w1 or not w2:
+        problems.append("build-test/worlds.json missing in " + " and ".join(str(d) for d, w in ((stage1_dir, w1), (run.dir, w2)) if not w))
+    elif shared := sorted(w1 & w2):
+        problems.append(f"the extension reuses {len(shared)} stage-1 test world(s) (e.g. {shared[:3]}): it needs fresh worlds")
+    return {
+        "stage1_run_id": spec["stage1_run_id"],
+        "stage1_dir": str(stage1_dir),
+        "stage1_label": stage1["verdict"]["label"] if stage1 else None,
+        "stage1_alpha": (stage1 or {}).get("constants", {}).get("alpha_gate_run", GATE_ALPHA),
+        "stage1_worlds": len(w1),
+        "extension_worlds": len(w2),
+        "alpha": EXTENSION_ALPHA,
+        "total_alpha": ALPHA_TOTAL,
+        "rule": f"the extension's fresh test worlds are analysed alone at one-sided α = {EXTENSION_ALPHA} (Holm across modes); with the gate run's {GATE_ALPHA}, the familywise α is at most {ALPHA_TOTAL} (Bonferroni over disjoint data)",
+        "problems": problems,
+    }
+
+
 def _test_window(test: dict | None) -> tuple[float | None, float | None]:
     if not test:
         return None, None
@@ -721,7 +821,15 @@ def analyze(run) -> dict:
         caveats.append(f"PC1 (the LightRAG anchor) failed and was accepted at the freeze: {acc['reason']}. The LightRAG setup is not validated by the anchor; PC2 is the remaining competence check.")
     f7_groups = [g for g in ((test or {}).get("cells", {}).get(F7_CELL, {}) or {}).get("groups", [])]
     modes = tuple(dict.fromkeys(d for g in f7_groups for d in g.get("deliveries", []))) or ("push", "pull")
-    v = verdict(rows, pcs, modes)
+    ext = extension_context(run)
+    if ext is None:
+        v = verdict(rows, pcs, modes)
+    else:
+        v = verdict(rows, pcs, modes, alpha=EXTENSION_ALPHA, stage="extension")
+        if ext["problems"]:
+            v |= {"label": "PRECONDITION_FAIL", "reasons": [f"extension not admissible: {p}" for p in ext["problems"]] + v["reasons"]}
+        else:
+            v["notes"].insert(0, f"Extension of {ext['stage1_run_id']} (stage 1 INCONCLUSIVE): {ext['rule']}. This label is the gate's final verdict.")
     primary_rows = pd.concat([mode_rows(rows, m) for m in modes], ignore_index=True).drop_duplicates(subset=["plan_cell", "label", "delivery", "task", "epoch"]) if len(rows) else rows
     diag_rows = _sel(rows, DIAG_CELL) if len(rows) else rows
     tables_rows = pd.concat([primary_rows, diag_rows], ignore_index=True) if len(rows) else rows
@@ -739,6 +847,7 @@ def analyze(run) -> dict:
             "cells_not_done": {c: x["status"] for c, x in ((test or {}).get("cells") or {}).items() if x.get("status") != "done"},
         },
         "verdict": v,
+        "extension": ext,
         "caveats": caveats,
         "preconditions": pcs,
         "diagnosis": diagnosis(rows),
@@ -756,7 +865,19 @@ def analyze(run) -> dict:
         "secondary_pairings": {"id_only_vs_descriptive": id_only_pairing(rows), "te_all_vs_retrieved": te_pairing(rows)},
         "coverage": coverage,
         "choices": list(CHOICES),
-        "constants": {"margin": MARGIN, "alpha_one_sided": ALPHA, "cell_floor": CELL_FLOOR, "cost_flag_ratio": COST_FLAG_RATIO, "invariant_tol": INVARIANT_TOL, "min_worlds_per_cell": MIN_WORLDS_PER_CELL, "bootstrap_reps": REPS},
+        "constants": {
+            "margin": MARGIN,
+            "alpha_gate_run": GATE_ALPHA,
+            "alpha_extension": EXTENSION_ALPHA,
+            "alpha_total": ALPHA_TOTAL,
+            "alpha_reported_intervals": ALPHA,
+            "interval": "world-clustered t, Satterthwaite df",
+            "cell_floor": CELL_FLOOR,
+            "cost_flag_ratio": COST_FLAG_RATIO,
+            "invariant_tol": INVARIANT_TOL,
+            "min_paired_worlds_per_cell": MIN_WORLDS_PER_CELL,
+            "bootstrap_reps": REPS,
+        },
     }
     decision = _clean(decision)
     out = run.dir / REPORT_DIR
@@ -815,32 +936,68 @@ def render(d: dict) -> str:
     ]
 
     L += ["## Preconditions", "", "A failure means fix and re-pilot, not NO-GO (§7).", ""]
-    L += [_table(["", "Pass", "Value", "Threshold", "Reason"], [[p["id"], "✅" if p["pass"] else ("⚠️ accepted" if p.get("accepted") else "❌"), _short(p["value"]), p["threshold"], p["reason"] or ""] for p in d["preconditions"]])]
+
+    def mark(p: dict) -> str:
+        if not p.get("gated", True):
+            return "ℹ️ reported"
+        return "✅" if p["pass"] else ("⚠️ accepted" if p.get("accepted") else "❌")
+
+    L += [_table(["", "Pass", "Value", "Threshold", "Reason"], [[p["id"], mark(p), _short(p["value"]), p["threshold"], p["reason"] or ""] for p in d["preconditions"]])]
+
+    ext = d.get("extension")
+    if ext:
+        L += ["## Extension (§8)", ""]
+        L += [f"- Stage 1: run `{ext['stage1_run_id']}` ({ext['stage1_label']}, {ext['stage1_worlds']} test worlds, α = {ext['stage1_alpha']}).", f"- This run: {ext['extension_worlds']} fresh test worlds, analysed alone. Rule: {ext['rule']}."]
+        L += [f"- Not admissible: {p}" for p in ext["problems"]] + [""]
 
     L += ["## Verdict by delivery mode", ""]
-    L += ["Both modes pool the four gate cells with equal weights: push = F7 push + F3; pull = F7 pull + the same F3 push cells (F3 is push only). Δ = success(APG*) − success(LGR*); non-inferiority margin −5 pp, one-sided α = 0.025.", ""]
+    L += [
+        f"Both modes pool the four gate cells with equal weights: push = F7 push + F3; pull = F7 pull + the same F3 push cells (F3 is push only). Δ = success(APG*) − success(LGR*); non-inferiority margin −5 pp. "
+        f"Inference: world-clustered t-interval (Satterthwaite df). The modes are tested with Holm at familywise one-sided α = {v.get('alpha', GATE_ALPHA)}; each mode's interval below is at its Holm level. Superiority only after GO in every mode.",
+        "",
+    ]
     rows = []
     for m, x in v["modes"].items():
         det = x.get("details") or {}
+        inf = det.get("inference") or {}
+        sec = det.get("secondary") or {}
         sens = x.get("sensitivity_excluding_errors") or {}
-        rows.append([m, x["verdict"], _pp(x["delta"]), _ci(*x["ci"]), _f(x.get("superiority")) if x.get("superiority") is not None else "–", _pp((det.get("cell_deltas") or {}).get("F7-1000")), _f(det.get("p_apg_gt_s7")), _f(x["cost_ratio"], 2), f"{sens.get('verdict') or '–'} ({_pp(sens.get('delta'))})"])
-    L += [_table(["Mode", "Verdict", "Δ", "95% CI", "Superiority", "F7-1000 Δ", "p(APG* > S7)", "Cost ratio", "Excl. errors"], rows)]
+        rows.append([
+            m, x["verdict"], x.get("unadjusted_verdict") or "–", _pp(x["delta"]), _f(inf.get("holm_level"), 4) if inf.get("holm_level") else "–", _ci(*x["ci"]), _ci(*(inf.get("ci95") or [None, None])),
+            _f(inf.get("p_noninferiority"), 4), _f(x.get("superiority")) if x.get("superiority") is not None else "–",
+            _pp(sec.get("f7_1000_delta")), _f(sec.get("p_apg_gt_s7")), _f(x["cost_ratio"], 2), f"{sens.get('verdict') or '–'} ({_pp(sens.get('delta'))})",
+        ])  # fmt: skip
+    L += [_table(["Mode", "Verdict", "Unadjusted", "Δ", "Holm level", "CI at level", "95% CI", "p (NI)", "Superiority", "F7-1000 Δ", "p(APG* > S7)", "Cost ratio", "Excl. errors"], rows)]
     for m, x in v["modes"].items():
+        det = x.get("details") or {}
         if x["reasons"]:
             L += [f"- {m}: " + "; ".join(x["reasons"])]
+        if det.get("bootstrap_ci95"):
+            L += [f"- {m}: percentile bootstrap 95% CI (reference) {_ci(*det['bootstrap_ci95'])}."]
+        if det.get("dropped_tasks"):
+            L += [f"- {m}: unpaired tasks left out (one arm missing): {det['dropped_tasks']}."]
         if x.get("cost_ratio_note"):
             L += [f"- {m} cost ratio: {x['cost_ratio_note']}"]
+    if v.get("sensitivity_label"):
+        L += [f"- Sensitivity (errored samples excluded), combined: {v['sensitivity_label']}."]
     L += [""]
 
-    L += ["## Per-cell Δ", ""]
-    rows = [[m, c, _pp(ci.get("delta")), _ci(ci.get("lo"), ci.get("hi")), (ci.get("worlds_per_cell") or {}).get(c, 0), ci.get("tasks", 0), ("few worlds" if ci.get("few_worlds") else "") or (ci.get("reason") or "")] for m, x in v["modes"].items() for c, ci in (x.get("cells") or {}).items()]
-    L += [_table(["Mode", "Cell", "Δ", "95% CI", "Worlds", "Tasks", "Note"], rows)]
+    L += ["## Per-cell Δ", "", "World-clustered t-interval per cell (df = paired worlds − 1); worlds and tasks are paired APG*/LGR* ones.", ""]
+    rows = [
+        [m, c, _pp(ci.get("delta")), _ci(ci.get("lo"), ci.get("hi")), (ci.get("worlds_per_cell") or {}).get(c, 0), ci.get("tasks", 0), sum((ci.get("dropped_tasks") or {}).values()), ("few worlds" if ci.get("few_worlds") else "") or (ci.get("reason") or "")]
+        for m, x in v["modes"].items()
+        for c, ci in (x.get("cells") or {}).items()
+    ]
+    L += [_table(["Mode", "Cell", "Δ", "95% CI", "Worlds", "Tasks", "Unpaired", "Note"], rows)]
 
     dg = d["diagnosis"]
     L += ["## NO-GO diagnosis", "", f"Rule: {dg['rule']}.", ""]
-    if dg.get("s5o_vs_lgr"):
+    if dg.get("s5o_vs_lgr") and dg.get("label"):
         s = dg["s5o_vs_lgr"]
         L += [f"- S5o − LGR* = {_pp(s['delta'])} {_ci(s['lo'], s['hi'])} on {s.get('tasks', 0)} shared tasks → **{dg['label']}**.", ""]
+    elif dg.get("s5o_vs_lgr"):
+        s = dg["s5o_vs_lgr"]
+        L += [f"- S5o − LGR* = {_pp(s['delta'])} on {s.get('tasks', 0)} shared tasks; no diagnosis: {dg.get('reason')}.", ""]
     else:
         L += [f"- Not computable: {dg.get('reason')}.", ""]
     labels = [m for m in MISS_LABELS if any(m in c for c in dg["pipeline_misses"].values())]
@@ -932,6 +1089,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--runs-dir", type=Path, default=ROOT / "runs")
     ap.add_argument("--config-dir", type=Path, help="default: the config dir the run was created with (run.json)")
     ap.add_argument("--force", action="store_true", help="re-analyze even when the inputs are unchanged")
+    ap.add_argument("--extension-of", metavar="STAGE1_RUN_ID", help=f"§8: this run is the one extension of an INCONCLUSIVE gate run; analysed alone at α = {EXTENSION_ALPHA}")
+    ap.add_argument("--stage1-runs-dir", type=Path, help="where the stage-1 run lives (default: --runs-dir)")
     a = ap.parse_args(argv)
     info_path = a.runs_dir / a.run_id / "run.json"
     if not info_path.is_file():
@@ -939,6 +1098,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     info = json.loads(info_path.read_text())
     config_dir = a.config_dir or rg._resolve(info.get("config_dir", "config"))
+    if a.extension_of:
+        stage1_dir = (a.stage1_runs_dir or a.runs_dir) / a.extension_of
+        if a.extension_of == a.run_id or not (stage1_dir / "run.json").is_file():
+            print(f"analyze_gate: --extension-of {a.extension_of}: no such stage-1 run, or it is this run", file=sys.stderr)
+            return 1
+        (a.runs_dir / a.run_id / EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": a.extension_of, "stage1_dir": str(stage1_dir.resolve())}, indent=1))
+        a.force = True  # the analysis changes with the extension record
     try:
         run = rg.GateRun(a.run_id, offline=bool(info.get("offline")), force=a.force, runs_root=a.runs_dir, config_dir=config_dir)
         rg.run_phases(run, "analyze")
