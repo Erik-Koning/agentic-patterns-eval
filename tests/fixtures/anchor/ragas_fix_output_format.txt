@@ -1,0 +1,12 @@
+The output string did not satisfy the constraints given in the prompt. Fix the output string and return it.
+Please return the output in a JSON format that complies with the following schema as specified in JSON Schema:
+{"properties": {"text": {"title": "Text", "type": "string"}}, "required": ["text"], "title": "StringIO", "type": "object"}Do not use single quotes in your response but double quotes,properly escaped with a backslash.
+
+-----------------------------
+
+Now perform the same with the following input
+input: {
+    "output_string": "Output: {bad",
+    "prompt_value": "the prompt\nwith lines"
+}
+Output: 

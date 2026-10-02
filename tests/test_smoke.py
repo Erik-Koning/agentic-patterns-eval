@@ -202,6 +202,19 @@ def test_orchestrator_verdict_needs_the_phases_outputs_and_a_smoke_freeze_refusa
     assert "PROVENANCE.md changed" in sc.orchestrator_verdict(done, files, refusal, **kw | {"provenance_unchanged": False})["reason"]
 
 
+def test_anchor_parse_rates_warn_on_any_gating_scorer_failure():
+    pc1 = {
+        "status": "pass",
+        "per_type": {"Fact Retrieval": {"parse_failure_rate": 0.0}, "Creative Generation": {"parse_failure_rate": 0.5}},
+        "current_scorer_parse_failure_rate": {"Fact Retrieval": 1.0},  # the strict official parse collapsing (PR #56): reported only
+        "fix_format_rate": {"Fact Retrieval": 0.5},
+    }
+    r = sc.anchor_parse_rates(pc1)
+    assert r["warn"] == "gating Creative Generation 50%" and r["current_strict"] == {"Fact Retrieval": 1.0}
+    assert sc.anchor_parse_rates({**pc1, "per_type": {"Fact Retrieval": {"parse_failure_rate": 0.0}}})["warn"] is None
+    assert sc.anchor_parse_rates(None) == {"status": None, "warn": None}
+
+
 # ---------- spend guard and selection ----------
 
 

@@ -6,22 +6,31 @@ changed in 7572f7e, 2025-09-05). ACC is RAGAS-style answer correctness:
 
     ACC = 0.75 * F1(TP, FP, FN over LLM-classified statements) + 0.25 * (cos(answer, reference) + 1) / 2
 
-The prompts and few-shot examples below are the official ones, verbatim. Parsing and
-failure semantics are kept too, because they move the score: statement lists go through
-the official fallback parser, the classification is parsed strictly (so an unparseable
-reply scores F1 = 0), and an ill-formed classification raises `Excluded`. The official
-loop logs that sample as failed and averages the rest.
+The prompts and few-shot examples below are the official ones, verbatim. Parsing and failure
+semantics are kept too, because they move the score:
+- Statement lists go through the official fallback parser.
+- The classification is parsed strictly, so an unparseable reply scores F1 = 0. That is the official
+  behaviour, and it can collapse a whole run (GraphRAG-Benchmark PR #56: gpt-4o-mini replies
+  `Output: {...}` plus reasoning). Here it is also *flagged* (`classification_parse_failed`), so PC1
+  can tell a harness defect from a low score (D-025).
+- An ill-formed classification raises `Excluded`; the official loop logs that sample as failed and
+  averages the rest.
 
-Known deviations: the official similarity model is BAAI/bge-large-en-v1.5 through
-LangChain, which adds bge's query instruction; `embed` here is whatever embedder the
-caller passes. The official json5 fallback tier is folded into json_repair, because
-json5 is not installed.
+In PC1 this scorer is the reported sensitivity for every question type. Creative Generation's gating
+number (published 2025-09-25, with this code) re-parses the *same* classification reply tolerantly
+(`tolerant`). The three older types gate on the vendored-RAGAS scorer in `ape.anchor.ragas`.
+
+Similarity follows the official code: `aembed_query` on both texts with BAAI/bge-large-en-v1.5
+through LangChain (bge's query instruction, CLS pooling, normalised; `ape.anchor.bge`'s `queries`),
+then (cos + 1) / 2. Known deviation: the official json5 fallback tier is folded into json_repair,
+because json5 is not installed.
 """
 
 import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable
+from typing import NamedTuple
 
 import json_repair
 import numpy as np
@@ -197,14 +206,32 @@ def parse_statements(raw: str) -> list[str]:
     return [str(parsed)]
 
 
-def parse_classification(raw: str) -> float:
-    """Strict, as upstream: fenced or non-JSON replies score 0; wrong shapes exclude the sample."""
+class Classification(NamedTuple):
+    f1: float
+    parse_failed: bool  # the reply was not JSON: upstream scores F1 = 0 without a word; we flag it
+
+
+def parse_classification(raw: str) -> Classification:
+    """Strict, as upstream: fenced or non-JSON replies score 0 (flagged); wrong shapes exclude the sample."""
     try:
         c = ClassificationWithReason(**json.loads(raw))
     except (json.JSONDecodeError, TypeError):
-        return 0.0
+        return Classification(0.0, True)
     except ValidationError as e:
         raise Excluded(f"ill-formed TP/FP/FN classification: {e.error_count()} errors") from e
+    return Classification(fbeta_score(len(c.TP), len(c.FP), len(c.FN)), False)
+
+
+def parse_classification_tolerant(raw: str) -> float:
+    """The same reply, parsed the way a working run read it: the first balanced JSON object (RAGAS's
+    `extract_json`), then LangChain's markdown-stripping, partial-JSON parse and the official model.
+    Raises `ape.anchor.ragas.ScorerFailed` when even that fails (PC1 counts it as a parse failure)."""
+    from .ragas import ParseError, ScorerFailed, extract_json, pydantic_parse
+
+    try:
+        c = pydantic_parse(extract_json(raw), ClassificationWithReason)
+    except ParseError as e:
+        raise ScorerFailed(f"unparseable classification: {e}") from e
     return fbeta_score(len(c.TP), len(c.FP), len(c.FN))
 
 
@@ -219,21 +246,35 @@ def semantic_similarity(a: list[float], b: list[float]) -> float:
 
 
 async def answer_correctness(question: str, answer: str, ground_truth: str, generate: Generate, embed: Embed) -> dict:
-    """One sample's ACC in [0, 1] plus its parts. `generate` is the judge (one user message per call)."""
+    """One sample's ACC in [0, 1] plus its parts. `generate` is the judge (one user message per call); `embed`
+    is the official `aembed_query` (`ape.anchor.bge` `queries`). `classification_raw` is the judge's reply,
+    kept so the tolerant re-parse needs no second call (None when both statement lists were empty)."""
     answer_stmts, gt_stmts = await asyncio.gather(
         generate(STATEMENT_GENERATOR_PROMPT.format(question=question, answer=answer)),
         generate(STATEMENT_GENERATOR_PROMPT.format(question=question, answer=ground_truth)),
     )
     answer_stmts, gt_stmts = parse_statements(answer_stmts), parse_statements(gt_stmts)
+    raw = None
     if not answer_stmts and not gt_stmts:
-        fc = 1.0
+        fc, failed = 1.0, False
     else:
-        fc = parse_classification(await generate(classification_prompt(question, answer_stmts, gt_stmts)))
+        raw = await generate(classification_prompt(question, answer_stmts, gt_stmts))
+        fc, failed = parse_classification(raw)
     ss = semantic_similarity(*await embed([answer, ground_truth]))
     return {
         "accuracy": WEIGHTS[0] * fc + WEIGHTS[1] * ss,
         "factual_correctness": fc,
         "semantic_similarity": ss,
+        "classification_parse_failed": failed,
+        "classification_raw": raw,
         "answer_statements": answer_stmts,
         "reference_statements": gt_stmts,
+        "judge_calls": 2 if raw is None else 3,
     }
+
+
+def tolerant(result: dict) -> dict:
+    """Creative Generation's gating score from the official result: the classification reply re-parsed tolerantly
+    (`parse_classification_tolerant`; raises `ScorerFailed` if even that fails), the same (cos + 1) / 2 similarity."""
+    fc = 1.0 if result["classification_raw"] is None else parse_classification_tolerant(result["classification_raw"])
+    return {"accuracy": WEIGHTS[0] * fc + WEIGHTS[1] * result["semantic_similarity"], "factual_correctness": fc, "semantic_similarity": result["semantic_similarity"]}

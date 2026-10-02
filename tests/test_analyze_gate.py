@@ -318,8 +318,16 @@ def test_pc6_tuning_log_complete_within_budget_and_matching_the_selection(tmp_pa
 def test_pc1_from_pc1_json(tmp_path):
     missing = ag.pc1(tmp_path / "pc1.json")
     assert not missing["pass"] and "pc1.json missing: run the anchor phase" in missing["reason"]
-    (tmp_path / "pc1.json").write_text(json.dumps({"pass": True, "reproduces_published": True, "beats_naive": True, "macro": 64.0, "naive_macro": 61.0, "tolerance_pp": 5.0}))
-    assert ag.pc1(tmp_path / "pc1.json")["pass"]
+    tol = {"macro": 5.0, "per_type": 10.0}
+    ok = {"status": "pass", "pass": True, "macro_within_tolerance": True, "types_within_tolerance": True, "macro": 64.0, "published_macro": 63.92, "naive_macro": 66.0, "beats_naive": False, "tolerance_pp": tol}
+    (tmp_path / "pc1.json").write_text(json.dumps(ok))
+    passed = ag.pc1(tmp_path / "pc1.json")
+    assert passed["pass"] and passed["value"]["status"] == "pass", "hybrid below naive does not fail PC1 (D-025)"
+    off = {**ok, "status": "fail", "pass": False, "types_within_tolerance": False, "per_type": {"Complex Reasoning": {"within_tolerance": False}, "Fact Retrieval": {"within_tolerance": True}}}
+    (tmp_path / "pc1.json").write_text(json.dumps(off))
+    assert "outside ±10.0 pp: Complex Reasoning" in ag.pc1(tmp_path / "pc1.json")["reason"]
+    (tmp_path / "pc1.json").write_text(json.dumps({**ok, "status": "not_evaluable", "pass": False, "diagnosis": "gating-scorer parse failures above 5%: Fact Retrieval 12.0%"}))
+    assert ag.pc1(tmp_path / "pc1.json")["reason"].startswith("not evaluable: gating-scorer parse failures")
 
 
 def test_pipeline_miss_labels_the_first_lost_stage():

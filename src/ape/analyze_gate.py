@@ -315,18 +315,30 @@ def _pc(pid: str, ok: bool, value: Any, threshold: str, reason: str | None = Non
 
 
 def pc1(pc1_path: Path) -> dict:
-    thr = "every question type within ±tolerance of the published LightRAG accuracy, and hybrid > naive on the macro mean"
+    thr = "gating-scorer macro within ±macro tolerance of the published LightRAG macro and every type within ±type tolerance; judge parse failures ≤ 5% (D-025)"
     if not pc1_path.is_file():
         return _pc("PC1", False, None, thr, f"{pc1_path} missing: run the anchor phase")
     r = json.loads(pc1_path.read_text())
+    tol = r.get("tolerance_pp") or {}
     reasons = []
-    if not r.get("reproduces_published"):
-        reasons.append(f"does not reproduce the published accuracy within ±{r.get('tolerance_pp')} pp")
-    if not r.get("beats_naive"):
-        reasons.append(f"hybrid macro {_f(r.get('macro'), 2)} does not beat naive {_f(r.get('naive_macro'), 2)}")
+    if r.get("status") == "not_evaluable":
+        reasons.append(f"not evaluable: {r.get('diagnosis')}")
+    else:
+        if not r.get("macro_within_tolerance"):
+            reasons.append(f"macro {_f(r.get('macro'), 2)} not within ±{tol.get('macro')} pp of the published {_f(r.get('published_macro'), 2)}")
+        if not r.get("types_within_tolerance"):
+            off = [t for t, x in (r.get("per_type") or {}).items() if not x.get("within_tolerance")]
+            reasons.append(f"outside ±{tol.get('per_type')} pp: {', '.join(off)}")
     ok = bool(r.get("pass"))
-    value = {"macro": r.get("macro"), "naive_macro": r.get("naive_macro"), "tolerance_pp": r.get("tolerance_pp")}
-    return _pc("PC1", ok, value, thr, None if ok else "; ".join(reasons) or "pc1.json says it fails", per_type=r.get("per_type"), offline=r.get("offline"))
+    value = {
+        "status": r.get("status"),
+        "macro": r.get("macro"),
+        "published_macro": r.get("published_macro"),
+        "current_scorer_macro": r.get("current_scorer_macro"),
+        "naive_macro": r.get("naive_macro"),
+        "tolerance_pp": tol,
+    }
+    return _pc("PC1", ok, value, thr, None if ok else "; ".join(reasons) or "pc1.json says it fails", per_type=r.get("per_type"), offline=r.get("offline"), beats_naive=r.get("beats_naive"))
 
 
 def pc2(rows: pd.DataFrame, reps: int = REPS) -> dict:
