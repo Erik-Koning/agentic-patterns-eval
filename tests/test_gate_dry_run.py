@@ -126,6 +126,10 @@ def _gold_agent(worlds_dir):
             return ModelOutput.for_tool_call("mockllm/model", "finish", {})
         if task.family == "F7":
             return ModelOutput.for_tool_call("mockllm/model", "submit_decision", dict(task.gold))
+        if task.family == "F1":
+            return ModelOutput.for_tool_call("mockllm/model", "submit_ratings", {"ratings": task.gold["ratings"]})
+        if task.family == "F2":
+            return ModelOutput.for_tool_call("mockllm/model", "submit_chain", {"final_supplier": task.gold["final"], "chain": task.gold["chain"]})
         return ModelOutput.for_tool_call("mockllm/model", "submit_answer", {"answer": task.gold["answer"]})
 
     return agent
@@ -136,6 +140,23 @@ def test_gold_tool_calls_score_100_percent_through_the_real_tool_path(offline_en
     asyncio.run(build("dev", family, [level], n_worlds=1, n_tasks=4, relational=True, embed=True))
     logs = inspect_eval(
         gate(family=family, level=level, split="dev", arm="S6"),
+        model=get_model("mockllm/model", custom_outputs=_gold_agent(offline_env / "worlds")),
+        log_dir=str(offline_env / "logs"),
+        display="none",
+    )
+    log = logs[0]
+    assert log.status == "success", log.error
+    assert all(s.error is None for s in log.samples), [s.error for s in log.samples]
+    assert [s.scores["task_success"].value for s in log.samples] == ["C"] * 4
+
+
+@pytest.mark.parametrize("family,level", [("F1", "2"), ("F1", "32"), ("F2", "2"), ("F2", "10")])
+def test_main_study_gold_answers_score_100_percent_through_the_real_tool_path(offline_env, family, level):
+    from ape.tasks.main import main_study
+
+    asyncio.run(build("dev", family, [level], n_worlds=1, n_tasks=4, relational=True, embed=True))
+    logs = inspect_eval(
+        main_study(family=family, level=level, split="dev", arm="S6"),
         model=get_model("mockllm/model", custom_outputs=_gold_agent(offline_env / "worlds")),
         log_dir=str(offline_env / "logs"),
         display="none",

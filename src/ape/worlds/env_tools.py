@@ -14,10 +14,13 @@ from inspect_ai.tool import ToolDef, ToolParam, ToolParams
 from inspect_ai.util import store
 
 from .gen_f7 import APPROVERS, DOCUMENTS
+from .gen_registry import RATINGS, render_record
 from .spec import TaskItem, World
 
 CALLS = "env_calls"
 ANSWER = "env_answer"
+LOOKUPS = "env_lookups"  # {key: times looked up}, for faults that fire on the first surfacing only
+FAULTS_FIRED = "env_faults_fired"
 
 
 def _tool(name: str, description: str, params: dict[str, ToolParam], fn: Callable) -> ToolDef:
@@ -33,7 +36,13 @@ def _answer(value: dict) -> None:
 
 
 def always_on(world: World) -> list[str]:
-    return {"F7": ["lookup_customer", "submit_decision"], "F3": ["order_lookup", "finish"], "F5": ["submit_answer"]}[world.family]
+    return {
+        "F7": ["lookup_customer", "submit_decision"],
+        "F3": ["order_lookup", "finish"],
+        "F5": ["submit_answer"],
+        "F1": ["lookup_supplier", "submit_ratings"],
+        "F2": ["lookup_supplier", "submit_chain"],
+    }[world.family]
 
 
 def build_tools(world: World, task: TaskItem) -> dict[str, ToolDef]:
@@ -42,6 +51,8 @@ def build_tools(world: World, task: TaskItem) -> dict[str, ToolDef]:
         return _f7_tools(task)
     if world.family == "F3":
         return _f3_tools(world, task)
+    if world.family in ("F1", "F2"):
+        return _registry_tools(world, task)
     return _f5_tools()
 
 
@@ -106,3 +117,62 @@ def _f5_tools() -> dict[str, ToolDef]:
         return "Answer recorded."
 
     return {"submit_answer": _tool("submit_answer", "Submit the final answer.", {"answer": ToolParam(type="string", description="The answer.")}, submit_answer)}
+
+
+def _active_fault(task: TaskItem) -> dict | None:
+    """The task's environment fault (gen_registry, brief §5.3), only when explicitly enabled for this task."""
+    return task.tags.get("fault") if task.setup.get("faults_enabled") else None
+
+
+def _registry_tools(world: World, task: TaskItem) -> dict[str, ToolDef]:
+    suppliers = world.entities["suppliers"]
+    fault = _active_fault(task)
+
+    async def lookup_supplier(supplier_id: str) -> str:
+        sid = supplier_id.strip().upper()
+        rec = suppliers.get(sid)
+        if rec is None:
+            return f"No supplier with ID {supplier_id}."
+        seen = {**store().get(LOOKUPS, {})}
+        seen[sid] = seen.get(sid, 0) + 1
+        store().set(LOOKUPS, seen)
+        if fault and fault["tool"] == "lookup_supplier" and fault["key"] == sid and seen[sid] == fault["occurrence"]:
+            rec = {**rec, fault["field"]: fault["value"]}
+            store().set(FAULTS_FIRED, [*store().get(FAULTS_FIRED, []), {**fault, "lookup": seen[sid]}])
+        return render_record(rec)
+
+    async def submit_ratings(ratings: dict) -> str:
+        if isinstance(ratings, str):
+            try:
+                ratings = json.loads(ratings)
+            except ValueError:
+                ratings = {}
+        _answer({"ratings": {str(k): str(v) for k, v in (ratings or {}).items()}})
+        return "Ratings recorded."
+
+    async def submit_chain(final_supplier: str, chain: list[str]) -> str:
+        if isinstance(chain, str):
+            chain = [c.strip() for c in chain.replace(";", ",").split(",") if c.strip()]
+        _answer({"final": str(final_supplier), "chain": [str(c) for c in chain or []]})
+        return "Escalation chain recorded."
+
+    s = lambda d, **kw: ToolParam(type="string", description=d, **kw)  # noqa: E731
+    tools = {"lookup_supplier": _tool("lookup_supplier", "Look up a supplier's record in the supplier registry.", {"supplier_id": s("The supplier ID, e.g. SUP-12345.")}, lookup_supplier)}
+    if world.family == "F1":
+        tools["submit_ratings"] = _tool(
+            "submit_ratings",
+            "Submit the review rating of every supplier in the task, all at once.",
+            {"ratings": ToolParam(type="object", description="Map from supplier ID to its rating.", additionalProperties=ToolParam(type="string", enum=list(RATINGS)))},
+            submit_ratings,
+        )
+    else:
+        tools["submit_chain"] = _tool(
+            "submit_chain",
+            "Submit where an escalated dispute ended up and the path it took.",
+            {
+                "final_supplier": s("The supplier ID holding the dispute after the last escalation."),
+                "chain": ToolParam(type="array", description="Supplier IDs the dispute moved to, in order, excluding the original supplier; the last is the final supplier.", items=ToolParam(type="string")),
+            },
+            submit_chain,
+        )
+    return tools

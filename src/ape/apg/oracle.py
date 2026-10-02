@@ -127,6 +127,29 @@ def build_oracle(world: World, budget_tokens: int) -> dict:
                 )
             )
         profile = "L1"
+    elif world.family in ("F1", "F2"):
+        # Registry worlds (gen_registry): rating rules by segment, and the escalation directory entry by entry.
+        suppliers = world.entities["suppliers"]
+        nodes.append(_category("rules", "Supplier scorecard rules", "How suppliers are rated at a quarterly review, by segment."))
+        nodes.append(_category("escalation", "Escalation directory", "Where escalated supplier disputes go, by escalation code."))
+        nodes.append(_leaf("metric-definitions", "rules", "Scorecard metric definitions", "what each scorecard metric measures", world.facts["f-DEF-metrics"].text, ["f-DEF-metrics"]))
+        for r in world.entities["rules"]:
+            seg = r["segment"]
+            nodes.append(_leaf(f"rule-{seg}", "rules", f"Rating rule for {seg} suppliers", f"quarterly review rating of a {seg} supplier", world.facts[r["fact_id"]].text, [r["fact_id"]]))
+        nodes.append(_leaf("escalation-protocol", "escalation", "Escalation protocol", "how an escalated supplier dispute moves between suppliers", world.facts["f-ESC-protocol"].text, ["f-ESC-protocol"]))
+        for code, target in sorted(world.entities["routes"].items()):
+            nodes.append(
+                _leaf(
+                    f"code-{code}",
+                    "escalation",
+                    f"Escalation code {code}",
+                    f"dispute escalated with code {code}, routed to {suppliers[target]['legal_name']}",
+                    world.facts[f"f-{code}"].text,
+                    [f"f-{code}"],
+                    aliases=[code],
+                )
+            )
+        profile = "L1"
     else:
         raise ValueError(world.family)
     doc = _doc(world, nodes, profile, budget_tokens)

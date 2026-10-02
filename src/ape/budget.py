@@ -362,7 +362,7 @@ def _agent_items(cell: PlanCell, A: dict, roles: dict, measured: _Measured) -> l
                     ctx = A["corpus_tokens"][task_cell]
                 ctx = float(ctx) * (A["pull_context_factor"] if delivery == "pull" else 1.0)
                 base = A["base_input_per_call"] + (A.get("tool_definitions_all", {}).get(task_cell, 0) if s.get("exposure") == "all" else 0)
-                history = A["history_per_prior_call"] * (k - 1) / 2
+                history = A.get("history_per_prior_call_by_cell", {}).get(task_cell, A["history_per_prior_call"]) * (k - 1) / 2
                 mult = float(a["multiplier"])
                 groups = [CallGroup("agent", model, k * mult, base + ctx + history, out_tokens, a["cache"])]
                 compiles = (1.0 if a["compile"] == "per_query" and delivery == "push" else k) * mult
