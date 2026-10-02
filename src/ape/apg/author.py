@@ -169,8 +169,11 @@ def assemble(world: World, chunks: list[Chunk], units_per_chunk: list[list[dict]
 
 
 def _id_coverage(world: World, declared: set[str]) -> float:
-    """Share of the spec's identifiers that some authored leaf declares (extraction diagnostic)."""
-    spec_ids = [p.id for p in world.policies] + [x.id for x in world.exceptions] + [p.id for p in world.procedures] + [t.name for t in world.tools]
+    """Share of the spec's identifiers that some authored leaf declares (extraction diagnostic; D-017 aggregates it
+    per cell in `ape.build_quality`, which owns the ID list)."""
+    from ..build_quality import apg_spec_ids
+
+    spec_ids = apg_spec_ids(world)
     return sum(i in declared for i in spec_ids) / len(spec_ids) if spec_ids else 1.0
 
 

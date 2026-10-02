@@ -326,10 +326,22 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
     assert _body_labels((ROOT / "GATE_PREREG.md").read_text()) <= set(pilot["prereg_items"])
     assert (out / "budget_calibration_measured.yaml").is_file() and pilot["cost_model_entries"] > 0
 
+    # D-017: build-dev measured the build quality on every gate cell, marked offline (coverage 1.0 by construction),
+    # and the pilot turned it into the [USER: builder] item and the worlds-per-cell note.
+    bq = json.loads((run_dir / "build-dev" / "build_quality.json").read_text())
+    assert bq["offline"] is True and "not a quality measurement" in bq["note"] and bq["verdict"] == "builder_passes"
+    assert set(bq["cells"]) == set(GATE_CELLS) and all(c["pass"] and c["apg"]["coverage"] == 1.0 for c in bq["cells"].values())
+    assert bq["fallback_extra_usd"] > 0 and bq["builder"].startswith("scripted perfect_author (offline stand-in for gpt-6-luna")
+    assert m["build-dev"]["build_quality"]["verdict"] == "builder_passes" and m["build-dev"]["outputs"]["build_quality"]
+    assert pilot["prereg_items"]["builder"] == bq["recommendation"] and bq["recommendation"].startswith("OFFLINE, not a quality measurement: ")
+    assert "D-017 build check: the builder passes, so 16 per D-017" in pilot["prereg_items"]["test worlds per cell"]
+    assert pilot["build_quality"]["verdict"] == "builder_passes"
+
     # The rehearsal freeze: every body placeholder filled in a copy; the real prereg and PROVENANCE.md untouched.
     freeze = json.loads(run.freeze_path.read_text())
     n_markers = len(run_gate.prereg_placeholders((ROOT / "GATE_PREREG.md").read_text()))
     assert freeze["rehearsal"] is True and len(freeze["placeholders_replaced"]) == n_markers > 0
+    assert {"marker": "[USER: builder]", "value": bq["recommendation"]} in freeze["placeholders_replaced"]
     assert run_gate.prereg_placeholders((run.work_dir / "GATE_PREREG.md").read_text()) == []
     expected = {"GATE_PREREG.md", "GATE_PREREG.md (draft)", *(f"config/{n}" for n in run_gate.FROZEN_CONFIG + run_gate.FROZEN_OUTPUTS), *run_gate.FROZEN_CODE}
     assert set(freeze["files"]) == expected and all(f["sha256"] for f in freeze["files"].values())

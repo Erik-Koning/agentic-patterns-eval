@@ -11,7 +11,9 @@ Checks, in run order (`STEPS`; pass criteria in `smoke_checks.py`):
     effort        reasoning effort honoured per role model: high uses more reasoning tokens than low
                   (read from cache/openai_probe.json; run readiness/probe_openai.py first)
     L2            LightRAG extraction on an F7-100 world; source ids map to our chunks
-    D017          the build model's authoring ID coverage and LightRAG's ID coverage >= 0.95 (needs L2)
+    D017          the build model's authoring ID coverage and LightRAG's ID coverage >= 0.95 on one F7-100 world
+                  (`ape.build_quality`, needs L2): an early warning; the decisive D-017 check is run_gate
+                  build-dev's, on the gate's four dev cells (build-dev/build_quality.json)
     H4            S3s on F3-60: OpenAI accepts tool sets that change across turns (warn if they never changed)
     L4_L5         LGR-s on F7-100: one keyword call per compile (L4); realized context <= max_total_tokens with
                   the median in the expected band (L5) (needs L2)
@@ -52,7 +54,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -61,10 +62,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import smoke_checks as sc  # noqa: E402
 
+from ape import build_quality as bq  # noqa: E402  (D-017 coverage: shared with run_gate's build-dev check)
+
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "cache" / "smoke"
-ID_PATTERN = re.compile(r"\b(?:P-\d+|X-\d+|SOP-[\w-]+)")
-SPEC_THRESHOLD = 0.95  # D-017
+SPEC_THRESHOLD = bq.THRESHOLD  # D-017
 F7_TASKS = 20  # the F7-100 world's tasks: enough for the retrieval rates; runs take the first n (Inspect `limit`)
 RUN_TASKS = {"H4": 2, "L4_L5": 2, "APG": 2, "pull": 4, "recovery": 1}
 BURST = {"tasks": 12, "epochs": 2}  # 24 samples
@@ -393,15 +395,16 @@ def check_l2(c: dict) -> tuple[dict, list]:
     world, cfg = c["f7"], c["cfg"]
     kind = "oracle" if c["args"].dry else "extract"
     manifest = asyncio.run(build_index(world, kind, cfg))
-    ents = json.loads((cfg.indices_dir / "lightrag" / f"{world.id}.{kind}").joinpath(*_entity_file(cfg, world, kind)).read_text())
-    names = _entity_names(ents)
+    names = bq.lightrag_entity_ids(bq.lightrag_entity_file(cfg, world.id, kind).read_text())
     from ape.worlds.render import chunk_world
 
-    measured = {"entities": len(names), "policy_ids_as_entities": _coverage(world, names), "index_hash": manifest["index_hash"][:12], "chunks": len(chunk_world(world)), "kind": kind}
+    measured = {"entities": len(names), "policy_ids_as_entities": bq.lightrag_id_coverage(world, names), "index_hash": manifest["index_hash"][:12], "chunks": len(chunk_world(world)), "kind": kind}
     return sc.result(sc.PASS if names else sc.FAIL, measured, reason=None if names else "no entities extracted"), []
 
 
 def check_d017(c: dict) -> tuple[dict, list]:
+    """An early warning on one F7-100 world with the real builder, using `ape.build_quality` (the same code as
+    run_gate's build-dev check). The decisive D-017 check is build-dev's, on the gate's four dev cells."""
     from ape.apg.author import author_world, build_llm_author
     from ape.llm.ledger import Ledger
 
@@ -411,13 +414,19 @@ def check_d017(c: dict) -> tuple[dict, list]:
     else:
         author = build_llm_author(c["build_model"], Ledger(cfg.ledger_path), world.id, c["build_effort"])
     authoring = asyncio.run(author_world(world, cfg, author))
-    lgr_cov = (c["report"]["checks"].get("L2") or {}).get("measured", {}).get("policy_ids_as_entities")
-    measured = {"authoring": authoring, "lightrag_id_coverage": lgr_cov, "threshold": SPEC_THRESHOLD}
-    reasons = []
-    if authoring["id_coverage"] < SPEC_THRESHOLD:
-        reasons.append(f"authoring id_coverage {authoring['id_coverage']:.2f} < {SPEC_THRESHOLD}")
-    if lgr_cov is None or lgr_cov < SPEC_THRESHOLD:
-        reasons.append(f"LightRAG ID coverage {lgr_cov} < {SPEC_THRESHOLD}")
+    row = bq.world_quality(world, cfg, "oracle" if c["args"].dry else "extract")  # L2 built the index
+    agg = bq.aggregate([row], expected_cells=[row["cell"]])
+    cell = agg["cells"].get(row["cell"], {})
+    measured = {
+        "authoring": authoring,
+        "lightrag_id_coverage": row["lightrag"]["coverage"] if row["lightrag"] else None,
+        "threshold": bq.THRESHOLD,
+        "world": row,
+        "verdict": agg["verdict"],
+        "offline": bool(c["args"].dry),
+        "note": bq.OFFLINE_NOTE if c["args"].dry else "one F7-100 world; the decisive check is run_gate build-dev's (build-dev/build_quality.json)",
+    }
+    reasons = cell.get("reasons", []) if agg["verdict"] != "builder_passes" else []
     # D-017: failing it means the Sol builder (needs approval), so it is a finding, not a broken harness.
     return sc.result(sc.WARN if reasons else sc.PASS, measured, reason="; ".join(reasons) + " (D-017: the Sol fallback builder needs approval)" if reasons else None), []
 
@@ -667,27 +676,6 @@ def write_report(report: dict) -> None:
         lines += ["", f"Recommended max_connections: **{m.get('recommended_max_connections')}** ({m.get('recommendation')}).", f"Model-call time (s): {m.get('model_call_time_s')}; sample time (s): {m.get('sample_total_time_s')}."]
     lines += ["", "Logs and full values: `cache/smoke/report.json`."]
     (OUT / "report.md").write_text("\n".join(lines) + "\n")
-
-
-def _entity_file(cfg, world, kind) -> tuple[str, ...]:
-    """LightRAG keeps entities in a per-workspace JSON KV file; find it."""
-    from ape.lgr.common import workspace_name
-
-    base = cfg.indices_dir / "lightrag" / f"{world.id}.{kind}"
-    hits = sorted(base.rglob("*full_entities*.json")) or sorted(base.rglob("*vdb_entities*.json"))
-    if not hits:
-        raise FileNotFoundError(f"no entity store under {base} (workspace {workspace_name(world.id)})")
-    return hits[0].relative_to(base).parts
-
-
-def _entity_names(store: dict) -> set[str]:
-    text = json.dumps(store)
-    return set(ID_PATTERN.findall(text))
-
-
-def _coverage(world, names: set[str]) -> float:
-    ids = [p.id for p in world.policies] + [x.id for x in world.exceptions] + [p.id for p in world.procedures]
-    return sum(i in names for i in ids) / len(ids) if ids else 1.0
 
 
 if __name__ == "__main__":
