@@ -6,9 +6,13 @@
 - Dependency items are those whose correctness needs earlier state (gen_f8: follow-up, quota, memo, withdrawn).
 - Report: exact match of all three parts, plus per-part accuracy / F1.
 - Session success: every item and the report exact, with no overflow.
-- Probes and external state: F1 per category against `gen_f8.state_at(k)`.
+- Probes and external state: F1 per category against `gen_f8.state_at(k)`; every expected checkpoint counts,
+  a missed one as 0 (`probes_by_checkpoint`).
 - Failure taxonomy (§5.4): forgot constraint, stale state, resurrected done item, dropped item, hallucinated
-  state, and overflow (CM0 past the window). `summary_loss` checks a compacted view for what a case needs.
+  state, and overflow (CM0 past the window), on failed items only. `summary_loss` checks a compacted view for
+  what a case needs.
+- Model-written lists are read tolerantly (`id_set`: strings kept, case and space normalized, anything else
+  ignored), so no report or probe shape can make the scorer raise.
 """
 
 import json
@@ -63,8 +67,18 @@ def answered(world: World, task: TaskItem, events: list[dict]) -> bool:
     return sub["finished"] if task.tags["kind"] == "ticket" else sub is not None
 
 
+def id_set(items) -> set[str]:
+    """IDs from a model-written list, tolerantly: strings are kept (case and space normalized); anything else
+    (objects, numbers, nested lists) is ignored, never raised on. A bare string counts as a one-item list."""
+    if isinstance(items, str):
+        items = [items]
+    if not isinstance(items, (list, tuple, set)):
+        return set()
+    return {i.strip().upper() for i in items if isinstance(i, str) and i.strip()}
+
+
 def set_f1(pred, gold) -> dict:
-    p, g = set(pred or []), set(gold or [])
+    p, g = id_set(pred), id_set(gold)
     if not p and not g:
         return {"precision": 1.0, "recall": 1.0, "f1": 1.0}
     tp = len(p & g)
@@ -76,7 +90,8 @@ def set_f1(pred, gold) -> dict:
 def report_score(report: dict | None, gold: dict) -> dict:
     if not isinstance(report, dict):
         return {"exact": False, "dispositions_accuracy": 0.0, "pending_recheck_f1": 0.0, "open_followups_f1": 0.0, "submitted": False}
-    disp = report.get("dispositions") if isinstance(report.get("dispositions"), dict) else {}
+    raw = report.get("dispositions") if isinstance(report.get("dispositions"), dict) else {}
+    disp = {str(k).strip().upper(): v for k, v in raw.items()}
     gd = gold["dispositions"]
     acc = sum(str(disp.get(c, "")).strip().lower() == v for c, v in gd.items()) / len(gd)
     pending = set_f1(report.get("pending_recheck"), gold["pending_recheck"])["f1"]
@@ -124,15 +139,18 @@ def external_state_score(state: dict, *, todos: list[dict] | None = None, notes:
     return {"kind": "notes", **out}
 
 
+def _as_list(x) -> list:
+    return list(x) if isinstance(x, (list, tuple, set)) else []
+
+
 def _hallucinated_ids(world: World, ids) -> list[str]:
     s = world.entities["session"]
     known_cases, known_memos = set(s["queue"]), {m["id"] for m in s["memos"]}
     out = []
-    for i in ids or []:
-        i = str(i)
+    for i in id_set(list(ids or [])):
         if (CASE_ID.fullmatch(i) and i not in known_cases) or (MEMO_ID.fullmatch(i) and i not in known_memos):
             out.append(i)
-    return out
+    return sorted(out)
 
 
 def taxonomy(world: World, events: list[dict], report: dict | None = None, probes: list[dict] = (), overflow_at: int | None = None) -> dict:
@@ -166,6 +184,7 @@ def taxonomy(world: World, events: list[dict], report: dict | None = None, probe
             continue
         case = e["args"].get("case_id") if e["tool"] in ("submit_decision", "finish") else None
         order = e["args"].get("order_id") if e["tool"] in mutating else None
+        order = str(order) if order is not None else None  # model-written: never assume it is hashable
         if case is not None:
             if case not in pos_of_case:
                 per_item[pos].append("hallucinated_state")
@@ -173,10 +192,19 @@ def taxonomy(world: World, events: list[dict], report: dict | None = None, probe
                 per_item[pos].append("resurrected_done_item")
         if order is not None and order in pos_of_order and pos_of_order[order] < pos:
             per_item[pos].append("resurrected_done_item")
+    # Labels explain failures: a successful item carries none. What happened in its window anyway (e.g. a decision
+    # re-sent for an earlier case) is kept apart as an incident, never counted as a failure label.
+    incidents: dict[int, list[str]] = {}
+    for t in world.tasks:
+        pos = t.tags["position"]
+        if (overflow_at is None or pos < overflow_at) and item_success(world, t, events):
+            if per_item[pos]:
+                incidents[pos] = sorted(set(per_item[pos]))
+            per_item[pos] = []
     bad: list[str] = []
     if isinstance(report, dict):
         disp = report.get("dispositions")
-        bad = _hallucinated_ids(world, [*(disp if isinstance(disp, dict) else []), *(report.get("pending_recheck") or []), *(report.get("open_followups") or [])])
+        bad = _hallucinated_ids(world, [*(disp if isinstance(disp, dict) else []), *_as_list(report.get("pending_recheck")), *_as_list(report.get("open_followups"))])
         if bad:
             session_level.append("hallucinated_state")
             per_item.setdefault(len(world.tasks) + 1, []).append("hallucinated_state")  # the report phase
@@ -184,13 +212,14 @@ def taxonomy(world: World, events: list[dict], report: dict | None = None, probe
     for p in probes:
         ans = p.get("answer")
         if isinstance(ans, dict):
-            probe_bad += _hallucinated_ids(world, [i for c in PROBE_CATEGORIES for i in (ans.get(c) or [])])
+            probe_bad += _hallucinated_ids(world, [i for c in PROBE_CATEGORIES for i in _as_list(ans.get(c))])
     if probe_bad:
         session_level.append("hallucinated_state")
     counts = {lab: sum(lab in v for v in per_item.values()) for lab in LABELS}
     counts["hallucinated_state"] += bool(probe_bad)
     return {
         "per_item": {k: sorted(set(v)) for k, v in per_item.items() if v},
+        "incidents_on_success": incidents,
         "counts": counts,
         "session_labels": sorted(set(session_level)),
         "report_hallucinated": bad,
@@ -251,6 +280,18 @@ def score_session(world: World, events: list[dict], report: dict | None, overflo
 
 
 
+def probes_by_checkpoint(probes: list[dict], checkpoints, n_items: int) -> dict[int, dict]:
+    """Every checkpoint the session should have probed (k <= N), taken or not. A checkpoint the session never
+    reached (CM0 overflowed, or a sample limit ended it) is `taken: False` and scores 0: the agent holds no usable
+    state there. Averaging only the probes taken would favour arms that overflow early (survivorship)."""
+    taken = {p["k"]: p for p in probes}
+    out = {}
+    for k in sorted({int(k) for k in checkpoints if int(k) <= n_items} | set(taken)):
+        p = taken.get(k)
+        out[k] = {"taken": p is not None, "mean_f1": p["scores"]["mean_f1"] if p else 0.0, "scores": p["scores"] if p else None, "error": p.get("error") if p else None}
+    return out
+
+
 @scorer(
     metrics={
         "item_success": [mean()],
@@ -258,11 +299,16 @@ def score_session(world: World, events: list[dict], report: dict | None, overflo
         "report_exact": [mean()],
         "session_success": [mean()],
         "probe_f1": [mean()],
+        "probe_coverage": [mean()],
         "overflow": [mean()],
     }
 )
 def f8_session_score():
-    """Session outcomes recomputed from the recorded tool events, with the failure taxonomy in the metadata."""
+    """Session outcomes recomputed from the recorded tool events, with the failure taxonomy in the metadata.
+
+    `probe_f1` averages every expected checkpoint (k <= N), a missed one scoring 0 (`probes_by_checkpoint`);
+    `probe_coverage` is the share of expected checkpoints actually probed; per-checkpoint scores are in the
+    metadata (`probes_by_checkpoint`). A session with no checkpoint <= N scores probe_f1 0 and coverage 1."""
 
     async def score(state: TaskState, target: Target) -> Score:
         from ..agent.arms import load_world
@@ -270,20 +316,30 @@ def f8_session_score():
         world = load_world(state.metadata["world_id"])
         events, report, overflow_at = state.store.get(EVENTS, []), state.store.get(REPORT), state.store.get(OVERFLOW)
         probes = state.store.get(PROBES, [])
+        checkpoints = (state.store.get("arm") or {}).get("checkpoints") or [p["k"] for p in probes]
         res = score_session(world, events, report, overflow_at)
         tax = taxonomy(world, events, report, probes, overflow_at)
-        probe_f1 = [p["scores"]["mean_f1"] for p in probes]
+        by_k = probes_by_checkpoint(probes, checkpoints, len(world.tasks))
         return Score(
             value={
                 "item_success": res["item_success"],
                 "dependency_success": res["dependency_success"],
                 "report_exact": float(res["report"]["exact"]),
                 "session_success": float(res["session_success"]),
-                "probe_f1": sum(probe_f1) / len(probe_f1) if probe_f1 else 0.0,
+                "probe_f1": sum(x["mean_f1"] for x in by_k.values()) / len(by_k) if by_k else 0.0,
+                "probe_coverage": sum(x["taken"] for x in by_k.values()) / len(by_k) if by_k else 1.0,
                 "overflow": float(overflow_at is not None),
             },
             answer=json.dumps(report, sort_keys=True) if report is not None else None,
-            metadata={"items": res["items"], "dependency_items": res["dependency_items"], "report": res["report"], "overflow_at": overflow_at, "taxonomy": tax, "probes": [{"k": p["k"], "scores": p["scores"], "error": p["error"]} for p in probes]},
+            metadata={
+                "items": res["items"],
+                "dependency_items": res["dependency_items"],
+                "report": res["report"],
+                "overflow_at": overflow_at,
+                "taxonomy": tax,
+                "probes": [{"k": p["k"], "scores": p["scores"], "error": p["error"]} for p in probes],
+                "probes_by_checkpoint": {str(k): v for k, v in by_k.items()},
+            },
         )
 
     return score

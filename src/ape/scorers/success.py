@@ -1,7 +1,9 @@
 """Programmatic primary outcome and delivered-evidence diagnostics."""
 
 import json
+import re
 import statistics
+import unicodedata
 
 from inspect_ai.scorer import CORRECT, INCORRECT, Score, Target, accuracy, mean, scorer, stderr
 from inspect_ai.solver import TaskState
@@ -14,6 +16,22 @@ from ..worlds.spec import TaskItem
 
 def _norm(s: str) -> str:
     return " ".join("".join(c.lower() if c.isalnum() else " " for c in str(s)).split())
+
+
+def _fold(s: str) -> str:
+    """Accents folded: "Kraków" -> "Krakow"."""
+    return "".join(c for c in unicodedata.normalize("NFKD", str(s)) if not unicodedata.combining(c))
+
+
+F5_SUFFIX = re.compile(r"^(?:the\s+)?(.*?)(?:\s+office)?$")
+
+
+def norm_f5(s) -> str:
+    """An F5 answer as compared (a person or a city): accents folded, case and punctuation ignored, a ", <country>"
+    suffix dropped ("Krakow, Poland"), and "the ... office" reduced to the city ("the Krakow office"). It never
+    maps one city or person onto another."""
+    head = _fold(str(s)).split(",", 1)[0]
+    return F5_SUFFIX.match(_norm(head)).group(1)
 
 
 def norm_id(s) -> str:
@@ -42,7 +60,7 @@ def is_success(task: TaskItem, answer: dict | None, calls: list[dict]) -> bool:
             return {**answer, "deadline_days": int(answer["deadline_days"])} == task.gold
         except (KeyError, TypeError, ValueError):
             return False
-    return _norm(answer.get("answer", "")) == _norm(task.gold["answer"])
+    return norm_f5(answer.get("answer", "")) == norm_f5(task.gold["answer"])
 
 
 @scorer(metrics=[accuracy(), stderr()])

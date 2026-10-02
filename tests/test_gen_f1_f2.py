@@ -233,6 +233,7 @@ def test_answer_tools_record_answers():
     assert always_on(w1) == ["lookup_supplier", "submit_ratings"]
     _call(build_tools(w1, t)["submit_ratings"], ratings=json.dumps(t.gold["ratings"]))  # a JSON string is accepted too
     assert store().get(ANSWER) == t.gold and is_success(t, store().get(ANSWER), [])
+    init_subtask_store(Store())  # a new sample; within one sample the first answer wins (env_tools._answer)
     t = w2.tasks[0]
     _call(build_tools(w2, t)["submit_chain"], final_supplier=t.gold["final"], chain=t.gold["chain"])
     assert store().get(ANSWER) == t.gold

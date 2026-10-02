@@ -31,8 +31,16 @@ def _record(name: str, args: dict) -> None:
     store().set(CALLS, [*store().get(CALLS, []), {"tool": name, "args": dict(args)}])
 
 
-def _answer(value: dict) -> None:
+ALREADY_ANSWERED = "An answer was already recorded for this task; it stands and this one is ignored."
+
+
+def _answer(value: dict) -> bool:
+    """Record the task's answer. The first answer wins (as in F8 scoring): a second answer call, in the same
+    turn or later, is ignored and the model is told so. Returns whether this call's answer was recorded."""
+    if store().get(ANSWER) is not None:
+        return False
     store().set(ANSWER, value)
+    return True
 
 
 def always_on(world: World) -> list[str]:
@@ -64,8 +72,8 @@ def _f7_tools(task: TaskItem) -> dict[str, ToolDef]:
         return json.dumps({"customer_id": customer_id, **c}) if c else f"No customer with ID {customer_id}."
 
     async def submit_decision(action: str, approver: str, deadline_days: int, document: str) -> str:
-        _answer({"action": action, "approver": approver, "deadline_days": int(deadline_days), "document": document})
-        return "Decision recorded."
+        recorded = _answer({"action": action, "approver": approver, "deadline_days": int(deadline_days), "document": document})
+        return "Decision recorded." if recorded else ALREADY_ANSWERED
 
     s = lambda d, **kw: ToolParam(type="string", description=d, **kw)  # noqa: E731
     return {
@@ -92,8 +100,8 @@ def _f3_tools(world: World, task: TaskItem) -> dict[str, ToolDef]:
         return json.dumps({"order_id": order_id, **o}) if o else f"No order with ID {order_id}."
 
     async def finish() -> str:
-        _answer({"calls": store().get(CALLS, [])})
-        return "Ticket closed."
+        recorded = _answer({"calls": store().get(CALLS, [])})
+        return "Ticket closed." if recorded else ALREADY_ANSWERED
 
     tools = {
         "order_lookup": _tool("order_lookup", "Look up an order's destination region and status.", {"order_id": ToolParam(type="string", description="The order ID.")}, order_lookup),
@@ -113,8 +121,7 @@ def _f3_tools(world: World, task: TaskItem) -> dict[str, ToolDef]:
 
 def _f5_tools() -> dict[str, ToolDef]:
     async def submit_answer(answer: str) -> str:
-        _answer({"answer": answer})
-        return "Answer recorded."
+        return "Answer recorded." if _answer({"answer": answer}) else ALREADY_ANSWERED
 
     return {"submit_answer": _tool("submit_answer", "Submit the final answer.", {"answer": ToolParam(type="string", description="The answer.")}, submit_answer)}
 
@@ -147,14 +154,14 @@ def _registry_tools(world: World, task: TaskItem) -> dict[str, ToolDef]:
                 ratings = json.loads(ratings)
             except ValueError:
                 ratings = {}
-        _answer({"ratings": {str(k): str(v) for k, v in (ratings or {}).items()}})
-        return "Ratings recorded."
+        recorded = _answer({"ratings": {str(k): str(v) for k, v in (ratings or {}).items()}})
+        return "Ratings recorded." if recorded else ALREADY_ANSWERED
 
     async def submit_chain(final_supplier: str, chain: list[str]) -> str:
         if isinstance(chain, str):
             chain = [c.strip() for c in chain.replace(";", ",").split(",") if c.strip()]
-        _answer({"final": str(final_supplier), "chain": [str(c) for c in chain or []]})
-        return "Escalation chain recorded."
+        recorded = _answer({"final": str(final_supplier), "chain": [str(c) for c in chain or []]})
+        return "Escalation chain recorded." if recorded else ALREADY_ANSWERED
 
     s = lambda d, **kw: ToolParam(type="string", description=d, **kw)  # noqa: E731
     tools = {"lookup_supplier": _tool("lookup_supplier", "Look up a supplier's record in the supplier registry.", {"supplier_id": s("The supplier ID, e.g. SUP-12345.")}, lookup_supplier)}
