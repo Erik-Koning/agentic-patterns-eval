@@ -71,12 +71,11 @@ def generate(level: str, split: str, seed: int, n_tasks: int) -> World:
     task_domains = [dom for _, (dom, _) in chosen[:task_domain_count]]
 
     for name, param, desc, dom in sorted(tools):
-        text = (
-            f"Tool {name} (domain: {dom.replace('_', ' ')}). {desc} Parameters: order_id (the order ID) and "
-            f"{param} (a {param.replace('_', ' ')} code)."
-        )
+        label = param.replace("_", " ")
+        label = label if label.endswith(" code") else f"{label} code"  # "credit_code" -> "credit code", not "credit code code"
+        text = f"Tool {name} (domain: {dom.replace('_', ' ')}). {desc} Parameters: order_id (the order ID) and {param} (a {label})."
         world.add_fact(f"f-tool-{name}", text, "tool")
-        world.tools.append(Tool(name, dom, desc, {"order_id": "The order ID.", param: f"The {param.replace('_', ' ')} code."}, True, f"f-tool-{name}"))
+        world.tools.append(Tool(name, dom, desc, {"order_id": "The order ID.", param: f"The {label}."}, True, f"f-tool-{name}"))
 
     by_domain: dict[str, list[Tool]] = {}
     for t in world.tools:

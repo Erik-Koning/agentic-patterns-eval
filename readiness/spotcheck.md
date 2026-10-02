@@ -449,7 +449,7 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-wrong_item-LATAM`: Procedure SOP-wrong_item-LATAM. When the customer received the wrong item and the order ships to the LATAM region: call wrong_item_credit with credit_code=CR-205; then call wrong_item_hold with hold_reason=HR-659. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
+- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
 - `f-tool-wrong_item_hold`: Tool wrong_item_hold (domain: wrong item). Place an order on hold with a hold-reason code. Parameters: order_id (the order ID) and hold_reason (a hold reason code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
@@ -470,7 +470,7 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-wrong_item-LATAM`: Procedure SOP-wrong_item-LATAM. When the customer received the wrong item and the order ships to the LATAM region: call wrong_item_credit with credit_code=CR-205; then call wrong_item_hold with hold_reason=HR-659. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
+- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
 - `f-tool-wrong_item_hold`: Tool wrong_item_hold (domain: wrong item). Place an order on hold with a hold-reason code. Parameters: order_id (the order ID) and hold_reason (a hold reason code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
@@ -491,7 +491,7 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-wrong_item-LATAM`: Procedure SOP-wrong_item-LATAM. When the customer received the wrong item and the order ships to the LATAM region: call wrong_item_credit with credit_code=CR-205; then call wrong_item_hold with hold_reason=HR-659. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
+- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
 - `f-tool-wrong_item_hold`: Tool wrong_item_hold (domain: wrong item). Place an order on hold with a hold-reason code. Parameters: order_id (the order ID) and hold_reason (a hold reason code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
@@ -512,7 +512,7 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-wrong_item-UK`: Procedure SOP-wrong_item-UK. When the customer received the wrong item and the order ships to the UK region: call wrong_item_credit with credit_code=CR-461; then call wrong_item_hold with hold_reason=HR-569. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
+- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
 - `f-tool-wrong_item_hold`: Tool wrong_item_hold (domain: wrong item). Place an order on hold with a hold-reason code. Parameters: order_id (the order ID) and hold_reason (a hold reason code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
@@ -766,8 +766,8 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-address_error-EU`: Procedure SOP-address_error-EU. When the shipping address on the order is wrong and the order ships to the EU region: call address_error_credit with credit_code=CR-242; then call address_error_reroute with depot_code=DEP-127. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-address_error_credit`: Tool address_error_credit (domain: address error). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
-- `f-tool-address_error_reroute`: Tool address_error_reroute (domain: address error). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code code).
+- `f-tool-address_error_credit`: Tool address_error_credit (domain: address error). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
+- `f-tool-address_error_reroute`: Tool address_error_reroute (domain: address error). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
 - [ ] **Prompt unambiguous:** one reading, and it names everything the task needs.
@@ -788,7 +788,7 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 **Gold facts:**
 - `f-SOP-damaged_item-APAC`: Procedure SOP-damaged_item-APAC. When the item arrived damaged and the order ships to the APAC region: call damaged_item_hold with hold_reason=HR-119; then call damaged_item_reroute with depot_code=DEP-900. Pass the order ID as order_id. Do not call any other mutating tool.
 - `f-tool-damaged_item_hold`: Tool damaged_item_hold (domain: damaged item). Place an order on hold with a hold-reason code. Parameters: order_id (the order ID) and hold_reason (a hold reason code).
-- `f-tool-damaged_item_reroute`: Tool damaged_item_reroute (domain: damaged item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code code).
+- `f-tool-damaged_item_reroute`: Tool damaged_item_reroute (domain: damaged item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
 - [ ] **Prompt unambiguous:** one reading, and it names everything the task needs.
@@ -808,8 +808,8 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-wrong_item-UK`: Procedure SOP-wrong_item-UK. When the customer received the wrong item and the order ships to the UK region: call wrong_item_credit with credit_code=CR-266; then call wrong_item_reroute with depot_code=DEP-706. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
-- `f-tool-wrong_item_reroute`: Tool wrong_item_reroute (domain: wrong item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code code).
+- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
+- `f-tool-wrong_item_reroute`: Tool wrong_item_reroute (domain: wrong item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
 - [ ] **Prompt unambiguous:** one reading, and it names everything the task needs.
@@ -829,8 +829,8 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-wrong_item-APAC`: Procedure SOP-wrong_item-APAC. When the customer received the wrong item and the order ships to the APAC region: call wrong_item_credit with credit_code=CR-692; then call wrong_item_reroute with depot_code=DEP-554. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
-- `f-tool-wrong_item_reroute`: Tool wrong_item_reroute (domain: wrong item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code code).
+- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
+- `f-tool-wrong_item_reroute`: Tool wrong_item_reroute (domain: wrong item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
 - [ ] **Prompt unambiguous:** one reading, and it names everything the task needs.
@@ -850,8 +850,8 @@ Drawn from the gate's dev worlds: F7-10 ×2, F7-1000 ×2, F3-5 ×2, F3-60 ×2 wo
 
 **Gold facts:**
 - `f-SOP-wrong_item-UK`: Procedure SOP-wrong_item-UK. When the customer received the wrong item and the order ships to the UK region: call wrong_item_credit with credit_code=CR-266; then call wrong_item_reroute with depot_code=DEP-706. Pass the order ID as order_id. Do not call any other mutating tool.
-- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code code).
-- `f-tool-wrong_item_reroute`: Tool wrong_item_reroute (domain: wrong item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code code).
+- `f-tool-wrong_item_credit`: Tool wrong_item_credit (domain: wrong item). Apply a goodwill credit to the customer's account for the order. Parameters: order_id (the order ID) and credit_code (a credit code).
+- `f-tool-wrong_item_reroute`: Tool wrong_item_reroute (domain: wrong item). Reroute an in-transit order through a depot. Parameters: order_id (the order ID) and depot_code (a depot code).
 
 - [ ] **Gold correct:** it follows from the gold facts and the tool data alone.
 - [ ] **Prompt unambiguous:** one reading, and it names everything the task needs.
