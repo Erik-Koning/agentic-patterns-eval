@@ -9,7 +9,7 @@ TEST_SPLIT_ENV. `make_world` itself stays unguarded, for tests and readers.
 
 import os
 
-from . import gen_f3, gen_f5, gen_f7
+from . import gen_f3, gen_f5, gen_f7, gen_f8
 from .spec import World
 
 SPLIT_SEED_BASE = {"dev": 1000, "pilot": 2000, "test": 3000}
@@ -37,6 +37,8 @@ def make_world(family: str, level: str, split: str, index: int, n_tasks: int, re
         return gen_f3.generate(level, split, seed, n_tasks)
     if family == "F5":
         return gen_f5.generate(level, split, seed, n_tasks)
+    if family == "F8":
+        return gen_f8.generate(level, split, seed, n_tasks)  # one session; the level is N, n_tasks is ignored
     raise ValueError(family)
 
 
