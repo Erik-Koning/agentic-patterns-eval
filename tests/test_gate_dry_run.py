@@ -100,3 +100,47 @@ def test_results_load_from_real_logs(offline_env):
     assert set(df["cell"]) == {"F7-10"} and df["world"].nunique() == 2
     tm = task_means(df)
     assert list(tm.columns) == ["S1", "S6"] and len(tm) == 6
+
+
+def _gold_agent(worlds_dir):
+    """A mock agent that knows every task's gold and makes exactly the gold tool calls, through the real
+    tool path (`execute_tools`): F3 the procedure's mutating calls then `finish`, F7 `submit_decision`, F5
+    `submit_answer`. Plumbing that drops, mangles or rejects a correct call fails the 100% check."""
+    import json
+    from pathlib import Path
+
+    from inspect_ai.model import ChatMessageTool, ModelOutput
+
+    from ape.worlds.spec import World
+
+    gold = {t.prompt: t for p in Path(worlds_dir).rglob("*.json") for t in World.load(p).tasks}
+
+    def agent(messages, tools, tool_choice, config) -> ModelOutput:
+        task = gold[next(m.text for m in messages if m.role == "user" and m.text in gold)]
+        done = [m for m in messages if isinstance(m, ChatMessageTool)]
+        if task.family == "F3":
+            calls = task.gold["calls"]
+            if len(done) < len(calls):
+                c = calls[len(done)]
+                return ModelOutput.for_tool_call("mockllm/model", c["tool"], c["args"])
+            return ModelOutput.for_tool_call("mockllm/model", "finish", {})
+        if task.family == "F7":
+            return ModelOutput.for_tool_call("mockllm/model", "submit_decision", dict(task.gold))
+        return ModelOutput.for_tool_call("mockllm/model", "submit_answer", {"answer": task.gold["answer"]})
+
+    return agent
+
+
+@pytest.mark.parametrize("family,level", [("F7", "10"), ("F3", "5"), ("F3", "60"), ("F5", "2hop")])
+def test_gold_tool_calls_score_100_percent_through_the_real_tool_path(offline_env, family, level):
+    asyncio.run(build("dev", family, [level], n_worlds=1, n_tasks=4, relational=True, embed=True))
+    logs = inspect_eval(
+        gate(family=family, level=level, split="dev", arm="S6"),
+        model=get_model("mockllm/model", custom_outputs=_gold_agent(offline_env / "worlds")),
+        log_dir=str(offline_env / "logs"),
+        display="none",
+    )
+    log = logs[0]
+    assert log.status == "success", log.error
+    assert all(s.error is None for s in log.samples), [s.error for s in log.samples]
+    assert [s.scores["task_success"].value for s in log.samples] == ["C"] * 4

@@ -7,6 +7,7 @@ available regardless of tool exposure (lookups, the answer tool) are listed in
 """
 
 import json
+from typing import Any
 from collections.abc import Callable
 
 from inspect_ai.tool import ToolDef, ToolParam, ToolParams
@@ -89,7 +90,8 @@ def _f3_tools(world: World, task: TaskItem) -> dict[str, ToolDef]:
     }
     for t in world.tools:
         def make(name: str) -> Callable:
-            async def call(**kwargs) -> str:
+            # Inspect parses each parameter's annotation; an unannotated **kwargs raises on every call.
+            async def call(**kwargs: Any) -> str:
                 _record(name, kwargs)
                 return f"{name} executed for {kwargs.get('order_id', '?')}."
             return call
