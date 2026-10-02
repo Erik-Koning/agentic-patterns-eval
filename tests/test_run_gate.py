@@ -103,6 +103,7 @@ def test_offline_part_a_runs_every_phase_then_skips_forces_and_reruns_on_changed
     pc1 = json.loads((run_dir / "anchor" / "pc1.json").read_text())
     assert set(pc1["per_type"]) == {"Fact Retrieval", "Complex Reasoning", "Contextual Summarize", "Creative Generation"}
     assert pc1["mode"] == "hybrid" and isinstance(pc1["pass"], bool) and pc1["n_per_type"] == 2
+    assert pc1["status"] in ("pass", "fail") and pc1["scorers"]["gating"]["Fact Retrieval"] == "ragas-e6305f5", "every judge reply parsed (D-025)"
     assert all(os.path.isfile(p) for p in pc1["logs"].values())
     assert "APE_WORLDS" not in os.environ and os.environ.get("OPENAI_API_KEY") != run_gate.OFFLINE_KEY, "the run's environment is restored"
 
@@ -761,13 +762,18 @@ def test_live_freeze_needs_a_written_diagnosis_to_accept_a_failed_pc1(clean_env,
     monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: [])
     run = GateRun("pc1-fail", **paths)
     run_gate._check_mode(run)
-    _fake_current(run, pc1_pass=False)
+    diagnosis = "judge parse rate 99.8%, no index or harness errors; Luna judges lower than gpt-4o-mini"
 
+    # D-025: unreadable judge replies are a harness defect; no diagnosis can accept them.
+    _fake_current(run, pc1_pass=False, pc1_status="not_evaluable")
+    with pytest.raises(PhaseError, match="PC1 is not evaluable(.|\n)*--accept-pc1-failure does not apply"):
+        run_phases(GateRun("pc1-fail", accept_pc1_failure=diagnosis, **paths), "freeze")
+
+    _fake_current(run, pc1_pass=False, pc1_status="fail")
     with pytest.raises(PhaseError, match=r"PC1 does not pass(.|\n)*Diagnose the anchor logs(.|\n)*--accept-pc1-failure"):
         run_phases(run, "freeze")
     with pytest.raises(PhaseError, match="at least 40 characters"):
         run_phases(GateRun("pc1-fail", accept_pc1_failure="looks fine", **paths), "freeze")
-    diagnosis = "judge parse rate 99.8%, no index or harness errors; Luna judges lower than gpt-4o-mini"
     assert run_phases(GateRun("pc1-fail", accept_pc1_failure=diagnosis, **paths), "freeze") == {"freeze": "done"}
     freeze = json.loads(run.freeze_path.read_text())
     assert freeze["pc1_accepted"]["reason"] == diagnosis and freeze["pc1_accepted"]["pc1_pass"] is False

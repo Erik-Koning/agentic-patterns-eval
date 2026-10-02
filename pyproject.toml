@@ -17,6 +17,9 @@ dependencies = [
     "jsonschema",
     "python-dotenv>=1.2.3",
     "pyyaml>=6.0.3",
+    "onnxruntime>=1.30",
+    "tokenizers>=0.23",
+    "huggingface-hub>=1.33",
 ]
 
 [dependency-groups]

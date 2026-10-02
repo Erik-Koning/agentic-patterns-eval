@@ -422,6 +422,21 @@ def orchestrator_verdict(statuses: Mapping[str, str | None], files: Mapping[str,
     return result(FAIL if reasons else PASS, measured, reason="; ".join(reasons) or None)
 
 
+def anchor_parse_rates(pc1: Mapping[str, Any] | None) -> dict:
+    """Judge parse-failure rates from the smoke anchor's pc1.json, both scorers (D-025).
+
+    With 2 questions per type this is a wiring check: does the judge's reply format parse? Any gating-scorer
+    failure is a WARN, because above 5% at full size PC1 is not evaluable. The strict official scorer's rate is
+    reported: a high rate there is the GraphRAG-Benchmark PR #56 parse collapse."""
+    if not pc1:
+        return {"status": None, "warn": None}
+    gating = {t: x.get("parse_failure_rate") for t, x in (pc1.get("per_type") or {}).items()}
+    current = dict(pc1.get("current_scorer_parse_failure_rate") or {})
+    fix = dict(pc1.get("fix_format_rate") or {})
+    warn = [f"gating {t} {r:.0%}" for t, r in gating.items() if r] + [f"gating {t} unknown" for t, r in gating.items() if r is None]
+    return {"status": pc1.get("status"), "gating": gating, "current_strict": current, "ragas_fix_format": fix, "warn": "; ".join(warn) or None}
+
+
 # --- Spend ------------------------------------------------------------------------------------------
 
 

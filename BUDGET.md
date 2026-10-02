@@ -6,13 +6,13 @@
 
 | Study | Phases (conservative $) | Conservative | Expected | FX-5 target |
 |---|---|---|---|---|
-| Gate | smoke 3 · anchor 6 · builds 51 · tuning 8 · pilot 11 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **201** | 176 | ≤ 700 |
+| Gate | smoke 3 · anchor 11 · builds 51 · tuning 8 · pilot 11 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **206** | 181 | ≤ 700 |
 | Main study | builds 5 · micro-pilot 10 · tuning 31 · pilot 14 · A 118 · B 142 · C 25 · F 820 | **1,164** | 916 | ≤ 1,000 |
 | Study G | micro-pilot 11 · tuning 24 · capability anchor 51 · context management 1,737 · topology 1,556 | **3,378** | 2,130 | ≤ 2,700 |
-| **Total** | | **4,743** | **3,223** | ≤ 5,000 |
-| Contingency | $5,000 − conservative total | 257 | | ~600 |
+| **Total** | | **4,748** | **3,228** | ≤ 5,000 |
+| Contingency | $5,000 − conservative total | 252 | | ~600 |
 
-- **By tier** (conservative / expected): Sol-high 2,006 / 1,427 · Astra-high 1,955 / 1,222 · Luna-high 729 / 544 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 6 / 6 · smoke cap 3.
+- **By tier** (conservative / expected): Sol-high 2,006 / 1,427 · Astra-high 1,955 / 1,222 · Luna-high 729 / 544 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3. The anchor grew $5 with D-025: answer contexts mapped to LightRAG 1.2.5's caps (26.5K tokens) and a second scorer's judge calls; its bge embeddings run locally ($0).
 - **The total fits.** Main study and Study G are over their FX-5 targets by $164 and $678. The gate's underspend covers part of that. The conservative scenario prices every cached token at the full input price, so expected spend is ≈ $3.2K. The orchestrator's budget check (FX-6) stops any phase whose projected cost exceeds what remains.
 - **Biggest drivers:** Study G on Astra ($1,955), Study G on Sol ($1,201), and Study F on Sol ($805).
 - **D-017's Sol build path** would add **$957**. That needs approval.

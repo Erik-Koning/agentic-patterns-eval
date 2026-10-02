@@ -36,13 +36,34 @@ Each entry records the decision, why it was made, and who made it.
 **D-008 (2026-09-30).** Gate inference is world-clustered throughout: bootstrap over worlds within cells, and world-level sign flips for the S7 placebo and the S6 > S7 invariant. With fewer than 4 worlds per cell the verdict is INCONCLUSIVE.
 - Why: a task-level test was shown in synthetic data to be anti-conservative when world×arm effects exist.
 
-**D-009 (2026-09-30).** The PC1 anchor (GraphRAG-Bench Medical) follows the paper's LightRAG setup, with these documented deviations:
-- LightRAG 1.5.7 instead of 1.2.5, so context caps are an approximate mapping.
-- The judge prompts are the current repo versions (rewritten 2025-07-21). Three of the four published numbers predate the rewrite.
-- Similarity uses our embedding model instead of bge-large-en-v1.5.
-- Keyword extraction uses structured JSON output.
-- The corpus is inserted whole and chunked by LightRAG, as in the paper, rather than per D-003. With per-chunk insertion, LightRAG 1.5.7 would list up to 75 chunk IDs on every entity line and use up the token caps.
-- Why: PC1 validates *our LightRAG setup*, not the gate's shared-chunk protocol. If PC1 fails, these deviations are the first suspects.
+**D-009 (2026-09-30; corrected 2026-10-02 with D-025).** The PC1 anchor (GraphRAG-Bench Medical) follows the paper's LightRAG setup, with these documented deviations:
+- **LightRAG version and query caps.** 1.5.7 instead of 1.2.5, so the query caps are a mapping, derived from the 1.2.5 source (operate.py `_build_query_context`, `combine_contexts`).
+  - **1.2.5:**
+    - It caps entity descriptions, relation descriptions and chunk text at 4000 tokens each, *per side*.
+    - In hybrid mode it then concatenates the local and global sides, so the context holds up to 8000 + 8000 description tokens and 2 × 3 chunks of 1200 tokens.
+  - **1.5.7:**
+    - It truncates the merged entity and relation lists once, measured on their JSON records.
+    - Chunks get what is left of `max_total_tokens`.
+  - **The mapping:**
+    - `max_entity_tokens` 9000: 8000 plus about 1000 tokens of record keys for about 60 entities.
+    - `max_relation_tokens` 9500: 8000 plus about 1500.
+    - `chunk_top_k` 6.
+    - `max_total_tokens` 26,500, so 6 chunks still fit after the knowledge-graph parts.
+  - Before 2026-10-02 the caps were 4000 / 4000 / chunk_top_k 20 / 12,000: half of 1.2.5's entity and relation room and up to 3× its chunks. `top_k` 30, temperature 0.7, chunks 1200/100, hybrid mode, unchanged.
+- **Judge prompts and scorers (corrected).** The earlier wording ("three of the four published numbers predate the rewrite") was wrong.
+  - The three older numbers predate the benchmark's *custom scorer entirely*. They were scored with a vendored copy of RAGAS's `answer_correctness`: GraphRAG-Benchmark e6305f5, removed 2025-06-14.
+  - Neither the 2025-06-14 custom code nor its 2025-07-21 rewrite produced them.
+  - Creative Generation (2025-09-25) came from today's code.
+  - PC1 now scores each number with its own scorer (D-025).
+- **Embeddings (corrected; the retrieval deviation was undocumented).** The paper used BAAI/bge-large-en-v1.5 for retrieval (App. H.2, run_lightrag.py) and for similarity.
+  - We had text-embedding-3-small for both. Since D-025 the anchor runs bge-large-en-v1.5 locally for both (`ape.anchor.bge`; the gate keeps OpenAI embeddings):
+    - retrieval: mean-pooled as 1.2.5's `hf_embed`;
+    - similarity: CLS-pooled and normalised, as sentence-transformers.
+  - BAAI's own ONNX export is pinned at revision d4aa6901 and run with onnxruntime. Checked against sentence-transformers and transformers/torch: cosine 1.0000000, element differences ≤ 1e-5.
+  - 1.2.5's `hf_embed` also averages padding positions within a batch. Embedding each text on its own (a batch of one) avoids that batching artefact; 1.5.7 batches differently anyway.
+- **Keyword extraction** uses structured JSON output.
+- **Corpus insertion.** The corpus is inserted whole and chunked by LightRAG, as in the paper, rather than per D-003. With per-chunk insertion, LightRAG 1.5.7 would list up to 75 chunk IDs on every entity line and use up the token caps.
+- **Why:** PC1 validates *our LightRAG setup*, not the gate's shared-chunk protocol. If PC1 fails, these deviations are the first suspects.
 
 **D-010 (2026-09-30).** The PC1 sample is 200 questions per type (all 166 Creative Generation), not 50.
 - Why: at 50 per type the sampling error (≈4 pp) makes a faithful reproduction fail at least one of four ±5 pp checks more often than not; at 200 it is ≈2 pp.
@@ -171,6 +192,43 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
   - Per step, each step is a fresh random draw, seeded by the task and the step query so a trajectory replays the same draws.
   - Each draw is sized to APG*'s per-compile median and capped at 50% of the corpus.
 - **Why per-step mirroring, not one per-sample total:** a single draw of the per-sample total would show the model up to n_steps times more context in one call than APG* ever shows at once. Mirroring matches APG* both in what the model sees at each call and in what a sample delivers in total; only relevance differs, which is what the placebo isolates.
+
+**D-025 (2026-10-02, PC1 investigation; before any freeze).** PC1 checks each published number with the scorer that produced it, under a macro-plus-type rule, and gates only on what has a published reference.
+- **The evidence:** the PC1 investigation of 2026-10-02 read the benchmark's repository history, leaderboard data, paper versions, issues and pull requests.
+  - **Leaderboard and paper.** The leaderboard data (`medical_data.csv`) and arXiv 2506.05690 v1–v3 carry the same LightRAG Medical numbers: 63.32 / 61.32 / 63.14, plus 67.91 from v2.
+    - Fact Retrieval, Complex Reasoning and Contextual Summarize were on the leaderboard by 2025-05-28.
+    - No post-rewrite LightRAG numbers exist.
+  - **The scorer behind the three older numbers.** It was not the "pre-rewrite" custom code (first committed 2025-06-14) but a vendored RAGAS `answer_correctness` (e6305f5, uploaded 2025-06-09, removed 2025-06-14). It differs from today's code in:
+    - prompt rendering: a JSON-Schema signature, JSON examples and inputs, an "Output:" cue;
+    - tolerant parsing with one fix-format re-ask;
+    - dropping failed samples;
+    - raw cosine of bge *document* embeddings.
+
+    Its instruction text and examples are byte-identical to today's.
+  - **Creative Generation** (added 2025-09-25) came from today's code.
+  - **A parse bug in today's official scorer.** It parses the classification strictly. GraphRAG-Benchmark PR #56 (open) reports gpt-4o-mini replying `Output: {...}` plus reasoning. That makes F1 = 0 for every sample and accuracy about 0.25 × similarity (≈ 22%). Our replica reproduced the bug silently.
+  - **Estimated pass likelihoods for a faithful setup**, with gpt-4o-mini:
+    - status quo: about 10–15% (about 20% without the parse collapse);
+    - matched scorers per type, as adopted here: about 40%;
+    - hybrid > naive alone: about 55–65%, but weak as a fidelity check.
+    - Even with matched scorers, the remaining 1.5.7-vs-1.2.5 gap makes a ±5 pp miss on at least one of four types likelier than not. Hence the macro rule below.
+- **The rule (GATE_PREREG §7, PC1):**
+  - **Gating scorer:**
+    - the three older types: the vendored-RAGAS scorer (`ape.anchor.ragas`; renderings byte-identical to RAGAS's own code on test inputs);
+    - Creative Generation: today's official scorer with a tolerant classification parse.
+  - **Pass:**
+    - with gpt-4o-mini answering, judging and building: the macro mean over the four types within ±5 pp of the published macro (63.92), and each type within ±10 pp;
+    - otherwise (e.g. the Luna fallback): ±10 pp and ±15 pp.
+  - **Reported, not gated:**
+    - Today's official scorer, parsed strictly, for every type. Strict parse failures are now flagged.
+    - Hybrid > naive. Our naive mode is LightRAG's, not the paper's llama_index RAG baseline (256-token chunks, top 5), so it has no published anchor.
+  - **Not evaluable:** if any type's gating-scorer parse-failure rate exceeds 5%, PC1 is *not evaluable*, with a diagnosis. That is a harness defect: the freeze refuses it even with `--accept-pc1-failure`.
+- **Also changed:**
+  - **Embeddings:** bge-large-en-v1.5 runs locally for the anchor's retrieval and similarity (D-009).
+  - **Query caps:** mapped from 1.2.5 (D-009).
+  - **Cost:** the anchor's projected cost rose from $5.56 to $10.42 conservative. The answer contexts roughly double and a second scorer's judge calls are added; the OpenAI embedding calls are gone. The program is now $4,748 conservative / $3,228 expected (+$5).
+  - **Smoke:** the smoke run reports both scorers' judge parse-failure rates, and warns on any gating failure.
+- **Why not simply gate on hybrid > naive:** that check has no published reference and little power to detect an unfaithful setup. The macro ±5 pp check keeps PC1 an anchor to the literature. The per-type ±10 pp bound still catches a type-specific defect.
 
 ## Open (needs user input)
 

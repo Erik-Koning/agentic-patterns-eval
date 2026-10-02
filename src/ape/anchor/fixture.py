@@ -7,6 +7,8 @@ network or a real model:
 - `fake_extractor()` stands in for the build model in LightRAG's extraction format.
 - `mock_answerer` is the answer model (keywords via `mock_kg`, gold answers for Fact Retrieval
   only), and `mock_judge` the ACC judge (splits sentences, classifies statements by exact match).
+  The judge reads both prompt styles: today's official prompts and the vendored-RAGAS rendering
+  (`ape.anchor.ragas`: the input as indented JSON after "Now perform the same with the following input").
   Both are `mockllm` `custom_outputs` callables.
 """
 
@@ -94,12 +96,28 @@ def mock_answerer(messages, tools, tool_choice, config) -> ModelOutput:
     return ModelOutput.from_content(MODEL, GOLD.get(question, "I don't know"))
 
 
+RAGAS_INPUT = "\nNow perform the same with the following input\ninput: "
+
+
+def _split(text: str) -> list[str]:
+    return [s for s in re.split(r"(?<=\.)\s+", text) if s]
+
+
+def _classify(ans: list[str], gt: list[str]) -> str:
+    out = {"TP": [s for s in ans if s in gt], "FP": [s for s in ans if s not in gt], "FN": [s for s in gt if s not in ans]}
+    return json.dumps({k: [{"statement": s, "reason": "mock"} for s in v] for k, v in out.items()})
+
+
 def mock_judge(messages, tools, tool_choice, config) -> ModelOutput:
-    """Judge that splits sentences and classifies statements by exact match."""
+    """Judge that splits sentences and classifies statements by exact match, in either prompt style."""
     prompt = messages[-1].text
+    if RAGAS_INPUT in prompt:  # vendored-RAGAS rendering: the input is JSON, the reply an object
+        data = json.loads(prompt.rsplit(RAGAS_INPUT, 1)[1].rsplit("\nOutput: ", 1)[0])
+        if "ground_truth" in data:
+            return ModelOutput.from_content(MODEL, _classify(data["answer"], data["ground_truth"]))
+        return ModelOutput.from_content(MODEL, json.dumps({"statements": _split(data["answer"])}))
     if "Current Analysis:" in prompt:
         tail = prompt.split("Current Analysis:")[-1]
         ans, gt = (json.loads(re.search(rf"{k}: (.*)\n", tail).group(1)) for k in ("Answer Statements", "Ground Truth Statements"))
-        out = {"TP": [s for s in ans if s in gt], "FP": [s for s in ans if s not in gt], "FN": [s for s in gt if s not in ans]}
-        return ModelOutput.from_content(MODEL, json.dumps({k: [{"statement": s, "reason": "mock"} for s in v] for k, v in out.items()}))
-    return ModelOutput.from_content(MODEL, json.dumps([s for s in re.split(r"(?<=\.)\s+", answer_in(prompt)) if s]))
+        return ModelOutput.from_content(MODEL, _classify(ans, gt))
+    return ModelOutput.from_content(MODEL, json.dumps(_split(answer_in(prompt))))

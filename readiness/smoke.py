@@ -1051,13 +1051,18 @@ def check_orchestrator(c: dict) -> tuple[dict, list]:
         res["reason"] = "; ".join(filter(None, [error, res.get("reason")]))
     warnings = {p: (rg.read_manifest(run, p) or {}).get("warnings") for p in sc.SMOKE_PHASES}
     pc1 = run.phase_dir("anchor") / "pc1.json"
+    pc1_data = json.loads(pc1.read_text()) if pc1.is_file() else None
+    parse = sc.anchor_parse_rates(pc1_data)
     res["measured"] |= {
         "run_dir": str(run.dir),
         "warnings": {p: w for p, w in warnings.items() if w},
-        "pc1_pass": json.loads(pc1.read_text()).get("pass") if pc1.is_file() else None,
+        "pc1_pass": (pc1_data or {}).get("pass"),
         "pc1_note": "2 questions per type: wiring only, no reproduction claim",
+        "anchor_judge_parse": parse,  # D-025: both scorers' parse-failure rates; any gating failure warns
         "run_spend_usd": round(after - before, 6),
     }
+    if parse["warn"] and res["status"] == sc.PASS:
+        res = sc.result(sc.WARN, res["measured"], reason=f"anchor judge replies did not parse ({parse['warn']}): PC1 would be not evaluable above 5%")
     return res, []
 
 

@@ -2,7 +2,23 @@
 
 Before comparing APG against LightRAG, we must show that our LightRAG setup reproduces
 LightRAG's published GraphRAG-Bench scores: arXiv 2506.05690v3 Table 2, Medical rows.
-Our setup is pinned lightrag-hku, OpenAI models, rerank off, and our embedding cache.
+Our setup is pinned lightrag-hku, the paper's models where available, rerank off, and the
+paper's embedding model, BAAI/bge-large-en-v1.5, run locally (`ape.anchor.bge`; D-009, D-025).
+
+Scoring follows each published number's provenance (D-025):
+- Fact Retrieval, Complex Reasoning and Contextual Summarize gate on the vendored-RAGAS scorer that
+  produced them (`ape.anchor.ragas`).
+- Creative Generation gates on today's official code with a tolerant classification parse
+  (`ape.anchor.accuracy.tolerant`).
+- Today's official scorer, run strictly, is reported for every type as a sensitivity.
+
+The PC1 rule (`pc1_check`, GATE_PREREG §7):
+- The macro mean over the four types must land within ±5 pp of the published macro, and each type
+  within ±10 pp, when the paper's model (gpt-4o-mini) answers, judges and builds. Otherwise ±10 pp and
+  ±15 pp.
+- Hybrid > naive is reported, not gated: our naive mode is not the paper's RAG baseline.
+- A gating-scorer parse-failure rate above 5% in any type is a harness defect. PC1 is then
+  "not_evaluable", with that diagnosis, instead of passing or failing.
 
 Data comes from github.com/GraphRAG-Bench/GraphRAG-Benchmark @ fdbab59 (HF mirror: GraphRAG-Bench/GraphRAG-Bench):
     Datasets/Corpus/medical.json               {"corpus_name": "Medical", "context": <one ~218k-token document>}
@@ -41,21 +57,33 @@ from inspect_ai.log import EvalLog, read_eval_log
 from lightrag import LightRAG
 from lightrag.kg.shared_storage import initialize_pipeline_status
 
-from ..config import Config, embedding_cache
+from lightrag.utils import EmbeddingFunc
+
+from ..config import Config
 from ..lgr.build import _dir_hash
-from ..lgr.common import embedding_dim, embedding_func, index_dir, read_manifest, workspace_name, write_manifest
+from ..lgr.common import index_dir, read_manifest, workspace_name, write_manifest
 from ..llm.build_client import BuildLlm
-from ..llm.embeddings import EmbeddingCache
 from ..llm.ledger import Ledger
 from ..models import build_settings, embedding_model, require_preflight
+from .bge import AnchorEmbedder, anchor_embedder
 
 ANCHOR_ID = "graphragbench-medical"
 QUESTION_TYPES = ("Fact Retrieval", "Complex Reasoning", "Contextual Summarize", "Creative Generation")  # labels as in the data
 # ACC (%) from 2506.05690v3 Table 2, Medical, LightRAG. The first three columns are unchanged since v1
 # (2025-06-06); Creative Generation first appears in v2.
 PUBLISHED_LIGHTRAG = {"Fact Retrieval": 63.32, "Complex Reasoning": 61.32, "Contextual Summarize": 63.14, "Creative Generation": 67.91}
+# The scorer each published number came from (D-025): vendored RAGAS before 2025-06-14, today's code after.
+RAGAS_TYPES = ("Fact Retrieval", "Complex Reasoning", "Contextual Summarize")
 PAPER_MODEL = "gpt-4o-mini"
 CHUNK_TOKEN_SIZE, CHUNK_OVERLAP_TOKENS = 1200, 100  # App. H.2
+# PC1 (GATE_PREREG §7, D-025): (macro, per type) tolerance in pp; parse failures above this make PC1 not evaluable.
+TOLERANCE_PAPER_MODEL, TOLERANCE_OTHER = (5.0, 10.0), (10.0, 15.0)
+PARSE_FAILURE_LIMIT = 0.05
+
+
+def slug(qtype: str) -> str:
+    """Metric-name form of a question type ("Fact Retrieval" -> "fact_retrieval")."""
+    return qtype.lower().replace(" ", "_")
 
 
 @dataclass(frozen=True)
@@ -110,14 +138,15 @@ def working_dir(cfg: Config) -> Path:
     return index_dir(cfg, ANCHOR_ID, "extract")
 
 
-async def open_anchor_rag(wd: Path, llm_func, emb: EmbeddingCache, query_time: bool) -> LightRAG:
-    """`lgr.common.open_rag`, but with the paper's chunking in place of D-003's pre-chunked 4096-token cap."""
+async def open_anchor_rag(wd: Path, llm_func, emb: AnchorEmbedder, query_time: bool) -> LightRAG:
+    """`lgr.common.open_rag`, but with the paper's chunking in place of D-003's pre-chunked 4096-token cap, and the
+    paper's retrieval embeddings: bge-large-en-v1.5, mean-pooled as LightRAG 1.2.5's `hf_embed` (`ape.anchor.bge`)."""
     wd.mkdir(parents=True, exist_ok=True)
     rag = LightRAG(
         working_dir=str(wd),
         workspace=workspace_name(ANCHOR_ID),
         llm_model_func=llm_func,
-        embedding_func=embedding_func(emb, await embedding_dim(emb)),
+        embedding_func=EmbeddingFunc(embedding_dim=emb.dim, max_token_size=8192, func=emb.retrieval),
         enable_llm_cache=not query_time,
         enable_llm_cache_for_entity_extract=True,
         chunk_token_size=CHUNK_TOKEN_SIZE,
@@ -131,7 +160,7 @@ async def open_anchor_rag(wd: Path, llm_func, emb: EmbeddingCache, query_time: b
 async def build_index(bench: Bench, cfg: Config, llm_func, build_model: str | None, build_effort: str | None = None) -> dict:
     """LightRAG's own extraction over the whole corpus (offline, never inside Inspect)."""
     wd = working_dir(cfg)
-    emb = embedding_cache(cfg)
+    emb = anchor_embedder(cfg)
     rag = await open_anchor_rag(wd, llm_func, emb, query_time=False)
     names = [d["corpus_name"] for d in bench.documents]
     try:
@@ -144,7 +173,7 @@ async def build_index(bench: Bench, cfg: Config, llm_func, build_model: str | No
         "documents": len(names),
         "chunking": [CHUNK_TOKEN_SIZE, CHUNK_OVERLAP_TOKENS],
         "lightrag_version": importlib.metadata.version("lightrag-hku"),
-        "embedding_model": emb.model,
+        "embedding_model": emb.identity,
         "build_model": build_model,
         "build_effort": build_effort,
     }
@@ -160,12 +189,14 @@ def index_manifest(cfg: Config, bench: Bench) -> dict:
     manifest = read_manifest(wd)
     if manifest["corpus_hash"] != bench.corpus_hash():
         raise RuntimeError(f"{wd} was built from a different corpus")
+    if manifest.get("embedding_model") != (want := anchor_embedder(cfg).identity):
+        raise RuntimeError(f"{wd} was built with embeddings {manifest.get('embedding_model')!r}, not {want!r}: rebuild it")
     return manifest
 
 
-def pc1_tolerance(*models: str) -> float:
-    """Pre-registered: ±5 pp if every model in the loop is the paper's, else ±10 pp."""
-    return 5.0 if all(m.split("/")[-1].startswith(PAPER_MODEL) for m in models) else 10.0
+def pc1_tolerance(*models: str) -> tuple[float, float]:
+    """Pre-registered (macro, per-type) tolerance in pp: (5, 10) if every model in the loop is the paper's, else (10, 15)."""
+    return TOLERANCE_PAPER_MODEL if all(m.split("/")[-1].startswith(PAPER_MODEL) for m in models) else TOLERANCE_OTHER
 
 
 def _macro(by_type: dict, types) -> float | None:
@@ -173,13 +204,31 @@ def _macro(by_type: dict, types) -> float | None:
     return None if None in values else sum(values) / len(values)
 
 
-def pc1_check(results_by_type: dict, published: dict, tolerance_pp: float, naive_by_type: dict) -> dict:
-    """PC1 passes iff every published type is within ±tolerance and the graph mode beats naive.
+def pc1_check(
+    results_by_type: dict,
+    published: dict,
+    tolerance_pp: tuple[float, float],
+    naive_by_type: dict,
+    parse_failure_rate: dict | None = None,
+    current_by_type: dict | None = None,
+) -> dict:
+    """PC1 (GATE_PREREG §7, D-025) on the gating scorer's per-type ACC (%).
 
-    "Beats naive" is judged on the macro mean over types. Per-type wins are reported but not
-    required, because the paper's own LightRAG loses to vanilla RAG on Fact Retrieval (63.32 vs
-    63.72) and Contextual Summarize (63.14 vs 63.72) while winning on the macro mean (63.92 vs 61.00).
+    `status`:
+    - "not_evaluable": a type's gating-scorer parse-failure rate is above PARSE_FAILURE_LIMIT, or unknown
+      (a harness defect to fix, not a result).
+    - "pass": the macro mean is within ±macro tolerance of the published macro, and every type is within
+      ±type tolerance.
+    - "fail": anything else.
+
+    Reported, not gated:
+    - Hybrid > naive. Our naive mode is not the paper's RAG baseline, and the paper's own LightRAG loses to
+      vanilla RAG on two types.
+    - Today's official scorer (`current_by_type`), run strictly.
     """
+    macro_tol, type_tol = tolerance_pp
+    rates = parse_failure_rate or {}
+    current = current_by_type or {}
     per_type = {}
     for qtype, pub in published.items():
         ours, naive = results_by_type.get(qtype), naive_by_type.get(qtype)
@@ -187,28 +236,55 @@ def pc1_check(results_by_type: dict, published: dict, tolerance_pp: float, naive
             "ours": ours,
             "published": pub,
             "naive": naive,
+            "current_scorer": current.get(qtype),
+            "parse_failure_rate": rates.get(qtype),
             "delta_pp": None if ours is None else ours - pub,
-            "within_tolerance": ours is not None and abs(ours - pub) <= tolerance_pp,
+            "within_tolerance": ours is not None and abs(ours - pub) <= type_tol,
             "beats_naive": ours is not None and naive is not None and ours > naive,
         }
-    macro, naive_macro = _macro(results_by_type, published), _macro(naive_by_type, published)
-    reproduces = all(r["within_tolerance"] for r in per_type.values())
-    beats_naive = macro is not None and naive_macro is not None and macro > naive_macro
+    macro, naive_macro, published_macro = _macro(results_by_type, published), _macro(naive_by_type, published), _macro(published, published)
+    macro_ok = macro is not None and abs(macro - published_macro) <= macro_tol
+    types_ok = all(r["within_tolerance"] for r in per_type.values())
+    unparsed = {t: r for t, r in ((t, rates.get(t)) for t in published) if r is None or r > PARSE_FAILURE_LIMIT}
+    if unparsed:
+        status = "not_evaluable"
+        diagnosis = "gating-scorer parse failures above {:.0%}: {} (a harness defect: inspect the judge replies)".format(
+            PARSE_FAILURE_LIMIT, ", ".join(f"{t} {'unknown' if r is None else f'{r:.1%}'}" for t, r in unparsed.items())
+        )
+    else:
+        status, diagnosis = ("pass" if macro_ok and types_ok else "fail"), None
     return {
+        "status": status,
+        "pass": status == "pass",
+        "diagnosis": diagnosis,
         "per_type": per_type,
-        "tolerance_pp": tolerance_pp,
-        "reproduces_published": reproduces,
+        "tolerance_pp": {"macro": macro_tol, "per_type": type_tol},
+        "reproduces_published": macro_ok and types_ok,
         "macro": macro,
+        "published_macro": published_macro,
+        "macro_within_tolerance": macro_ok,
+        "types_within_tolerance": types_ok,
+        "current_scorer_macro": _macro(current, published),
         "naive_macro": naive_macro,
-        "beats_naive": beats_naive,
-        "pass": reproduces and beats_naive,
+        "beats_naive": macro is not None and naive_macro is not None and macro > naive_macro,
+        "parse_failure_limit": PARSE_FAILURE_LIMIT,
     }
 
 
+def _metrics(log: EvalLog) -> dict[str, float]:
+    return {name: m.value for s in log.results.scores for name, m in s.metrics.items()}
+
+
 def results_by_type(log: EvalLog) -> dict[str, float]:
-    """Per-type ACC (%) from an anchor eval log."""
-    metrics = {name: m.value for s in log.results.scores for name, m in s.metrics.items()}
+    """Per-type ACC (%) of the gating scorer from an anchor eval log."""
+    metrics = _metrics(log)
     return {t: metrics[t] for t in QUESTION_TYPES if t in metrics}
+
+
+def metric_by_type(log: EvalLog, prefix: str) -> dict[str, float]:
+    """A per-type metric family (`current`, `matched_parse_failure_rate`, ...) keyed by question type."""
+    metrics = _metrics(log)
+    return {t: metrics[f"{prefix}_{slug(t)}"] for t in QUESTION_TYPES if f"{prefix}_{slug(t)}" in metrics}
 
 
 def _role_model(log: EvalLog, role: str) -> str:
@@ -216,13 +292,32 @@ def _role_model(log: EvalLog, role: str) -> str:
     return (cfg[0] if isinstance(cfg, list) else cfg).model
 
 
-def pc1_from_logs(graph: EvalLog, naive: EvalLog, tolerance_pp: float | None = None) -> dict:
+def pc1_from_logs(graph: EvalLog, naive: EvalLog, tolerance_pp: tuple[float, float] | None = None) -> dict:
+    """PC1 from the graph-mode and naive anchor logs: gating ACC, parse-failure rates, the strict official
+    scorer as a sensitivity, and what was run (scorers, embeddings, query caps)."""
     g, n = graph.eval.metadata, naive.eval.metadata
     if (g["question_ids_hash"], g["index"]["index_hash"]) != (n["question_ids_hash"], n["index"]["index_hash"]):
         raise ValueError("the two runs used different questions or indexes")
     if tolerance_pp is None:
         tolerance_pp = pc1_tolerance(graph.eval.model, _role_model(graph, "judge"), g["index"]["build_model"] or "")
-    return {"mode": g["mode"], **pc1_check(results_by_type(graph), PUBLISHED_LIGHTRAG, tolerance_pp, results_by_type(naive))}
+    check = pc1_check(
+        results_by_type(graph),
+        PUBLISHED_LIGHTRAG,
+        tolerance_pp,
+        results_by_type(naive),
+        parse_failure_rate=metric_by_type(graph, "matched_parse_failure_rate"),
+        current_by_type=metric_by_type(graph, "current"),
+    )
+    return {
+        "mode": g["mode"],
+        **check,
+        "current_scorer_parse_failure_rate": metric_by_type(graph, "current_parse_failure_rate"),
+        "fix_format_rate": metric_by_type(graph, "matched_fix_format_rate"),
+        "naive_parse_failure_rate": metric_by_type(naive, "matched_parse_failure_rate"),
+        "scorers": g.get("scorers"),
+        "embeddings": g.get("embeddings"),
+        "query": g.get("query"),
+    }
 
 
 def main() -> None:
@@ -239,7 +334,7 @@ def main() -> None:
     p = sub.add_parser("pc1")
     p.add_argument("graph_log")
     p.add_argument("naive_log")
-    p.add_argument("--tolerance", type=float)
+    p.add_argument("--tolerance", type=float, nargs=2, metavar=("MACRO_PP", "TYPE_PP"))
     args = ap.parse_args()
     if args.cmd != "pc1":
         # Default to the paper-faithful "anchor" profile (gpt-4o-mini); "anchor_luna" if it is retired (E3).
@@ -248,7 +343,7 @@ def main() -> None:
         require_preflight(live=True)
     cfg = Config()
     if args.cmd == "pc1":
-        result = pc1_from_logs(read_eval_log(args.graph_log), read_eval_log(args.naive_log), args.tolerance)
+        result = pc1_from_logs(read_eval_log(args.graph_log), read_eval_log(args.naive_log), tuple(args.tolerance) if args.tolerance else None)
     elif args.cmd == "run":
         from ..runner import log_path, run_evals
         from ..tasks.anchor_graphragbench import graphragbench_anchor

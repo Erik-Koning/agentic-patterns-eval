@@ -1395,7 +1395,9 @@ def _anchor(run: GateRun, record: dict) -> None:
 
         build_model, build_effort = build_settings(profile)
         llm = BuildLlm(build_model, Ledger(cfg.ledger_path), {"anchor": gb.ANCHOR_ID, "system": "lightrag"}, reasoning_effort=build_effort).lightrag_func()
-    emb_model = embedding_cache(cfg).model
+    from .anchor.bge import anchor_embedder
+
+    emb_model = anchor_embedder(cfg).identity  # the paper's bge-large-en-v1.5 (pinned), or the fake one offline
     if (wd / MANIFEST).is_file():
         m = read_index_manifest(wd)
         have = (m.get("corpus_hash"), m.get("build_model"), m.get("build_effort"), m.get("embedding_model"))
@@ -1435,7 +1437,10 @@ def _anchor(run: GateRun, record: dict) -> None:
     _write_json(out, pc1)
     record["outputs"] = {"pc1": _show(out), "index": _show(wd)}
     record["pc1_pass"] = pc1["pass"]
-    if not pc1["pass"]:
+    record["pc1_status"] = pc1["status"]
+    if pc1["status"] == "not_evaluable":
+        record["warnings"].append(f"PC1 is not evaluable: {pc1['diagnosis']} (see pc1.json; GATE_PREREG §7)")
+    elif not pc1["pass"]:
         record["warnings"].append("PC1 does not pass (see pc1.json): fix and re-pilot before the test phase (GATE_PREREG §7)")
 
 
@@ -2024,9 +2029,13 @@ def _freeze(run: GateRun, record: dict) -> None:
         (record["warnings"] if run.offline else problems).append("not current, so the frozen design would not be what ran: " + "; ".join(stale))
     seed_base, seed_problems = choose_test_seed_base(run)
     problems += seed_problems
-    pc1 = (read_manifest(run, "anchor") or {}).get("pc1_pass")
+    anchor = read_manifest(run, "anchor") or {}
+    pc1 = anchor.get("pc1_pass")
     pc1_accepted = None
-    if pc1 is not True:
+    if pc1 is not True and anchor.get("pc1_status") == "not_evaluable" and not run.offline:
+        # D-025: unreadable judge replies are a harness defect to fix, never a result to accept.
+        problems.append("PC1 is not evaluable (anchor/pc1.json `diagnosis`): the judge's replies could not be read; fix the harness and re-run the anchor. --accept-pc1-failure does not apply")
+    elif pc1 is not True:
         reason = (run.accept_pc1_failure or "").strip()
         if reason:
             if len(reason) < PC1_REASON_MIN_CHARS:
