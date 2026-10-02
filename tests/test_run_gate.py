@@ -321,12 +321,19 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
     worlds = json.loads((run_dir / "pilot" / "worlds.json").read_text())["worlds"]
     assert {(w["family"], w["level"]) for w in worlds} == {("F7", "10"), ("F7", "1000"), ("F3", "5"), ("F3", "60")}
     assert all("-pilot-" in w["world_id"] for w in worlds)
+    assert len(worlds) == 8, "offline: 1 main-pilot world + 1 σ-cell world per gate cell (D-026)"
 
     # S7 targets: APG*'s median realized context per gate cell, read by S7 through APE_S7_TARGETS.
     targets = json.loads((out / "s7_targets.json").read_text())
     assert set(targets) == set(GATE_CELLS) and all(isinstance(t, int) and t > 0 for t in targets.values())
     s7_index = json.loads(next((run_dir / "pilot" / "logs").glob("s7-*/runner_index.json")).read_text())
     assert {e["task_args"]["arm"] for e in s7_index["tasks"].values()} == {"S7"} and len(s7_index["tasks"]) == 4
+    # The σ cell (D-026): APG* and LGR* only, push, on the pilot worlds after the main pilot's.
+    sel = run_gate.read_selected(run.selected_path)
+    sigma_index = json.loads(next((run_dir / "pilot" / "logs").glob("sigma-*/runner_index.json")).read_text())
+    sigma_args = [e["task_args"] for e in sigma_index["tasks"].values()]
+    assert {a["arm"] for a in sigma_args} == {sel["APG*"]["arm"], sel["LGR*"]["arm"]} and len(sigma_args) == 8
+    assert all(a["skip_worlds"] == 1 and a.get("delivery", "push") == "push" for a in sigma_args)
 
     # Matched-budget calibration: both capped arms land in the window; APG fills.
     calibration = yaml.safe_load((out / "budget_calibration.yaml").read_text())
@@ -338,9 +345,13 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
 
     # Power re-simulation and the analyst's transcription sheet, keyed by every [PILOT: ...] label in the prereg.
     power = json.loads((run_dir / "pilot" / "power.json").read_text())
-    assert set(power["scenarios"]) == {"pilot", "conservative", "prior"} and set(power["scenarios"]["pilot"]["power"]) == {"12", "16"}
-    assert power["variance_components"]["estimable"] is False, "one offline world per cell: the priors are kept"
+    assert set(power["scenarios"]) == {"pilot", "conservative", "optimistic", "prior"}
+    assert set(power["scenarios"]["pilot"]["power"]) == {"12", "16", "20", "24"}
+    vc = power["variance_components"]
+    assert vc["estimable"] is True and vc["worlds_per_cell"] == dict.fromkeys(GATE_CELLS, 2), "σ pools the main and σ cells' worlds"
+    assert power["decision"] in ("suffices", "insufficient", "ambiguous")
     pilot = json.loads((run_dir / "pilot" / "pilot.json").read_text())
+    assert pilot["power"]["decision"] == power["decision"] and pilot["power"]["sigma_worlds_per_cell"] == vc["worlds_per_cell"]
     assert _body_labels((ROOT / "GATE_PREREG.md").read_text()) <= set(pilot["prereg_items"])
     assert (out / "budget_calibration_measured.yaml").is_file() and pilot["cost_model_entries"] > 0
 
@@ -969,3 +980,27 @@ def test_s7_mirrors_a_per_step_apg_with_a_fresh_draw_each_step():
     assert ids(once, task.prompt) == ids(once, "a later step query") == ids(each, task.prompt), "the first draw is the per-task draw"
     assert ids(each, "step 2 query") != ids(each, "step 3 query"), "each step a fresh draw"
     assert ids(each, "step 2 query") == ids(each, "step 2 query"), "a trajectory replays the same draws"
+
+
+def test_the_pilot_sigma_cell_runs_apg_and_lgr_on_the_worlds_after_the_main_pilots(clean_env):
+    """D-026: the pilot builds 8 worlds per cell; the main pilot uses worlds 1-4, the σ cell APG*/LGR* on 5-8 (push)."""
+    live = GateRun("sigma-plan", runs_root=clean_env / "runs")
+    p = run_gate.plan(live)
+    assert p.cell(run_gate.PILOT_BUILD_CELL).spec["worlds"] == dict.fromkeys(GATE_CELLS, 8)
+    main = run_gate._pilot_cells(live)["gate.pilot"]
+    sigma = run_gate._pilot_sigma_cell(live)
+    assert sigma["arms"] == ["APG*", "LGR*"] and sigma["deliveries"] == ["push"] and sigma["epochs"] == 1
+    assert int(sigma["world_offset"]) == int(main["worlds"]) == 4 and int(sigma["worlds"]) == 4 and sigma["cells"] == list(GATE_CELLS)
+    offline = run_gate._pilot_sigma_cell(GateRun("sigma-off", offline=True, runs_root=clean_env / "runs"))
+    assert offline["world_offset"] == offline["worlds"] == run_gate.OFFLINE_SCALE["worlds_per_cell"]
+
+
+def test_gate_samples_skip_worlds_selects_the_next_block(clean_env, monkeypatch):
+    from ape.tasks.gate import gate_samples
+
+    monkeypatch.setenv("APE_WORLDS", str(clean_env / "worlds"))
+    monkeypatch.setenv("APE_EMBEDDINGS", "fake")
+    asyncio.run(build("pilot", "F7", ["10"], n_worlds=3, n_tasks=2, relational=True, embed=False))
+    first = {s.metadata["world_id"] for s in gate_samples("F7", "10", "pilot", limit_worlds=2)}
+    rest = {s.metadata["world_id"] for s in gate_samples("F7", "10", "pilot", limit_worlds=2, skip_worlds=2)}
+    assert len(first) == 2 and len(rest) == 1 and not first & rest

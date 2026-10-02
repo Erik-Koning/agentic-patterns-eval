@@ -19,8 +19,15 @@ heterogeneity (the mean slope E[p(1 − p)] is only 0.67–0.71 of p̄(1 − p̄
 
 Uncertainty: under normal world means, Σ_c (m_c − 1) V_c / E[V_c] is χ² with Σ(m_c − 1) df, where V_c is the raw
 between-world variance and E[V_c] = D*_c(σ) + noise_c. Inverting that pivot in σ gives an 80% interval
-(`ci80`); the power recommendation uses its upper ends (the `conservative` scenario), never max(prior, estimate).
+(`ci80`). When the worlds vary less than the model predicts even at σ = 0, the pivot has no upper solution: the
+upper end is then *not informative* (`ci80_upper_informative`), is shown as max(estimate, prior), and can never
+support a "suffices" call (D-026; it used to collapse to 0, which made the conservative scenario optimistic).
 Cells with fewer than 2 worlds contribute nothing; with none, the components are not estimable and the priors stay.
+
+Recommendation (`power_report`, D-026): two-sided, at the planned test size. *suffices* when the power at the upper
+ends of the intervals reaches the target; *insufficient* when even the lower ends miss it (add test worlds within
+budget, or rethink; the powers at 20 and 24 worlds are reported); *ambiguous* otherwise (proceed with the planned
+size and rely on the pre-registered extension).
 """
 
 import importlib.util
@@ -97,8 +104,12 @@ def _fit(cells: list[dict], sigma_w: float, sigma_g: float, iterations: int = 8)
     return sigma_w, sigma_g
 
 
-def _pivot_bounds(cells: list[dict], key: str, fixed: float, est: float, level: float) -> list[float]:
-    """The CI for σ_g (key "D", σ_w fixed) or σ_w (key "S", σ_g fixed) from the χ² pivot on raw world variances."""
+def _pivot_bounds(cells: list[dict], key: str, fixed: float, est: float, level: float) -> tuple[list[float], bool]:
+    """The CI for σ_g (key "D", σ_w fixed) or σ_w (key "S", σ_g fixed) from the χ² pivot on raw world variances, and
+    whether its upper end is informative. The pivot statistic falls as σ rises; when even σ = 0 leaves it at or below
+    the lower χ² quantile (the worlds vary less than the model predicts at σ = 0), no σ solves the upper end: it is
+    reported as max(estimate, prior) and flagged (module docstring)."""
+    prior = PRIOR_SIGMA_G if key == "D" else PRIOR_SIGMA_W
     df = sum(c["weight"] for c in cells)
 
     def q(sig: float) -> float:
@@ -111,9 +122,9 @@ def _pivot_bounds(cells: list[dict], key: str, fixed: float, est: float, level: 
             tot += c["weight"] * raw / max(expect, 1e-12)
         return tot
 
-    def solve(target: float) -> float:
+    def solve(target: float) -> float | None:
         if q(0.0) <= target:
-            return 0.0
+            return None  # no σ ≥ 0 reaches the target
         if q(SIGMA_MAX) >= target:
             return SIGMA_MAX
         lo, hi = 0.0, SIGMA_MAX
@@ -126,7 +137,11 @@ def _pivot_bounds(cells: list[dict], key: str, fixed: float, est: float, level: 
         return (lo + hi) / 2
 
     tail = (1 - level) / 2
-    return [min(est, solve(float(chi2.ppf(1 - tail, df)))), max(est, solve(float(chi2.ppf(tail, df))))]
+    lower, upper = solve(float(chi2.ppf(1 - tail, df))), solve(float(chi2.ppf(tail, df)))
+    lo = min(est, 0.0 if lower is None else lower)  # no solution at the lower end: σ = 0 is inside the interval
+    if upper is None:
+        return [lo, max(est, prior)], False
+    return [lo, max(est, upper)], True
 
 
 def realized_tokens(log_files, source: str = "push") -> dict[tuple[str, str], list[int]]:
@@ -182,9 +197,19 @@ def variance_components(tm: pd.DataFrame, a: str, b: str) -> dict:
     if not cells:
         return out | {"estimable": False, "sigma_w": None, "sigma_g": None, "ci80": None, "note": "no cell has 2 or more worlds"}
     sw, sg = _fit(cells, PRIOR_SIGMA_W, PRIOR_SIGMA_G)
-    ci = {"sigma_g": _pivot_bounds(cells, "D", sw, sg, CI_LEVEL), "sigma_w": _pivot_bounds(cells, "S", sg, sw, CI_LEVEL)}
+    (ci_g, inf_g), (ci_w, inf_w) = _pivot_bounds(cells, "D", sw, sg, CI_LEVEL), _pivot_bounds(cells, "S", sg, sw, CI_LEVEL)
+    ci, informative = {"sigma_g": ci_g, "sigma_w": ci_w}, {"sigma_g": inf_g, "sigma_w": inf_w}
     prob = {"sigma_w": math.sqrt(max(0.0, np.average([c["S"] for c in cells], weights=[c["weight"] for c in cells]))), "sigma_g": math.sqrt(max(0.0, np.average([c["D"] for c in cells], weights=[c["weight"] for c in cells]) / 2))}
-    return out | {"estimable": True, "sigma_w": sw, "sigma_g": sg, "ci80": ci, "probability_scale": prob, "df": int(sum(c["weight"] for c in cells)), "cells_used": [c["cell"] for c in cells]}
+    return out | {
+        "estimable": True,
+        "sigma_w": sw,
+        "sigma_g": sg,
+        "ci80": ci,
+        "ci80_upper_informative": informative,
+        "probability_scale": prob,
+        "df": int(sum(c["weight"] for c in cells)),
+        "cells_used": [c["cell"] for c in cells],
+    }
 
 
 @cache
@@ -217,48 +242,80 @@ def _cell_bases(vc: dict) -> float | list[float]:
 
 
 def power_report(vc: dict, sizes: tuple[int, ...], planned: int, tasks_per_world: int, epochs: int, n_sims: int, target: float = 0.8) -> dict:
-    """Power of an unqualified GO at each candidate size under three σ scenarios, and the recommendation.
+    """Power of an unqualified GO at each candidate size under four σ scenarios, and the two-sided recommendation.
 
     - `pilot`: the pilot's point estimates (the priors where not estimable);
     - `conservative`: the upper ends of the pilot's 80% σ intervals (the priors where not estimable);
+    - `optimistic`: the lower ends of those intervals (the priors where not estimable);
     - `prior`: power_sim's priors, for reference.
-    The recommendation keeps the planned size when it reaches `target` in the conservative scenario."""
+
+    `decision` at the planned size (D-026):
+    - `suffices`: the conservative power reaches `target` and both upper ends are informative;
+    - `insufficient`: even the optimistic power misses `target`;
+    - `ambiguous`: otherwise, and whenever σ is not estimable.
+    `recommended_worlds_per_cell` is the planned size, except when insufficient: then None, and the analyst adds test
+    worlds within budget or rethinks, with the powers at the larger `sizes` reported."""
     from .gate_stats import STAGE_ALPHA
 
     est_w, est_g, ci = vc.get("sigma_w"), vc.get("sigma_g"), vc.get("ci80") or {}
+    informative = vc.get("ci80_upper_informative") or {}
+    priors = (PRIOR_SIGMA_W, PRIOR_SIGMA_G)
     scenarios = {
         "pilot": (PRIOR_SIGMA_W if est_w is None else est_w, PRIOR_SIGMA_G if est_g is None else est_g),
-        "conservative": (ci["sigma_w"][1], ci["sigma_g"][1]) if ci else (PRIOR_SIGMA_W, PRIOR_SIGMA_G),
-        "prior": (PRIOR_SIGMA_W, PRIOR_SIGMA_G),
+        "conservative": (ci["sigma_w"][1], ci["sigma_g"][1]) if ci else priors,
+        "optimistic": (ci["sigma_w"][0], ci["sigma_g"][0]) if ci else priors,
+        "prior": priors,
     }
+    sizes = tuple(sorted(set(sizes) | {planned}))
     p_base = _cell_bases(vc)
     powers = {
         name: {"sigma_w": sw, "sigma_g": sg, "power": {n: ni_power(n, tasks_per_world, epochs, p_base, sw, sg, n_sims) for n in sizes}}
         for name, (sw, sg) in scenarios.items()
     }
-    cons = powers["conservative"]["power"]
-    basis = "the upper ends of the pilot's 80% σ intervals" if ci else "the priors (σ not estimable from the pilot)"
-    enough = [n for n in sizes if cons[n] >= target]
-    if cons.get(planned, 0.0) >= target:
-        rec, note = planned, f"the planned {planned} worlds per cell reach power {cons[planned]:.2f} >= {target} ({basis})"
-        if enough and min(enough) < planned:
-            note += f"; {min(enough)} would also reach it"
-    else:
-        rec = min(enough) if enough else None
-        note = f"the planned {planned} worlds per cell reach only power {cons.get(planned, float('nan')):.2f} ({basis})" + (
-            f"; {rec} reaches {target}" if rec else f"; no candidate size {list(sizes)} reaches {target}: the analyst decides"
+    cons, opt, point = (powers[k]["power"] for k in ("conservative", "optimistic", "pilot"))
+    upper_ok = bool(ci) and all(informative.get(k, True) for k in ("sigma_w", "sigma_g"))
+    larger = [n for n in sizes if n > planned]
+    if not ci:
+        decision = "ambiguous"
+        note = (
+            f"ambiguous: σ is not estimable from the pilot ({vc.get('note', 'too few worlds')}); under the priors the planned {planned} worlds "
+            f"per cell reach power {point[planned]:.2f}. Proceed with {planned} and rely on the pre-registered extension"
         )
+    elif opt[planned] < target:
+        decision = "insufficient"
+        note = (
+            f"insufficient: even at the lower ends of the pilot's 80% σ intervals the planned {planned} worlds per cell reach only power "
+            f"{opt[planned]:.2f} < {target} (point estimate {point[planned]:.2f}). Add test worlds within budget, or rethink"
+            + (": " + "; ".join(f"{n} worlds give {point[n]:.2f} at the point estimate and {cons[n]:.2f} at the upper ends" for n in larger) if larger else "")
+        )
+    elif upper_ok and cons[planned] >= target:
+        decision = "suffices"
+        note = f"suffices: the planned {planned} worlds per cell reach power {cons[planned]:.2f} >= {target} at the upper ends of the pilot's 80% σ intervals"
+        if smaller := [n for n in sizes if n < planned and cons[n] >= target]:
+            note += f"; {min(smaller)} would also reach it"
+    else:
+        decision = "ambiguous"
+        flagged = [k for k in ("sigma_w", "sigma_g") if not informative.get(k, True)]
+        why = (
+            f"the upper end of {' and '.join(flagged)} is not informative (the worlds varied less than the model predicts at σ = 0)"
+            if flagged
+            else f"power {opt[planned]:.2f} at the lower ends and {cons[planned]:.2f} at the upper ends of the 80% σ intervals"
+        )
+        note = f"ambiguous: {why}; point estimate {point[planned]:.2f}. Proceed with the planned {planned} worlds per cell and rely on the pre-registered extension"
     return {
         "reference": f"P(unqualified GO) at true Δ = 0: margin 5 pp, push and pull with Holm at one-sided α = {STAGE_ALPHA['stage1']} (the gate run, D-023), 4 cells, world-clustered t (power/power_sim.py simulate_ni_power)",
         "tasks_per_world": tasks_per_world,
         "epochs": epochs,
         "p_base": p_base,
         "n_sims": n_sims,
+        "target": target,
         "priors": {"sigma_w": PRIOR_SIGMA_W, "sigma_g": PRIOR_SIGMA_G, "sigma_u": SIGMA_U, "sigma_v": SIGMA_V},
         "sigma_ci80": ci or None,
+        "sigma_ci80_upper_informative": informative or None,
         "scenarios": powers,
         "planned_worlds_per_cell": planned,
-        "recommended_worlds_per_cell": rec,
+        "decision": decision,
+        "recommended_worlds_per_cell": None if decision == "insufficient" else planned,
         "recommendation": note,
     }
 

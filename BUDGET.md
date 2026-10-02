@@ -6,16 +6,18 @@
 
 | Study | Phases (conservative $) | Conservative | Expected | FX-5 target |
 |---|---|---|---|---|
-| Gate | smoke 3 · anchor 11 · builds 51 · tuning 8 · pilot 11 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **206** | 181 | ≤ 700 |
+| Gate | smoke 3 · anchor 11 · builds 57 · tuning 8 · pilot 13 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **214** | 188 | ≤ 700 |
 | Main study | builds 5 · micro-pilot 10 · tuning 31 · pilot 14 · A 118 · B 142 · C 25 · F 820 | **1,164** | 916 | ≤ 1,000 |
 | Study G | micro-pilot 11 · tuning 24 · capability anchor 51 · context management 1,737 · topology 1,556 | **3,378** | 2,130 | ≤ 2,700 |
-| **Total** | | **4,748** | **3,228** | ≤ 5,000 |
-| Contingency | $5,000 − conservative total | 252 | | ~600 |
+| **Total** | | **4,756** | **3,235** | ≤ 5,000 |
+| Contingency | $5,000 − conservative total | 244 | | ~600 |
 
-- **By tier** (conservative / expected): Sol-high 2,006 / 1,427 · Astra-high 1,955 / 1,222 · Luna-high 729 / 544 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3. The anchor grew $5 with D-025: answer contexts mapped to LightRAG 1.2.5's caps (26.5K tokens) and a second scorer's judge calls; its bge embeddings run locally ($0).
+- **By tier** (conservative / expected): Sol-high 2,006 / 1,427 · Astra-high 1,955 / 1,222 · Luna-high 737 / 551 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
+- **Pilot σ cell (D-026, 2026-10-02):** +$8 conservative. The pilot builds 8 worlds per cell (was 4; +$6.19) and runs APG* and LGR* on the 4 new ones (`gate.pilot.sigma`, +$2.17), so σ is estimated from 8 worlds per cell.
+- **PC1 fidelity (D-025, 2026-10-02):** the anchor grew about $5: answer contexts mapped to LightRAG 1.2.5's caps (26.5K tokens) and a second scorer's judge calls; its bge embeddings run locally ($0).
 - **The total fits.** Main study and Study G are over their FX-5 targets by $164 and $678. The gate's underspend covers part of that. The conservative scenario prices every cached token at the full input price, so expected spend is ≈ $3.2K. The orchestrator's budget check (FX-6) stops any phase whose projected cost exceeds what remains.
 - **Biggest drivers:** Study G on Astra ($1,955), Study G on Sol ($1,201), and Study F on Sol ($805).
-- **D-017's Sol build path** would add **$957**. That needs approval.
+- **D-017's Sol build path** would add **$1,074** (was $957; the 16 extra pilot worlds of D-026 are built by the same builder). That needs approval.
 - **F1/F2 measured (2026-10-01).** The registry generators (`worlds/gen_registry.py`) replaced the assumed F1/F2 sizes: corpus 3,337 tokens (was 2,000) and 20 chunks per world at every level (`readiness/measure_registry.py`). Main study +$50.
 - **Not yet priced: bulky F1/F2 tool results.** Each supplier record is ~400 tokens and stays in the history. The measured per-call history (F1-32: 1,258 tokens per prior call, against the 250 prior) is in `readiness/measure_registry.py`. Priced through `history_per_prior_call_by_cell` (commented out in `config/budget_assumptions.yaml`), it adds about $320, almost all of it Study F on Sol over F1-32, for a total of $5,062. That needs a decision; cut C5 (Study F Sol 100 → 60 tasks) would cover it.
 

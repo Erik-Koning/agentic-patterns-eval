@@ -91,5 +91,82 @@ def test_pilot_recommendation_uses_the_upper_sigma_bound_and_does_not_overstate_
         assert vc["ci80"]["sigma_g"][0] <= vc["sigma_g"] <= vc["ci80"]["sigma_g"][1]
         r = power_report(vc, (12, 16), 16, 12, 3, 400)
         assert r["scenarios"]["conservative"]["sigma_g"] == vc["ci80"]["sigma_g"][1]
-        says_16 += r["recommended_worlds_per_cell"] == 16
+        says_16 += r["decision"] == "suffices"
     assert says_16 == 0
+
+
+# --- D-026: the zero upper bound and the two-sided recommendation ---
+
+
+def _quiet_pilot(rng, worlds=4):
+    """A pilot whose worlds vary less than the model predicts even at σ = 0: every world's arms score alike, task by
+    task, so the between-world variance of the paired differences is below the task-sampling noise."""
+    import pandas as pd
+
+    one = _pilot(rng, 0.0, 0.0, worlds=1)  # one world's task outcomes, copied into every world
+    rows = [(c, f"{c}-w{w}", f"{c}-w{w}-t{t.rsplit('-t', 1)[1]}", r["APG*"], r["LGR*"]) for (c, _, t), r in one.iterrows() for w in range(worlds)]
+    df = pd.DataFrame(rows, columns=["cell", "world", "task", "APG*", "LGR*"])
+    return df.set_index(["cell", "world", "task"]).sort_index()
+
+
+def test_a_pivot_with_no_upper_solution_is_flagged_and_never_reported_as_zero():
+    """RELIABILITY_REVIEW follow-up (pilot-size simulation): in about 4% of 4-world pilots the χ² pivot's upper solve
+    returned 0, so the "conservative" σ_g was 0 and the recommendation optimistic. It now falls back to the prior and is
+    flagged, and the report cannot say "suffices" on it."""
+    from ape.analysis.pilot import PRIOR_SIGMA_G, PRIOR_SIGMA_W, power_report, variance_components
+
+    vc = variance_components(_quiet_pilot(np.random.default_rng(11)), "APG*", "LGR*")
+    assert vc["estimable"]
+    flags = vc["ci80_upper_informative"]
+    assert not all(flags.values()), (vc["ci80"], flags)
+    for key, prior in (("sigma_g", PRIOR_SIGMA_G), ("sigma_w", PRIOR_SIGMA_W)):
+        lo, hi = vc["ci80"][key]
+        assert hi > 0 and lo <= vc[key] <= hi
+        if not flags[key]:
+            assert hi == max(vc[key], prior)
+    r = power_report(vc, (12, 16), 16, 12, 3, 200)
+    assert r["decision"] != "suffices" and "not informative" in r["recommendation"]
+
+
+def _vc(ci_w=(0.4, 0.6), ci_g=(0.2, 0.4), informative=(True, True)):
+    """A hand-made variance-components record: power_report needs only these fields."""
+    return {
+        "arms": ["APG*", "LGR*"],
+        "success": {"APG*": 0.66, "LGR*": 0.66},
+        "cell_success": {c: {"APG*": b, "LGR*": b} for c, b in GATE_BASES.items()},
+        "estimable": True,
+        "sigma_w": sum(ci_w) / 2,
+        "sigma_g": sum(ci_g) / 2,
+        "ci80": {"sigma_w": list(ci_w), "sigma_g": list(ci_g)},
+        "ci80_upper_informative": {"sigma_w": informative[0], "sigma_g": informative[1]},
+    }
+
+
+def test_two_sided_recommendation_suffices_insufficient_and_ambiguous():
+    from ape.analysis.pilot import power_report
+
+    # σ_g bounded tightly and low: power at the upper ends ≥ 0.8 (16 worlds about 0.83 at σ_g 0.3).
+    r = power_report(_vc(ci_g=(0.0, 0.15)), (12, 16, 20, 24), 16, 12, 3, 600)
+    assert r["decision"] == "suffices" and r["recommended_worlds_per_cell"] == 16, r["recommendation"]
+    # σ_g high even at its lower end (power about 0.4 at 0.8): insufficient, with 20 and 24 reported, no recommendation.
+    r = power_report(_vc(ci_g=(1.0, 1.6)), (12, 16, 20, 24), 16, 12, 3, 600)
+    assert r["decision"] == "insufficient" and r["recommended_worlds_per_cell"] is None
+    assert "20 worlds give" in r["recommendation"] and "24 worlds give" in r["recommendation"]
+    # Wide interval straddling the target: ambiguous, proceed with the planned 16 and the extension.
+    r = power_report(_vc(ci_g=(0.0, 1.2)), (12, 16), 16, 12, 3, 600)
+    assert r["decision"] == "ambiguous" and r["recommended_worlds_per_cell"] == 16 and "extension" in r["recommendation"]
+    # An uninformative upper end never supports "suffices", however good the numbers look.
+    r = power_report(_vc(ci_g=(0.0, 0.15), informative=(True, False)), (12, 16), 16, 12, 3, 600)
+    assert r["decision"] == "ambiguous" and "not informative" in r["recommendation"]
+    # Not estimable: ambiguous on the priors.
+    r = power_report({"arms": ["APG*", "LGR*"], "success": {"APG*": 0.66, "LGR*": 0.66}, "estimable": False, "note": "no cell has 2 or more worlds"}, (12, 16), 16, 12, 3, 200)
+    assert r["decision"] == "ambiguous" and "not estimable" in r["recommendation"]
+
+
+def test_sigma_estimation_uses_every_world_it_is_given():
+    """D-026: the pilot pools the main pilot's 4 worlds and the σ cell's 4 more per cell."""
+    from ape.analysis.pilot import variance_components
+
+    tm = _pilot(np.random.default_rng(12), 0.5, 0.5, worlds=8)
+    vc = variance_components(tm, "APG*", "LGR*")
+    assert vc["worlds_per_cell"] == dict.fromkeys(GATE_BASES, 8) and vc["df"] == 4 * 7

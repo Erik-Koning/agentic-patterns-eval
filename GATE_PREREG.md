@@ -115,10 +115,14 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
     - **Estimating σ** (D-023; `ape.analysis.pilot.variance_components`). APG* against LGR* on the pilot, by moment matching each cell's between-world variances to the power model at the cell's own baseline. 80% intervals come from the χ² distribution of those variances.
       - It replaces the delta-method conversion, which ignored task heterogeneity and underestimated σ by about 40%.
       - In 300 simulated 4-world pilots, the new estimator recovered σ_g of 0.30 / 0.80 as 0.28 / 0.77 (the old one: 0.50 for 0.80), and σ_w of 1.0 as 0.99. Interval coverage was 0.73–0.82.
-    - **Recommendation.** It uses the **upper ends** of the 80% intervals (`conservative`), never max(prior, estimate).
-      - A 4-world pilot bounds σ_g only loosely. So under the prior σ the recommendation mostly reads "the analyst decides", with the point-estimate power alongside.
-      - At a true σ_g of 0.8 (true power 0.38 at 16 worlds) it never claims 16 worlds reach 0.8. The old rule did in 70% of pilots.
-    - Where σ cannot be estimated, the priors are used.
+      - **8 worlds per cell** (D-026). The pilot builds 8 worlds per cell. The main pilot cells use worlds 1–4; the σ cell (`gate.pilot.sigma`) runs APG* and LGR* (push, 1 epoch) on worlds 5–8, and σ is estimated from all 8. S7 targets and the matched-budget calibration still come from worlds 1–4.
+      - When the worlds vary less than the model predicts even at σ = 0, the interval has no upper end. It is then reported as max(estimate, prior), flagged as not informative, and can never support "suffices" (D-026).
+    - **Recommendation** (D-026). Two-sided, at the planned size, from the ends of the 80% intervals:
+      - **suffices**: the power at the upper ends reaches 0.8 (both upper ends informative);
+      - **insufficient**: even the power at the lower ends misses 0.8. Add test worlds within the budget, or rethink; `power.json` reports 20 and 24 worlds;
+      - **ambiguous**: otherwise, or σ not estimable. Proceed with the planned 16 and rely on the pre-registered extension (§8).
+      - In 300 simulated pilots per scenario, at a true power of about 0.4 (σ_g = 0.8), 8 worlds called "insufficient" 75–83% of the time and "suffices" never (4 worlds: 55–61% and 2–4%). At a true power of about 0.85, they said "suffices" 11–12%, "insufficient" 11–12% (the 80% intervals' expected misfires near the threshold) and "ambiguous" otherwise.
+    - Where σ cannot be estimated, the priors are used, and the recommendation is "ambiguous".
 - **Models** (D-015; exact IDs confirmed at E3):
   - agent: GPT-6 Luna, effort high
   - kg (APG classify and LightRAG keywords): GPT-6 Luna, effort low
