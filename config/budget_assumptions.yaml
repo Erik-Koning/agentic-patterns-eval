@@ -118,8 +118,13 @@ anchor_calls:
 #   full    (no management, grows until W): 0.6 W
 #   managed (compaction/pruning/reset hold it below the threshold): 0.4 W
 #   oracle  (O-state: system + task + rendered state + current item): absolute tokens
+# [measured offline] gen_f8 reference trajectory (the fewest possible calls, no reasoning or text; 10 seeds each,
+# default knobs, tool files ~1.1K tokens): 2.25-2.3 generations per item; CM0 mean view before W 8.6K (N=10),
+# 13.4K (N=20), 16.5K (N=24), 17.4K (N=40, ~0.54 W); W crossed at items 25-33 for N=40, never for N <= 24;
+# O-state mean view 3.1K-3.7K (N=10-40). These are lower bounds for a real agent, so the [given] priors below
+# stay until the micro-pilot calibrates them (`python -m ape.budget calibrate`).
 study_g:
-  calls_per_item: 6                       # [given] F8
+  calls_per_item: 6                       # [given] F8 (reference minimum 2.25: see above)
   view: {full: 0.6, managed: 0.4, oracle_tokens: 4000}
   probe_checkpoints: [5, 15, 30, 45, 60]  # forked state probes after items <= N (audit §5.3): one call each on
                                           # the current view, at the agent's model and effort

@@ -38,7 +38,7 @@ ENV_PATH = ROOT / ".env"
 COST_FIELDS = tuple(ModelCost.model_fields)  # input, output, input_cache_write, input_cache_read
 DEFAULT_PROFILE = "gate"
 Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-INSPECT_ROLES = ("agent", "kg", "judge")
+INSPECT_ROLES = ("agent", "kg", "judge", "probe")  # probe: optional (Study G F8 state probes; unset = the agent's model)
 REQUIRED_ROLES = ("agent", "kg", "build", "embeddings")
 ROLES = (*INSPECT_ROLES, "build", "build_fallback", "embeddings")
 _FIELDS = {"model", "reasoning_effort", "max_tokens", "temperature", "top_p", "seed"}
