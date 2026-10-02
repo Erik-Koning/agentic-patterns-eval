@@ -20,14 +20,32 @@ Checks, in run order (`STEPS`; pass criteria in `smoke_checks.py`):
     L4_L5         LGR-s on F7-100: one keyword call per compile (L4); realized context <= max_total_tokens with
                   the median in the expected band (L5) (needs L2)
     APG           APG-s on F7-100 with the authored graph (needs D017)
+    perstep_reasoning
+                  S3s, a per-step arm, at the profile's effort on 2 F7-10 tasks (RELIABILITY_REVIEW L2, live): every
+                  call after a tool step carries the step's knowledge on the last tool result, with no user message
+                  after the model's turn, so OpenAI keeps the earlier reasoning (judged). The reasoning items that
+                  reach each call (Inspect's own Responses-API conversion of the logged input) and the reasoning
+                  tokens per call are reported, not judged
     pull          pull delivery: S3s and APG-s on F7-100, 4 tasks; search_kb in >= 75% of samples, no errors
                   (needs D017)
     recovery      a harness-side fault on a sample's first attempt (smoke-only solver wrapper) is retried by
                   the FX-3 runner and recorded
     burst         24 samples at the profile's max_connections: failed samples, retries, rate-limit signals,
                   latency distribution, and a recommended max_connections
+    f8_session    one F8 session of N=5 cases per session arm (CM0, O-state) through the real Study G task
+                  (RELIABILITY_REVIEW L12): no sample error, a per-item record with view tokens for every case,
+                  the report submitted (or its nudge fired), a forked probe at k=5 with schema-valid JSON that
+                  never enters the history; reasoning-only assistant turns are counted and must not end a session
     retrieval     no LLM: S3s evidence recall at its budget and APG's embedding-shortlist gold rate on F7-100
-                  (warn below 0.8; the authored graph when D017 built it, else the oracle graph)
+                  (warn below 0.8; the authored graph when D017 built it, else the oracle graph), plus LightRAG's
+                  context recall with the query as its keywords when L2 built the index (reported only). Facts
+                  are credited by the arms' delivered-text rule (`ape.kb.provenance`), never by source chunks
+    extract_f7_1000
+                  the real builder on ONE F7-1000 dev world (the gate's hard cell) through `ape.artifacts`: APG
+                  authoring and LightRAG extraction, then D-017's coverage (`ape.build_quality`), build health
+                  (lost chunks), APG retries/repairs (authoring calls beyond one per chunk), wall-clock, and the
+                  ledger's calls and $ per system. Warns, never fails, on low coverage (the Sol fallback needs
+                  approval); the decisive D-017 check is run_gate build-dev's
     orchestrator  the real gate orchestrator at SMOKE_SCALE (`python -m ape.run_gate --smoke`): preflight,
                   build-dev, tune, anchor and pilot on F7-10 and F3-5 (1 world, 2 tasks, 2 candidates per
                   system, anchor 2 questions per type), then the freeze must refuse (a smoke run never freezes,
@@ -37,10 +55,14 @@ Cost. Before any spend the script prints each selected check's projected cost (c
 `ape.budget`'s priors and config/model_costs.yaml) and refuses to start if the total exceeds --max-usd
 (default $3). Before each check it stops if spend so far plus that check's projection would exceed the cap;
 the orchestrator also runs under run_gate's own budget guard with what is left. The gate profile's
-projection (GPT-6 Luna, high; 2026-10-01 priors): L2 $0.10, D017 $0.04, H4 $0.01, L4_L5 $0.01, APG $0.01,
-pull $0.05, recovery $0.01, burst $0.10, orchestrator $1.06 (of which $0.47 is the GraphRAG-Bench anchor index,
-built with gpt-4o-mini; $0.93 in all with the Luna fallback), total ≈ $1.38. The effort check reads the probe,
-which costs ≈ $0.02 on its own. `--dry` spends $0. Spend is this invocation's: Inspect-metered calls, plus the
+projection (GPT-6 Luna, high; 2026-10-02 priors): L2 $0.10, D017 $0.04, H4 $0.01, L4_L5 $0.01, APG $0.01,
+perstep_reasoning $0.01, pull $0.05, recovery $0.01, burst $0.10, f8_session $0.12 (two N=5 sessions priced as
+Study G sessions: full-history views at the window's share, so conservative), extract_f7_1000 $1.34 (one F7-1000
+world, 547 chunks, both systems), orchestrator $1.06 (of which $0.47 is the GraphRAG-Bench anchor index, built
+with gpt-4o-mini; $0.93 in all with the Luna fallback), total ≈ $2.85 under the $3 default cap. The headroom is
+thin: a run whose early checks spend near their projections can be stopped before the orchestrator; pass
+`--max-usd 4`, or run `--skip extract_f7_1000` and that check alone. The effort check reads the probe, which
+costs ≈ $0.02 on its own. `--dry` spends $0. Spend is this invocation's: Inspect-metered calls, plus the
 growth of the build/embedding ledger and of the orchestrator run. A live smoke's log dirs and ledger also
 register in the program spend registry (`ape.spend`, label `smoke`), so they count toward the program's
 $5,000 in run_gate's guard and in `python -m ape.budget spend`.
@@ -73,10 +95,12 @@ OUT = ROOT / "cache" / "smoke"
 PROBE_PATH = ROOT / "cache" / "openai_probe.json"  # readiness/probe_openai.py's report (effort, burst's TPM header)
 SPEC_THRESHOLD = bq.THRESHOLD  # D-017
 F7_TASKS = 20  # the F7-100 world's tasks: enough for the retrieval rates; runs take the first n (Inspect `limit`)
-RUN_TASKS = {"H4": 2, "L4_L5": 2, "APG": 2, "pull": 4, "recovery": 1}
+RUN_TASKS = {"H4": 2, "L4_L5": 2, "APG": 2, "perstep_reasoning": 2, "pull": 4, "recovery": 1}
 BURST = {"tasks": 12, "epochs": 2}  # 24 samples
+F8 = {"N": 5, "arms": ("CM0", "O-state"), "message_limit": 400}  # one short session per arm; the probe at k = N
+F7_1000_TASKS = 2  # the extraction check builds one F7-1000 dev world; its tasks are not run
 DEFAULT_MAX_USD = 3.0
-# name -> (checks it needs, what it checks)
+# name -> (checks it needs, what it checks), in run order: the costly extraction runs late, the orchestrator last.
 STEPS: dict[str, tuple[tuple[str, ...], str]] = {
     "effort": ((), "per role and call path: config accepted, effort honoured (from the probe)"),
     "L2": ((), "LightRAG extraction and source mapping on F7-100"),
@@ -84,12 +108,17 @@ STEPS: dict[str, tuple[tuple[str, ...], str]] = {
     "H4": ((), "S3s on F3-60: changing tool sets accepted"),
     "L4_L5": (("L2",), "LGR-s on F7-100: one keyword call per compile; realized context vs max_total_tokens"),
     "APG": (("D017",), "APG-s on F7-100"),
+    "perstep_reasoning": ((), "S3s (per step) on F7-10: knowledge rides on the last tool result; reasoning carried"),
     "pull": (("D017",), "pull mode: S3s and APG-s on F7-100"),
     "recovery": ((), "a first-attempt harness fault is retried and recorded"),
     "burst": ((), "24 samples at the profile's max_connections"),
+    "f8_session": ((), "one F8 session (N=5) per arm, CM0 and O-state, with a forked probe"),
     "retrieval": ((), "real-embedding retrieval, no LLM"),
+    "extract_f7_1000": ((), "the real builder on one F7-1000 world: APG authoring and LightRAG extraction"),
     "orchestrator": ((), "run_gate preflight..pilot at SMOKE_SCALE; freeze refuses"),
 }
+# The checks that run on the shared F7-100 / F3 worlds (built once, up front); the others build their own.
+SHARED_WORLD_STEPS = {"L2", "D017", "H4", "L4_L5", "APG", "pull", "recovery", "burst", "retrieval"}
 
 
 def _isolate(dry: bool) -> None:
@@ -191,9 +220,13 @@ def step_cells(profile: str) -> dict[str, list]:
         "H4": [agent("H4", ["S3s"], "F3-60", RUN_TASKS["H4"])],
         "L4_L5": [agent("L4_L5", ["LGR-s"], "F7-100", RUN_TASKS["L4_L5"])],
         "APG": [agent("APG", ["APG-s"], "F7-100", RUN_TASKS["APG"])],
+        "perstep_reasoning": [agent("perstep_reasoning", ["S3s"], "F7-10", RUN_TASKS["perstep_reasoning"])],
         "pull": [agent("pull", ["S3s", "APG-s"], "F7-100", RUN_TASKS["pull"], deliveries=["pull"])],
         "recovery": [agent("recovery", ["S3s"], "F3-5", RUN_TASKS["recovery"])],
         "burst": [agent("burst", ["S3s"], "F7-100", BURST["tasks"], epochs=BURST["epochs"])],
+        # Study G's session pricing: full-history views at the window's share, probes at the agent's prices.
+        "f8_session": [_cell("f8_session", profile, kind="session", arms=list(F8["arms"]), N=F8["N"], sessions=1, epochs=1)],
+        "extract_f7_1000": [_cell("extract_f7_1000", profile, kind="build", systems=["apg", "lightrag"], worlds={"F7-1000": 1})],
     }
 
 
@@ -332,15 +365,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # 3. Worlds: F7-100 (relational, descriptive) with F7_TASKS tasks; F3-60 (H4) and F3-5 (recovery) with 2 each.
     #    Chunk embeddings are cached here, so the runs only read them.
-    needs_worlds = set(steps) - {"effort", "orchestrator"}
     f7 = f3 = None
-    if needs_worlds:
+    if set(steps) & SHARED_WORLD_STEPS:
         f7 = World.load(cfg.world_path(asyncio.run(build("dev", "F7", ["100"], n_worlds=1, n_tasks=F7_TASKS, relational=True, embed=True))[0]))
         f3 = World.load(cfg.world_path(asyncio.run(build("dev", "F3", ["5", "60"], n_worlds=1, n_tasks=2, relational=True, embed=True))[0]))
 
-    def run_gate_check(name: str, task_or_tasks, **kw):
-        """One check's eval set through the FX-3 runner, in its own fresh log dir; the full logs."""
-        _, headers = run_evals(task_or_tasks, log_root / name, profile=profile, model=agent, model_roles=roles, display="none", message_limit=40, **kw)
+    def run_gate_check(name: str, task_or_tasks, *, model=None, message_limit: int = 40, **kw):
+        """One check's eval set through the FX-3 runner, in its own fresh log dir; the full logs. `model` swaps the
+        agent (the F8 session's dry run needs the session mock); `message_limit` caps a sample's messages."""
+        _, headers = run_evals(task_or_tasks, log_root / name, profile=profile, model=model or agent, model_roles=roles, display="none", message_limit=message_limit, **kw)
         logs = [read_eval_log(h.location) for h in headers]
         spend.logs += logs
         return logs
@@ -505,6 +538,71 @@ def check_apg(c: dict) -> tuple[dict, list]:
     return sc.result(status, {"samples": len(rows), "compiles": sum(r["compiles"] for r in rows), "kg_calls": sum(r["kg_calls"] for r in rows), "ctx_tokens": [t for r in rows for t in r["ctx_tokens"]][:8], "success": [r["success"] for r in rows]}, reason=reason), logs
 
 
+def _resolved(logs: list) -> list:
+    """The logs re-read with attachments resolved: Inspect stores long message texts in event inputs as
+    `attachment://` references, which the structural checks must read in full."""
+    from inspect_ai.log import read_eval_log
+
+    return [read_eval_log(lg.location, resolve_attachments=True) for lg in logs]
+
+
+def _perstep_calls(sample, kb_header: str) -> list[dict]:
+    """Per agent call of a per-step sample: did the step's knowledge ride on the last tool result with no user
+    message after the model's last turn (RELIABILITY_REVIEW L2), and what reasoning reached the call.
+
+    A call "follows a tool step" when its input, without a trailing knowledge-only user message (the placement
+    the fix replaced), ends with a tool result; a call after a nudge or at turn 0 does not. Carried reasoning is
+    counted on Inspect's own Responses-API conversion of the logged input: reasoning items after the last user
+    message are the ones OpenAI keeps."""
+    from inspect_ai.model import ChatMessageAssistant, ChatMessageTool, ChatMessageUser, ContentReasoning
+    from inspect_ai.model._openai_responses import openai_responses_inputs
+
+    out = []
+    agent_calls = [e for e in sample.events if e.event == "model" and getattr(e, "role", None) in (None, "agent")]
+    for turn, e in enumerate(agent_calls):
+        msgs = list(e.input or [])
+        base = msgs[:-1] if msgs and isinstance(msgs[-1], ChatMessageUser) and (msgs[-1].text or "").startswith(kb_header) else msgs
+        last_assistant = max((i for i, m in enumerate(msgs) if isinstance(m, ChatMessageAssistant)), default=None)
+        rec = {
+            "sample": sample.id,
+            "turn": turn,
+            "after_tool_step": bool(base) and isinstance(base[-1], ChatMessageTool),
+            "kb_in_last_tool": bool(msgs) and isinstance(msgs[-1], ChatMessageTool) and kb_header in (msgs[-1].text or ""),
+            "user_after_assistant": last_assistant is not None and any(isinstance(m, ChatMessageUser) for m in msgs[last_assistant + 1 :]),
+            "reasoning_in_input": sum(1 for m in msgs if isinstance(m, ChatMessageAssistant) and isinstance(m.content, list) for part in m.content if isinstance(part, ContentReasoning)),
+            "reasoning_items": None,
+            "reasoning_after_last_user": None,
+            "reasoning_tokens": getattr(getattr(getattr(e, "output", None), "usage", None), "reasoning_tokens", None),
+            "error": e.error,
+        }
+        try:
+            items = asyncio.run(openai_responses_inputs(msgs))
+            last_user = max((i for i, it in enumerate(items) if it.get("type") == "message" and it.get("role") == "user"), default=-1)
+            rec["reasoning_items"] = sum(1 for it in items if it.get("type") == "reasoning")
+            rec["reasoning_after_last_user"] = sum(1 for i, it in enumerate(items) if it.get("type") == "reasoning" and i > last_user)
+        except Exception as ex:  # noqa: BLE001  (the conversion is Inspect-internal: report what it says, never fail on it)
+            rec["conversion_error"] = f"{type(ex).__name__}: {ex}"[:160]
+        out.append(rec)
+    return out
+
+
+def check_perstep_reasoning(c: dict) -> tuple[dict, list]:
+    """S3s (a per-step arm) at the profile's effort on 2 F7-10 tasks: every call after a tool step carries the step's
+    knowledge on the last tool result with no user message after the model's turn, so OpenAI keeps the earlier
+    reasoning (the structure is judged); the reasoning items and tokens that reach each call are reported."""
+    from ape.agent.kb_react import STEP_KB_HEADER
+    from ape.build import build
+    from ape.tasks.gate import gate
+
+    n = RUN_TASKS["perstep_reasoning"]
+    asyncio.run(build("dev", "F7", ["10"], n_worlds=1, n_tasks=n, relational=True, embed=True))
+    logs = _resolved(c["run_gate_check"]("perstep_S3s_F7_10", gate(family="F7", level="10", split="dev", arm="S3s"), limit=n))
+    res = sc.perstep_verdict([rec for lg in logs for s in (lg.samples or []) for rec in _perstep_calls(s, STEP_KB_HEADER)])
+    if bad := [f"{lg.eval.task_args.get('arm')}: {lg.status}" for lg in logs if lg.status != "success"]:
+        res = sc.result(sc.FAIL, res["measured"], reason="; ".join(filter(None, [res.get("reason"), *bad])))
+    return res, logs
+
+
 def check_pull(c: dict) -> tuple[dict, list]:
     from ape.tasks.gate import gate
 
@@ -546,17 +644,173 @@ def check_burst(c: dict) -> tuple[dict, list]:
     return res, logs
 
 
+def _session_record(log, sample, categories) -> dict:
+    """What the F8 session verdict needs from one session's log (`sc.f8_session_verdict`)."""
+    from inspect_ai.model import ChatMessageAssistant, ContentReasoning
+
+    from ape.agent.session import PROBE_PROMPT, REPORT_NUDGE
+    from ape.worlds.env_f8 import ITEMS, PROBES, REPORT, VIEWS
+
+    msgs = list(sample.messages or [])
+    report = sample.store.get(REPORT)
+
+    def reasoning_only(m) -> bool:
+        return (
+            isinstance(m, ChatMessageAssistant)
+            and not m.tool_calls
+            and not (m.text or "").strip()
+            and isinstance(m.content, list)
+            and any(isinstance(p, ContentReasoning) for p in m.content)
+        )
+
+    idx = [i for i, m in enumerate(msgs) if reasoning_only(m)]
+    last_assistant = max((i for i, m in enumerate(msgs) if isinstance(m, ChatMessageAssistant)), default=-1)
+    score = next(iter(sample.scores.values())).value if sample.scores else {}
+    return {
+        "log_status": log.status,
+        "sample_error": sample.error.message if sample.error else None,
+        "n_cases": int(sample.metadata.get("N") or 0),
+        "items": sample.store.get(ITEMS, []),
+        "views": sample.store.get(VIEWS, []),
+        "probes": sample.store.get(PROBES, []),
+        "report_submitted": report is not None,
+        "report_nudged": any(m.role == "user" and (m.text or "").strip() == REPORT_NUDGE for m in msgs),
+        "probe_in_history": any(PROBE_PROMPT in (m.text or "") for m in msgs),
+        "reasoning_only_turns": len(idx),
+        # A reasoning-only turn that is the session's last word, with no report: it ended the session.
+        "reasoning_only_unanswered": bool(idx) and idx[-1] == last_assistant and report is None,
+        "scores": score if isinstance(score, dict) else {},
+    }
+
+
+def check_f8_session(c: dict) -> tuple[dict, list]:
+    """One F8 session of N=5 cases per session arm (CM0, O-state) through the real Study G task, with a forked
+    probe after the last case (RELIABILITY_REVIEW L12): the session loop, the probe's strict schema, the report
+    and the per-item records on the live API."""
+    from ape.build import build
+    from ape.tasks.study_g import f8_session
+    from ape.worlds import gen_f8
+
+    asyncio.run(build("dev", "F8", [str(F8["N"])], n_worlds=1, n_tasks=0, relational=True, embed=True))
+    model = None
+    if c["args"].dry:  # the session needs its own scripted agent (cases, report and probes), not the gate's
+        from ape.llm.mock_session import mock_session_agent
+        from ape.models import agent_model
+
+        model = agent_model(c["profile"], model="mockllm/model", custom_outputs=mock_session_agent)
+    tasks = [f8_session(level=str(F8["N"]), split="dev", arm=arm, limit_worlds=1, checkpoints=str(F8["N"])) for arm in F8["arms"]]
+    logs = _resolved(c["run_gate_check"]("f8_session", tasks, model=model, message_limit=F8["message_limit"]))
+    arms = {lg.eval.task_args.get("arm"): _session_record(lg, s, gen_f8.PROBE_CATEGORIES) for lg in logs for s in (lg.samples or [])[:1]}
+    for lg in logs:  # a task that produced no sample still counts
+        arms.setdefault(lg.eval.task_args.get("arm"), {"log_status": lg.status, "sample_error": "no sample", "n_cases": F8["N"]})
+    return sc.f8_session_verdict(arms, gen_f8.PROBE_CATEGORIES), logs
+
+
+def check_extract_f7_1000(c: dict) -> tuple[dict, list]:
+    """The real builder on one F7-1000 dev world (the gate's hard cell): APG authoring and LightRAG extraction through
+    `ape.artifacts`, then D-017's coverage (`ape.build_quality`) and build health (lost chunks), wall-clock and the
+    ledger's calls and cost per system. Warns, never fails, on low coverage: the decisive check is build-dev's."""
+    from ape.analysis.cost import load_prices, price_entry
+    from ape.artifacts import build_world
+    from ape.build import build
+    from ape.llm.ledger import Ledger
+    from ape.worlds.render import chunk_world
+    from ape.worlds.spec import World
+
+    cfg, dry = c["cfg"], c["args"].dry
+    kind = "oracle" if dry else "extract"
+    world_id = asyncio.run(build("dev", "F7", ["1000"], n_worlds=1, n_tasks=F7_1000_TASKS, relational=True, embed=False))[0]
+    path = cfg.world_path(world_id)
+    world = World.load(path)
+    t0 = time.time()
+    built = build_world(str(path), ["chunks", "apg", "lightrag"], lightrag_kind=kind, fake_author=dry)
+    seconds = round(time.time() - t0, 1)
+    row = bq.world_quality(world, cfg, kind)
+    health = bq.build_health([world], cfg, kind, offline=dry)
+    wh = health["worlds"][0] if health["worlds"] else {}
+    prices = load_prices()
+    per_system: dict[str, dict] = {}
+    for e in Ledger(cfg.ledger_path).read():  # this world's build and embedding calls, by system
+        if e.context.get("world") != world.id:
+            continue
+        s = per_system.setdefault(str(e.context.get("system") or "?"), {"calls": 0, "embed_calls": 0, "usd": 0.0})
+        s["calls" if e.kind == "chat" else "embed_calls"] += 1
+        try:
+            s["usd"] = round(s["usd"] + price_entry(e, prices), 6)
+        except KeyError:  # an unpriced model: the spend guard refuses it; here it is reported, not summed
+            s["unpriced"] = e.model
+    chunks = len(chunk_world(world))
+    apg_calls = (per_system.get("apg-author") or {}).get("calls")
+    quality = {
+        "world": world.id,
+        "kind": kind,
+        "offline": dry,
+        "chunks": chunks,
+        "kinds": built.kinds,
+        "seconds": seconds,
+        "apg_id_coverage": (row.get("apg") or {}).get("coverage"),
+        "apg_fact_coverage": (wh.get("apg") or {}).get("fact_coverage"),
+        "apg_lost_chunks": len((wh.get("apg") or {}).get("lost_chunks") or {}),
+        "apg_chunks_without_units": (wh.get("apg") or {}).get("chunks_without_units"),
+        # One authoring call per chunk when every reply is usable: the excess is retries and repairs.
+        "apg_extra_attempts": max(0, apg_calls - chunks) if apg_calls is not None else None,
+        "lightrag_id_coverage": (row.get("lightrag") or {}).get("coverage"),
+        "lightrag_extraction": ((wh.get("lightrag") or {}).get("extraction")),
+        "ledger": per_system,
+        "verdict": bq.aggregate([row], expected_cells=[row["cell"]])["verdict"],
+        "note": bq.OFFLINE_NOTE if dry else "one F7-1000 dev world, the gate's hard cell; the decisive D-017 check is run_gate build-dev's",
+    }
+    return sc.extraction_verdict(dict(built.errors), quality, health["warnings"], bq.THRESHOLD), []
+
+
 def check_retrieval(c: dict) -> tuple[dict, list]:
     return asyncio.run(_retrieval(c["f7"], c["cfg"], c["args"].dry)), []
 
 
+def node_facts(matcher, node: dict) -> set[str]:
+    """The facts an APG node's knowledge carries, by the arms' delivered-text rule (`ape.apg.arm.ApgArm._facts_of`):
+    the matcher over the knowledge slot's text; an oracle node without text falls back to its factIds."""
+    text = ((node.get("prompt") or {}).get("slots") or {}).get("knowledge") or ""
+    return set(matcher.delivered(text)) if text.strip() else set((node.get("props") or {}).get("factIds") or [])
+
+
+async def _lightrag_recall(world, cfg, dry: bool, matcher) -> tuple[list[float] | None, str]:
+    """LightRAG's context for each task with the query itself as its keywords (no kg call; the live arm extracts
+    keywords first), credited by the delivered-text rule. Needs L2's index; reported only."""
+    from lightrag import QueryParam
+
+    from ape.config import embedding_cache
+    from ape.kb.provenance import evidence_pr
+    from ape.lgr.adapter import query_params
+    from ape.lgr.common import MANIFEST, index_dir, open_rag
+
+    kind = "oracle" if dry else "extract"
+    wd = index_dir(cfg, world.id, kind)
+    if not (wd / MANIFEST).is_file():
+        return None, f"no {kind} index (run L2): LightRAG not measured"
+
+    async def no_llm(*_args, **_kwargs) -> str:  # keywords are given, so LightRAG must never call a model here
+        raise RuntimeError("the retrieval check calls no model")
+
+    rag = await open_rag(wd, world.id, no_llm, embedding_cache(cfg), query_time=True)
+    params = query_params(cfg.lgr_budget_tokens)
+    recalls = []
+    for t in world.tasks:
+        text = await rag.aquery(t.prompt, QueryParam(**params, only_need_context=True, hl_keywords=[], ll_keywords=[t.prompt]))
+        recalls.append(evidence_pr(matcher.delivered(str(text or "")), t.gold_fact_ids)[1])
+    return recalls, f"{kind} index, mode {params['mode']}, the query as keywords (no kg call)"
+
+
 async def _retrieval(world, cfg, dry: bool) -> dict:
+    """No LLM: S3s evidence recall at its budget, APG's embedding-shortlist gold rate, and LightRAG's context
+    recall with the query as keywords. Facts are credited by the delivered-text rule (`ape.kb.provenance`), as
+    the arms credit them: an APG node is "gold" when its knowledge text carries a gold fact."""
     from apg_core import load_graph, route
 
     from ape.apg.arm import ensure_graph, graph_path, tuned
     from ape.config import embedding_cache
     from ape.kb.baselines import FlatHybrid
-    from ape.kb.provenance import ChunkIndex, evidence_pr
+    from ape.kb.provenance import evidence_pr, fact_matcher
     from ape.llm.embeddings import CachedEmbeddingsConnector
     from ape.worlds.render import chunk_world
 
@@ -565,24 +819,24 @@ async def _retrieval(world, cfg, dry: bool) -> dict:
             return []
 
     emb = embedding_cache(cfg)
-    chunks = chunk_world(world)
-    s3s = FlatHybrid(chunks, emb, cfg.s3s_budget_tokens)
+    matcher = fact_matcher(world)
+    s3s = FlatHybrid(chunk_world(world), emb, cfg.s3s_budget_tokens)
     kind = "authored" if graph_path(cfg, world.id, "authored").is_file() else "oracle"
     graph = load_graph(tuned(await ensure_graph(world, kind, cfg, emb)))
-    index = ChunkIndex(chunks)
-    node_facts = {}
-    for n in graph.dfs():
-        props = n.get("props") or {}
-        node_facts[n["id"]] = set(props.get("factIds") or index.facts(props.get("sourceChunkIds") or []))
+    facts_by_node = {n["id"]: node_facts(matcher, n) for n in graph.dfs()}
     recalls, hits = [], []
     for t in world.tasks:
         recalls.append(evidence_pr((await s3s.compile(t.prompt, t)).fact_ids, t.gold_fact_ids)[1])
         await emb.embed([t.prompt])
         routed = route(t.prompt, graph, {"embeddings": CachedEmbeddingsConnector(emb), "llm": NoClassify()})
-        gold = {nid for nid, facts in node_facts.items() if facts & set(t.gold_fact_ids)}
+        gold = {nid for nid, facts in facts_by_node.items() if facts & set(t.gold_fact_ids)}
         hits.append(bool(gold & set(routed["shortlist"])))
-    res = sc.retrieval_verdict(recalls, hits, graph=kind, dry=dry)
-    res["measured"]["s3s_budget_tokens"] = cfg.s3s_budget_tokens
+    try:
+        lgr, lgr_note = await _lightrag_recall(world, cfg, dry, matcher)
+    except Exception as e:  # noqa: BLE001  (reported, never judged)
+        lgr, lgr_note = None, f"LightRAG not measured: {type(e).__name__}: {str(e)[:160]}"
+    res = sc.retrieval_verdict(recalls, hits, graph=kind, dry=dry, lightrag_recall=lgr, lightrag_note=lgr_note)
+    res["measured"] |= {"s3s_budget_tokens": cfg.s3s_budget_tokens, "provenance": "delivered-text rule (ape.kb.provenance), as the arms"}
     return res
 
 
@@ -644,10 +898,13 @@ STEP_FUNCS: dict[str, Callable[[dict], tuple[dict, list]]] = {
     "H4": check_h4,
     "L4_L5": check_l4_l5,
     "APG": check_apg,
+    "perstep_reasoning": check_perstep_reasoning,
     "pull": check_pull,
     "recovery": check_recovery,
     "burst": check_burst,
+    "f8_session": check_f8_session,
     "retrieval": check_retrieval,
+    "extract_f7_1000": check_extract_f7_1000,
     "orchestrator": check_orchestrator,
 }
 assert tuple(STEP_FUNCS) == tuple(STEPS)
