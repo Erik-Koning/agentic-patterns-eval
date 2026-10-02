@@ -1,7 +1,8 @@
 """JSONL ledger for model calls made outside Inspect (index builds, authoring, embeddings).
 
 Inspect meters calls made inside a sample; build-time calls happen offline, so
-they are appended here and priced later from the same price table.
+they are appended here and priced later from the same price table. Every ledger file
+registers itself in the program-wide spend registry (`ape.spend`) on its first append.
 """
 
 import json
@@ -10,6 +11,8 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from ..spend import register_ledger
 
 
 @dataclass
@@ -38,6 +41,8 @@ class Ledger:
         # bytes in a single step, so lines from different processes never interleave. (Buffered text
         # mode may split a line over several write()s; an unbuffered write leaves nothing to flush.)
         # Entries are a few hundred bytes, well under the 4 KB that stays whole on any filesystem.
+        # The program-wide spend registry learns of this file before its first entry (once per process).
+        register_ledger(self.path)
         data = (json.dumps(asdict(entry), sort_keys=True) + "\n").encode()
         with self._lock:
             fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)

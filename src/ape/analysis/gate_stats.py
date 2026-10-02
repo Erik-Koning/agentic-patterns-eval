@@ -34,7 +34,8 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
     (offline dry runs only).
 
     Besides the outcome columns, each row carries what the decision report (FX-7) needs: the turn cap and
-    whether it was hit (PC5), the arm's configured context budget from the task's recorded knobs and the
+    whether it was hit, plus any Inspect sample limit that fired (`limit_hit`, e.g. "cost" from the runner's
+    per-sample guard), both counted by PC5's `cap_hit`; the arm's configured context budget from the task's recorded knobs and the
     realized tokens and latency of every compile (PC4, latency), and `pipeline_miss`, where a failed
     sample lost the gold knowledge (§8 NO-GO diagnosis; `pipeline_miss`).
     """
@@ -88,8 +89,11 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
                     "budget": configured_budget(arm, knobs, cell),
                     "turns_used": turns,
                     "max_turns": max_turns,
-                    # PC5: the agent ran out of turns without answering (GATE_PREREG §7).
-                    "cap_hit": s.error is None and turns is not None and turns >= max_turns and not answered,
+                    # An Inspect sample limit fired (cost: the runner's per-sample runaway guard; or token, time,
+                    # message): the sample ended early and is scored as it stood.
+                    "limit_hit": s.limit.type if s.limit is not None else None,
+                    # PC5: the agent ran out of turns without answering, or a sample limit cut it short (GATE_PREREG §7).
+                    "cap_hit": s.error is None and ((turns is not None and turns >= max_turns and not answered) or s.limit is not None),
                     "pipeline_miss": None if success or s.error else pipeline_miss(compiles, store.get("step_log", []), md.get("task") or {}),
                     "cost_usd": sum((u.total_cost or 0.0) for u in (s.model_usage or {}).values()),
                     "kg_input_tokens": sum(u.input_tokens for r, u in usage.items() if r == "kg"),

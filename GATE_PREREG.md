@@ -131,7 +131,7 @@ A failure here means fix and re-pilot, not NO-GO.
 | PC2 | On F5, LGR* ≥ LightRAG naive mode, with PC3's 3 pp tolerance on the pooled point estimate (F5-1hop and F5-2hop equally weighted). |
 | PC3 | Invariants: S6 ≥ S5o ≥ APG* ≥ S7, each allowing 3 pp tolerance; and S6 > S7 by a world-level sign-flip test, p < 0.05. |
 | PC4 | Sanity bound: no arm's median realized context exceeds 4× its configured budget, Reported, not gated: in the matched-budget secondary every capped arm's median should land within ±25% of the budget. A miss or a missing secondary marks that secondary "not matched" in the report and never blocks the verdict (D-022). (Replaces the earlier APG/LightRAG parity ratio, which APG's design makes unattainable: EXPERIMENT_AUDIT B1.) |
-| PC5 | Harness errors < 2%, and every arm's cap-hit rate < 10%. |
+| PC5 | Harness errors < 2%, and every arm's cap-hit rate < 10%. A cap hit is a sample that ran out of turns without answering, or that a sample limit cut short (including the runner's per-sample cost guard). The runner's abort threshold (`fail_on_error`: 2% of a task's samples, or a count of at least 3 for tasks under 150 samples) is only a circuit breaker; PC5 is judged from the logs. |
 | PC6 | The tuning log is complete for every system. |
 
 ## 8. Decision

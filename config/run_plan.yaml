@@ -23,6 +23,10 @@ budget:
   total_usd: 5000
   allocations: {gate: 700, main: 1000, study_g: 2700}   # FX-5 targets, conservative scenario
   contingency_usd: 600
+  # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
+  # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
+  # ends with limit "cost" and counts as a cap hit (PC5). Only applied when every model of the run is priced.
+  sample_cost_limit: {multiple: 20, floor_usd: 0.50, default_usd: 2.00}
 
 study_g:
   window: 32000      # nominal W, harness-enforced, identical across tiers (was 64K)

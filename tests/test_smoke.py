@@ -33,7 +33,7 @@ def clean_env(tmp_path):
     import os
 
     saved = dict(os.environ)
-    for k in [k for k in os.environ if k.startswith("APE_")]:
+    for k in [k for k in os.environ if k.startswith("APE_") and k != "APE_SPEND_REGISTRY"]:  # the suite's isolated registry stays
         del os.environ[k]
     yield tmp_path
     os.environ.clear()

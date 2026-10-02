@@ -3,6 +3,7 @@
     uv run python -m ape.budget [--scenario conservative|expected] [--study gate|main|study_g] [--detail] [--uncut]
     uv run python -m ape.budget calibrate LOGS... [--out config/budget_calibration_measured.yaml]
     uv run python -m ape.budget remaining --budget 5000 LOGS... [--ledger cache/ledger.jsonl]
+    uv run python -m ape.budget spend [--registry PATH] [--json]     # program-wide spend so far (ape.spend)
 
 Inputs, all data:
 - `config/run_plan.yaml`: what runs, as study -> phase -> cell (arms, task cells, tasks, epochs, model profile,
@@ -22,11 +23,15 @@ where the input rate blends the input price and the cached-input price by the ca
 - `expected`: a stated cached share per cache class at `cached_price_ratio` x input, an assumption until
   readiness E5 confirms GPT-6 cached pricing (or `cached_price: table` once the table has it).
 
-The orchestrator (FX-6) calls `projected_cost(...)` for a phase and `remaining(...)` for what is left, and refuses
-the phase with `require_affordable(...)` when the projection exceeds it.
+The orchestrator (FX-6) calls `projected_cost(...)` for a phase and `program_remaining(...)` for what is left of the
+program budget, and refuses the phase with `require_affordable(...)` when the projection exceeds it. Spend is
+read per sample from Inspect's sample summaries, each sample once by uuid, so retried tasks and killed runs count
+correctly (`log_samples`); `program_spend` sums every log dir and ledger in the program's spend registry
+(`ape.spend`). `sample_cost_limit` is the per-sample runaway guard the runner passes to Inspect.
 """
 
 import argparse
+import json
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
@@ -676,41 +681,154 @@ def calibrate(log_files: Iterable[str | Path], out_path: Path | None = MEASURED_
 # --- Spend so far (for the orchestrator) ---------------------------------------------------------------
 
 
-def spent(log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
-    """$ already spent: Inspect-metered calls (log headers' `model_usage` cost) plus the build/embedding ledger,
-    both priced from the one table. An unpriced non-mock call is an error, never $0.
+# Inspect spend is read per sample, from each log's sample summaries, and each sample is counted once by its uuid.
+# - **Retries.** A retried task's new log copies the completed samples of the failed one, uuid and usage
+#   included, and its header totals then count only part of the work. The runner keeps failed attempts' logs
+#   (`retry_cleanup=False`), so their errored samples' spend is not lost; deduplicating by uuid counts every
+#   sample exactly once.
+# - **Killed runs.** Inspect flushes sample summaries while a run is in progress (every `log_buffer` samples,
+#   10 by default), so a killed run's `started` log, whose header has no usage at all, still yields the spend of
+#   every flushed sample. Unflushed and in-flight samples (at most `log_buffer` + `max_samples`) are not visible.
+_LOG_SAMPLES: dict[str, tuple[tuple[int, int], dict]] = {}
 
-    Pass each task's logs once: a log that `eval_set` retried shares its completed samples with the retry's
-    log, so give the final logs (`ape.runner` writes them to `runner_index.json`) plus any abandoned ones."""
-    from inspect_ai.log import read_eval_log
 
-    from .analysis.cost import load_prices, price_entry
-    from .llm.ledger import Ledger
+def log_samples(path: str | Path) -> dict:
+    """One `.eval` log's samples as {"status", "samples": [(uuid key, usd, unpriced models)]}, finished or not;
+    cached on (mtime, size). An unpriced call of a mock model counts as $0."""
+    from inspect_ai.log import read_eval_log, read_eval_log_sample_summaries
 
-    inspect_usd, unpriced = 0.0, set()
-    for f in log_files:
-        for model, u in (read_eval_log(str(f), header_only=True).stats.model_usage or {}).items():
+    p = Path(path)
+    st = p.stat()
+    stamp = (st.st_mtime_ns, st.st_size)
+    if (hit := _LOG_SAMPLES.get(str(p))) and hit[0] == stamp:
+        return hit[1]
+    samples = []
+    for s in read_eval_log_sample_summaries(str(p)):
+        usd, unpriced = 0.0, set()
+        for model, u in (s.model_usage or {}).items():
             if u.total_cost is None:
                 if not model.startswith("mockllm/") and (u.input_tokens or u.output_tokens):
                     unpriced.add(model)
             else:
-                inspect_usd += u.total_cost
+                usd += u.total_cost
+        samples.append((s.uuid or f"{p}#{s.id}#{s.epoch}", usd, frozenset(unpriced)))
+    info = {"status": read_eval_log(str(p), header_only=True).status, "samples": samples}
+    _LOG_SAMPLES[str(p)] = (stamp, info)
+    return info
+
+
+def logs_spend(log_files: Iterable[str | Path], seen: set[str] | None = None) -> dict:
+    """Inspect $ over `log_files`, each sample once (by uuid; `seen` carries uuids across calls). Logs that cannot
+    be read (e.g. mid-write) are listed, not counted; an unpriced non-mock call is an error, never $0."""
+    seen = set() if seen is None else seen
+    usd, samples, partial, unreadable, unpriced = 0.0, 0, 0, [], set()
+    for f in log_files:
+        try:
+            info = log_samples(f)
+        except Exception as e:  # noqa: BLE001  (a zip being rewritten, a truncated file: report, don't crash the guard)
+            unreadable.append(f"{f}: {type(e).__name__}: {str(e)[:120]}")
+            continue
+        partial += info["status"] == "started"
+        for key, cost, models in info["samples"]:
+            unpriced |= models
+            if key not in seen:
+                seen.add(key)
+                usd += cost
+                samples += 1
     if unpriced:
         raise BudgetError(f"logs carry unpriced calls for {sorted(unpriced)}; run with ape.models.eval_cost_kwargs()")
-    ledger_usd = 0.0
-    if ledger_path is not None and Path(ledger_path).is_file():
-        prices = load_prices(costs_path)
-        try:
-            ledger_usd = sum(price_entry(e, prices) for e in Ledger(ledger_path).read())
-        except KeyError as e:
-            raise BudgetError(f"ledger {ledger_path}: {e}") from None
-    return {"inspect_usd": inspect_usd, "ledger_usd": ledger_usd, "spent_usd": inspect_usd + ledger_usd}
+    return {"inspect_usd": usd, "samples": samples, "partial_logs": partial, "unreadable": unreadable}
+
+
+def ledger_spend(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH) -> float:
+    """$ of every entry in one build/embedding ledger, priced from the table."""
+    from .analysis.cost import load_prices, price_entry
+    from .llm.ledger import Ledger
+
+    if ledger_path is None or not Path(ledger_path).is_file():
+        return 0.0
+    prices = load_prices(costs_path)
+    try:
+        return float(sum(price_entry(e, prices) for e in Ledger(ledger_path).read()))
+    except KeyError as e:
+        raise BudgetError(f"ledger {ledger_path}: {e}") from None
+
+
+def spent(log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
+    """$ already spent by these logs (each sample once; `logs_spend`) plus one build/embedding ledger, both priced
+    from the one table. Pass every log of the tasks, failed attempts included: a sample shared with a retry's
+    log is counted once."""
+    logs = logs_spend(log_files)
+    ledger_usd = ledger_spend(ledger_path, costs_path)
+    return {"inspect_usd": logs["inspect_usd"], "ledger_usd": ledger_usd, "spent_usd": logs["inspect_usd"] + ledger_usd, "partial_logs": logs["partial_logs"], "unreadable": logs["unreadable"]}
 
 
 def remaining(budget_usd: float, log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
     """What is left of `budget_usd` after the logs' and the ledger's spend."""
     s = spent(log_files, ledger_path, costs_path)
     return {"budget_usd": float(budget_usd), **s, "remaining_usd": float(budget_usd) - s["spent_usd"]}
+
+
+def program_spend(registry: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
+    """Spend over the whole program registry (`ape.spend`): every `.eval` log under every registered log dir
+    (finished, failed or killed; each sample once, attributed to the first dir that logged it) plus every
+    registered ledger. Missing dirs and files count $0 and are listed."""
+    from . import spend as reg
+
+    registry = registry if registry is not None else reg.registry_path(live=True)
+    dirs, ledgers = reg.registered(registry)
+    seen: set[str] = set()
+    rows, by_study, missing, unreadable, partial = [], defaultdict(float), [], [], 0
+    for d, info in dirs.items():
+        path = Path(d)
+        if not path.is_dir():
+            missing.append(d)
+            continue
+        s = logs_spend(sorted(path.rglob("*.eval")), seen)
+        partial += s["partial_logs"]
+        unreadable += s["unreadable"]
+        rows.append({"log_dir": d, "label": info["label"], "study": info["study"], "live": info["live"], "usd": s["inspect_usd"], "samples": s["samples"], "partial_logs": s["partial_logs"], "finished": info["finishes"] >= info["starts"]})
+        by_study[info["study"]] += s["inspect_usd"]
+    ledger_rows = []
+    for f, info in ledgers.items():
+        if not Path(f).is_file():
+            missing.append(f)
+            continue
+        usd = ledger_spend(f, costs_path)
+        ledger_rows.append({"path": f, "label": info["label"], "study": info["study"], "usd": usd})
+        by_study[info["study"]] += usd
+    inspect_usd = sum(r["usd"] for r in rows)
+    ledger_usd = sum(r["usd"] for r in ledger_rows)
+    return {
+        "registry": str(registry) if registry is not None else None,
+        "inspect_usd": inspect_usd,
+        "ledger_usd": ledger_usd,
+        "spent_usd": inspect_usd + ledger_usd,
+        "by_study": dict(sorted(by_study.items())),
+        "dirs": rows,
+        "ledgers": ledger_rows,
+        "partial_logs": partial,
+        "unfinished_dirs": [r["log_dir"] for r in rows if not r["finished"]],
+        "missing": missing,
+        "unreadable": unreadable,
+    }
+
+
+def program_remaining(budget_usd: float, registry: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
+    """What is left of `budget_usd` after the whole program's spend (`program_spend`)."""
+    s = program_spend(registry, costs_path)
+    return {"budget_usd": float(budget_usd), **s, "remaining_usd": float(budget_usd) - s["spent_usd"]}
+
+
+def sample_cost_limit(projected_sample_usd: float | None, plan: Plan | None = None) -> float:
+    """Inspect's per-sample `cost_limit`, a runaway guard: `multiple` x the cost model's conservative per-sample
+    projection, at least `floor_usd`; `default_usd` when no projection is given (run_plan.yaml
+    budget.sample_cost_limit)."""
+    cfg = ((plan or load_plan()).budget or {}).get("sample_cost_limit") or {}
+    multiple, floor, default = float(cfg.get("multiple", 20)), float(cfg.get("floor_usd", 0.5)), float(cfg.get("default_usd", 2.0))
+    if projected_sample_usd is None or projected_sample_usd <= 0:
+        return default
+    return max(floor, multiple * float(projected_sample_usd))
 
 
 def require_affordable(projected_usd: float, remaining_usd: float, what: str = "phase") -> None:
@@ -753,6 +871,26 @@ def _table(rows: list[dict], cols: list[tuple[str, str]], title: str) -> str:
 def _sort(rows: list[dict], key: str) -> list[dict]:
     order = {s: i for i, s in enumerate(STUDY_ORDER)}
     return sorted(rows, key=lambda r: (order.get(r.get("study"), 99), r.get(key, "")) if key != "study" else order.get(r["study"], 99))
+
+
+def spend_report(s: dict, budget_usd: float) -> str:
+    """`python -m ape.budget spend`: program spend by study, then by registered log dir and ledger."""
+    lines = [
+        f"Program spend (registry {s['registry']}): ${s['spent_usd']:,.2f} of ${budget_usd:,.0f} "
+        f"(Inspect ${s['inspect_usd']:,.2f}, ledgers ${s['ledger_usd']:,.2f}); ${budget_usd - s['spent_usd']:,.2f} left",
+        "",
+    ]
+    lines.append(_table([{"study": k, "usd": f"{v:,.2f}"} for k, v in s["by_study"].items()], [("study", "study"), ("usd", "$")], "By study") if s["by_study"] else "By study: nothing registered")
+    if s["dirs"]:
+        rows = [{"label": r["label"], "n": f"{r['samples']:,}", "usd": f"{r['usd']:,.2f}", "state": ("live" if r["live"] else "offline") + ("" if r["finished"] else ", unfinished") + (f", {r['partial_logs']} partial log(s)" if r["partial_logs"] else ""), "log_dir": r["log_dir"]} for r in s["dirs"]]
+        lines += ["", _table(rows, [("label", "label"), ("n", "samples"), ("usd", "$"), ("state", "state"), ("log_dir", "log dir")], "By log dir")]
+    if s["ledgers"]:
+        rows = [{"label": r["label"], "usd": f"{r['usd']:,.2f}", "path": r["path"]} for r in s["ledgers"]]
+        lines += ["", _table(rows, [("label", "label"), ("usd", "$"), ("path", "ledger")], "Ledgers")]
+    for key, what in (("missing", "registered but missing"), ("unreadable", "unreadable (not counted)")):
+        if s[key]:
+            lines += ["", f"{what}:", *(f"  {x}" for x in s[key])]
+    return "\n".join(lines)
 
 
 def report(plan: Plan, est: Estimate, *, scenario: str = "conservative", study: str | None = None, detail: bool = False, **kwargs: Any) -> tuple[str, bool]:
@@ -811,6 +949,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         a = ap.parse_args(argv[1:])
         res = calibrate(a.logs, a.out, merge=not a.replace)
         print(f"wrote {len(res['entries'])} measured entries to {a.out}")
+        return 0
+    if argv and argv[0] == "spend":
+        ap = argparse.ArgumentParser(prog="python -m ape.budget spend", description="Program-wide spend so far, from the spend registry (ape.spend).")
+        ap.add_argument("--registry", type=Path, default=None, help="default: $APE_SPEND_REGISTRY, else cache/spend/registry.jsonl")
+        ap.add_argument("--costs", type=Path, default=COSTS_PATH)
+        ap.add_argument("--json", action="store_true")
+        a = ap.parse_args(argv[1:])
+        s = program_spend(a.registry, a.costs)
+        if a.json:
+            print(json.dumps(s, indent=1, default=str))
+            return 0
+        print(spend_report(s, float(load_plan().budget["total_usd"])))
         return 0
     if argv and argv[0] == "remaining":
         ap = argparse.ArgumentParser(prog="python -m ape.budget remaining")

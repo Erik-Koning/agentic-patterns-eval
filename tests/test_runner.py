@@ -94,10 +94,11 @@ def test_transient_sample_errors_are_retried_and_the_retries_are_logged(offline_
 # ---------- error budget (PC5: harness errors < 2%) ----------
 
 
-@pytest.mark.parametrize("n_bad,ok", [(1, True), (2, False)])
-def test_errored_samples_at_2_percent_fail_the_task(offline_env, n_bad, ok):
-    """1 of 100 errored is tolerated (status success, sample unscored); 2 of 100 fails the task.
-    Retries cannot help: those samples raise on every attempt."""
+@pytest.mark.parametrize("n_bad,ok", [(2, True), (3, False)])
+def test_errored_samples_at_the_tasks_threshold_fail_it(offline_env, n_bad, ok):
+    """A 100-sample task is under 150, so its circuit breaker is a count of max(3, ceil(2)) = 3: 2 errored are
+    tolerated (status success, samples unscored); 3 fail the task. Retries cannot help: those samples raise on
+    every attempt."""
     bad = {f"q{i}" for i in range(n_bad)}
 
     def always_fails(messages, tools, tool_choice, config):
@@ -112,7 +113,7 @@ def test_errored_samples_at_2_percent_fail_the_task(offline_env, n_bad, ok):
     assert entry["status"] == header.status and entry["samples"]["errored"] == n_bad and entry["samples"]["planned"] == 100
     assert entry["samples"]["retries"] >= 2 * n_bad, "each bad sample was retried (retry_on_error=2) before counting"
     if ok:
-        assert entry["samples"]["completed"] == 99 and entry["error"] is None
+        assert entry["samples"]["completed"] == 100 - n_bad and entry["error"] is None
     else:
         assert "permanent error" in entry["error"]
 
@@ -146,8 +147,12 @@ def test_rerun_resumes_only_the_failed_task(offline_env, monkeypatch):
     assert second["S1"]["eval_id"] == first["S1"]["eval_id"], "the finished task was reused, not re-run"
     assert Path(second["S1"]["log"]) == s1_log and s1_log.stat().st_mtime == s1_mtime
     assert second["S6"]["status"] == "success" and second["S6"]["samples"]["errored"] == 0
-    assert len(list(log_dir.glob("*.eval"))) == 2, "the failed S6 attempt's log was cleaned up"
+    # retry_cleanup=False: the failed S6 attempts' logs stay (their spend stays countable); the index and eval_set
+    # point at the newest one.
+    s6_logs = [p for p in log_dir.glob("*.eval") if read_eval_log(str(p), header_only=True).eval.task_args.get("arm") == "S6"]
+    assert len(s6_logs) >= 2 and Path(second["S6"]["log"]) in s6_logs
     assert [r["success"] for r in _index(log_dir)["runs"]] == [False, True]
+    assert [r["status"] for r in _index(log_dir)["runs"]] == ["done", "done"]
 
 
 def test_tasks_differing_only_in_arm_are_distinct_and_indexed(offline_env):
@@ -182,7 +187,9 @@ def test_profile_models_efforts_concurrency_and_prices_reach_the_log(offline_env
     assert log.eval.model_roles["kg"].config.reasoning_effort == "low"
     assert log.eval.model_generate_config.max_connections == log.eval.model_roles["kg"].config.max_connections == 16
     cfg = log.eval.config
-    assert (cfg.fail_on_error, cfg.retry_on_error, cfg.max_samples, cfg.max_tasks) == (0.02, 2, 32, 2)
+    # A 2-sample task: the circuit breaker is a count (3); every model is priced, so the per-sample cost guard is
+    # set, at its default with no projection passed (run_plan.yaml budget.sample_cost_limit.default_usd).
+    assert (cfg.fail_on_error, cfg.retry_on_error, cfg.max_samples, cfg.max_tasks, cfg.cost_limit) == (3.0, 2, 32, 2, 2.0)
     usage = [u for s in log.samples for u in s.model_usage.values()]
     assert usage and all(u.total_cost is not None and u.total_cost > 0 for u in usage)  # FX-2
 

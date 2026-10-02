@@ -169,7 +169,7 @@ def _iso_ts(s: str | None) -> float | None:
 ROW_COLUMNS = (
     "plan_cell", "group", "label", "arm", "run_arm", "delivery", "cell", "world", "task", "epoch", "success", "error",
     "partial_credit", "evidence_recall", "evidence_recall_first", "evidence_recall_step_mean", "error_label", "case",
-    "ctx_tokens", "compile_tokens", "compile_ms", "budget", "cap_hit", "pipeline_miss", "cost_usd", "usd",
+    "ctx_tokens", "compile_tokens", "compile_ms", "budget", "cap_hit", "limit_hit", "pipeline_miss", "cost_usd", "usd",
     "total_time", "working_time", "exposure", "split", "exception_style",
 )  # fmt: skip
 

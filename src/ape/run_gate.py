@@ -71,8 +71,9 @@ Manifest fields: phase, run_id, status (running | done | failed | skipped), offl
 git {commit, dirty}, profile {name, roles (`Profile.summary()`), concurrency, model_swap (offline)},
 inputs {key: {path, sha256}} (the config files that determine the phase's outputs), budget_inputs (the
 files the budget guard read), params (scale and other non-file inputs), upstream {phase: fingerprint},
-fingerprint, projected_usd, spend_at_start and spend (`ape.budget.remaining`: Inspect cost over every
-log in the run's runner indexes + the ledger, against the plan's budget.total_usd), outputs, log_dirs,
+fingerprint, projected_usd, spend_at_start and spend (`spend()`: the whole program's spend from the spend
+registry, `ape.budget.program_remaining`, against the plan's budget.total_usd or a lower --budget-usd, plus
+this run's own `run_spent_usd`: every eval log under runs/<id>/, each sample once, + the ledger), outputs, log_dirs,
 warnings, errors, history, plus phase-specific results (checks, selected, pc1_pass, budget_calibration,
 s7_targets, power, placeholders, frozen, offline_check, ...).
 
@@ -85,8 +86,15 @@ whose recorded outputs still exist is skipped: its manifest is marked `skipped` 
 
 Budget guard. Before a phase runs, its projected cost (`ape.budget.projected_cost`, conservative, over
 the plan cells the phase runs, adjusted to what it actually runs) must fit in budget.total_usd ($5,000)
-minus the spend so far (`require_affordable`); otherwise the phase is refused and its manifest is
-`failed`. Offline runs apply the same guard with the live projection (they spend $0).
+minus the whole program's spend so far (`require_affordable`); otherwise the phase is refused and its
+manifest is `failed`.
+- **Spend so far** comes from the program spend registry (`ape.spend`). It covers every run id, smoke run and
+  later study, plus killed runs' flushed samples.
+- **Offline runs** apply the same guard with the live projection (they spend $0) against their own registry
+  under work/.
+- **Per-sample guard.** Every eval set also gets a per-sample `cost_limit` (`ape.runner`). Each run_gate
+  call passes its cell's conservative projection per sample (`sample_cost_usd`), so the limit is 20x that, at
+  least $0.50.
 
 Offline mode (`--offline`, zero spend, for end-to-end tests): `mockllm` agent (`mock_agent`), kg
 (`mock_kg`), anchor answerer and judge (`ape.anchor.fixture`), all built from the profile so efforts
@@ -150,10 +158,11 @@ from typing import Any
 
 import yaml
 
-from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, projected_cost, remaining, require_affordable
+from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, program_remaining, projected_cost, remaining, require_affordable
 from .config import ROOT, Config, embedding_cache
 from .models import PreflightError, Profile, load_profile, preflight
 from .runner import INDEX_NAME
+from .spend import LABEL_ENV, REGISTRY_ENV
 from .worlds.generate import TEST_SPLIT_ENV, require_test_split_unlocked
 
 STUDY = "gate"
@@ -214,7 +223,7 @@ PRIMARY_CELLS = ("gate.test.f7", "gate.test.f3", "gate.diag.s7", "gate.diag", "g
 # Plan arms that run as another arm under extra knobs: LightRAG naive (PC2) is LGR* in naive mode.
 ARM_VARIANTS = {"LGR-naive": ("LGR*", {"APE_LGR_MODE": "naive"})}
 # Environment variables the orchestrator manages itself; every other APE_* knob is recorded in params.
-MANAGED_ENV = ("APE_WORLDS", "APE_INDICES", "APE_CACHE", "APE_EMBEDDINGS", "APE_EMBEDDING_MODEL", "APE_MODEL_PROFILE", "APE_S7_TARGETS", TEST_SPLIT_ENV)
+MANAGED_ENV = ("APE_WORLDS", "APE_INDICES", "APE_CACHE", "APE_EMBEDDINGS", "APE_EMBEDDING_MODEL", "APE_MODEL_PROFILE", "APE_S7_TARGETS", TEST_SPLIT_ENV, REGISTRY_ENV, LABEL_ENV)
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
@@ -438,6 +447,11 @@ def run_environment(run: GateRun) -> Iterator[None]:
             w = run.work_dir
             updates |= {"APE_WORLDS": w / "worlds", "APE_INDICES": w / "indices", "APE_CACHE": w / "cache"}
     updates["APE_S7_TARGETS"] = run.s7_targets_path  # S7 reads the targets this run's pilot writes
+    # Spend registry (ape.spend): every log dir and ledger this run writes is labelled with the run; an offline run
+    # has its own registry, so its guard exercises the program-wide count without touching the real one.
+    updates[LABEL_ENV] = f"gate{'-offline' if run.offline else '-smoke' if run.smoke else ''}/{run.run_id}"
+    if run.offline:
+        updates[REGISTRY_ENV] = run.work_dir / "spend_registry.jsonl"
     with _environ(updates):
         yield
 
@@ -593,22 +607,32 @@ def budget_inputs(run: GateRun) -> dict:
 
 
 def run_log_files(run: GateRun) -> list[str]:
-    """Every final eval log of this run, from the runner indexes under its directory."""
-    files = set()
-    for index in run.dir.rglob(INDEX_NAME):
-        for entry in json.loads(index.read_text()).get("tasks", {}).values():
-            if entry.get("log") and Path(entry["log"]).is_file():
-                files.add(entry["log"])
-    return sorted(files)
+    """Every eval log under this run's directory: final logs, failed attempts the runner keeps
+    (`retry_cleanup=False`) and killed runs' started logs. Spend counts each sample once (by uuid)."""
+    return sorted(str(p) for p in run.dir.rglob("*.eval"))
+
+
+SPEND_KEYS = ("registry", "inspect_usd", "ledger_usd", "spent_usd", "by_study", "partial_logs", "unfinished_dirs", "missing", "unreadable")
 
 
 def spend(run: GateRun) -> dict:
-    """What is spent and left of the plan's budget (or `run.budget_usd`): this run's Inspect logs plus the
-    build/embedding ledger."""
+    """The guard's view: the whole program's spend (`ape.budget.program_remaining` over the spend registry; offline
+    runs have their own registry under work/) against the plan's budget, or a lower `run.budget_usd`. Also this
+    run's own spend (its logs plus the ledger it writes to): `run_spent_usd`."""
     budget = float(plan(run).budget["total_usd"])
     if run.budget_usd is not None:
         budget = min(budget, run.budget_usd)  # an override may only lower the plan's budget, never raise it
-    return remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path)
+    program = program_remaining(budget, None, run.costs_path)
+    mine = remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path)
+    return {
+        "budget_usd": program["budget_usd"],
+        "spent_usd": program["spent_usd"],
+        "remaining_usd": program["remaining_usd"],
+        "run_spent_usd": mine["spent_usd"],
+        "run_inspect_usd": mine["inspect_usd"],
+        "run_ledger_usd": mine["ledger_usd"],
+        "program": {k: program[k] for k in SPEND_KEYS},
+    }
 
 
 def verify_offline(run: GateRun) -> dict:
@@ -671,14 +695,26 @@ def gate_models(run: GateRun, gp: Profile) -> tuple[Any, dict[str, Any]]:
     return agent_model(gp), role_models(gp, ("kg",))
 
 
-def run_gate_tasks(run: GateRun, gp: Profile, models: tuple[Any, dict], tasks: list, log_dir: Path, epochs: int, what: str) -> list[str]:
+def sample_usd(projected_usd: float | None, groups: Sequence[tuple[list, int]]) -> float | None:
+    """The cost model's conservative $ per sample over `groups` of (tasks, epochs): the base of the runner's
+    per-sample `cost_limit`. It is a mean over the group's arms, so an arm that costs ~20x its group's mean
+    would hit the limit; PC5 counts such hits."""
+    from .runner import planned_samples
+
+    n = sum(planned_samples(t, epochs) for tasks, epochs in groups for t in tasks)
+    return projected_usd / n if projected_usd and n else None
+
+
+def run_gate_tasks(run: GateRun, gp: Profile, models: tuple[Any, dict], tasks: list, log_dir: Path, epochs: int, what: str, sample_cost_usd: float | None = None) -> list[str]:
     """One resumable eval set (`ape.runner.run_evals`) of gate tasks; the final log files. Raises PhaseError
-    when the set did not finish (a re-run resumes it)."""
+    when the set did not finish (a re-run resumes it). `sample_cost_usd` sets the per-sample `cost_limit`."""
     from .runner import log_path, run_evals
 
     agent, roles = models
     extra = {"display": "none"} if run.tiny else {}
-    success, logs = run_evals(tasks, log_dir, profile=gp, model=agent, model_roles=dict(roles), epochs=epochs, costs_path=run.costs_path, log_dir_allow_dirty=True, **extra)
+    success, logs = run_evals(
+        tasks, log_dir, profile=gp, model=agent, model_roles=dict(roles), epochs=epochs, costs_path=run.costs_path, sample_cost_usd=sample_cost_usd, log_dir_allow_dirty=True, **extra
+    )
     if not success:
         failed = [f"{h.eval.task_args.get('arm')} {h.eval.task_args.get('family')}-{h.eval.task_args.get('level')}: {h.error.message if h.error else h.status}" for h in logs if h.status != "success"]
         raise PhaseError(f"{what}: eval set did not finish (re-run to resume): " + "; ".join(failed or ["eval set failed"]))
@@ -1206,8 +1242,9 @@ def _pilot(run: GateRun, record: dict) -> None:
         for spec, only in ((main, [a for a in main["arms"] if a != "S7"]), (pull, None)):
             by_epochs.setdefault(int(spec["epochs"]), []).extend(_gate_tasks(spec, arms, "pilot", only))
         print(f"[pilot] {sum(map(len, by_epochs.values()))} task(s): {', '.join(main['arms'])} x {main['cells']} (push) + {', '.join(pull['arms'])} x {pull['cells']} (pull)", flush=True)
+        per_sample = sample_usd(project(run, [plan(run).cell(c) for c in PILOT_RUN_CELLS[:2]]), [(t, e) for e, t in by_epochs.items()])
         for epochs, tasks in by_epochs.items():
-            logs += run_gate_tasks(run, gp, models, tasks, main_dir / f"epochs-{epochs}", epochs, "pilot runs")
+            logs += run_gate_tasks(run, gp, models, tasks, main_dir / f"epochs-{epochs}", epochs, "pilot runs", per_sample)
     tokens = realized_tokens(logs, "push")
     # 3. S7 targets: APG*'s median realized context per cell; then S7.
     apg = arms["APG*"]
@@ -1223,7 +1260,7 @@ def _pilot(run: GateRun, record: dict) -> None:
         s7_dir = pdir / "logs" / f"s7-{_digest({'env': env, 'targets': targets})}"
         record["log_dirs"].append(_show(s7_dir))
         with _environ(env):
-            s7_logs = run_gate_tasks(run, gp, models, _gate_tasks(main, arms, "pilot", ["S7"]), s7_dir, int(main["epochs"]), "pilot S7 runs")
+            s7_logs = run_gate_tasks(run, gp, models, _gate_tasks(main, arms, "pilot", ["S7"]), s7_dir, int(main["epochs"]), "pilot S7 runs", per_sample)
         logs += s7_logs
         tokens |= realized_tokens(s7_logs, "push")
     # 4. Matched-budget calibration of the capped arms (LGR*, S3s) on the budget-cal cell's worlds.
@@ -1238,7 +1275,9 @@ def _pilot(run: GateRun, record: dict) -> None:
         d = cal_dir / f"iter{iteration}-{_digest({'env': env, 'knobs': knobs})}"
         print(f"[pilot] budget calibration {iteration}: " + "; ".join(f"{a} {_fmt_env(k)}" for a, k in knobs.items()), flush=True)
         with _environ(env | {k: v for kn in knobs.values() for k, v in kn.items()}):
-            got = realized_tokens(run_gate_tasks(run, gp, models, _gate_tasks(cal, arms, "pilot", list(knobs)), d, int(cal["epochs"]), f"budget calibration {iteration}"), "push")
+            tasks = _gate_tasks(cal, arms, "pilot", list(knobs))
+            per = sample_usd(project(run, [plan(run).cell(PILOT_RUN_CELLS[2])]), [(tasks, int(cal["epochs"]))])
+            got = realized_tokens(run_gate_tasks(run, gp, models, tasks, d, int(cal["epochs"]), f"budget calibration {iteration}", per), "push")
         return {a: dict(zip(("median", "per_cell"), _medians(got, arms[a], cal["cells"]), strict=True)) | {"log_dir": _show(d)} for a in knobs}
 
     caps = calibrate_caps(context, base, start, measure)
@@ -1778,7 +1817,8 @@ def _test(run: GateRun, record: dict) -> None:
         print(f"[test] {g['cell']} / {g['name']}: {', '.join(a['run'] for a in g['arms'])} x {g['cells']} x {g['deliveries']} ({g['split']}, {g['epochs']} epoch(s))", flush=True)
         try:
             with _environ(g["env"]):
-                entry["log_files"] = run_gate_tasks(run, gp, models, _test_group_tasks(g), tdir / g["dir"], g["epochs"], what)
+                tasks = _test_group_tasks(g)
+                entry["log_files"] = run_gate_tasks(run, gp, models, tasks, tdir / g["dir"], g["epochs"], what, sample_usd(entry["projected_usd"], [(tasks, g["epochs"])]))
             entry["status"] = "done"
         except Exception as e:  # noqa: BLE001  (recorded; the other cells still run, and the phase then fails)
             entry |= {"status": "failed", "error": f"{type(e).__name__}: {e}"}
