@@ -5,6 +5,13 @@ test split is generated only after GATE_PREREG.md is frozen and hashed: world-se
 builders call `require_test_split_unlocked`, and only the gate orchestrator's
 build-test phase (`python -m ape.run_gate build-test`, after its freeze guard) sets
 TEST_SPLIT_ENV. `make_world` itself stays unguarded, for tests and readers.
+
+Seed namespaces. World i of a split has seed `base + i`, and the seed is part of the world ID, so two bases
+never share a world. SPLIT_SEED_BASE holds the gate's bases. A gate run's test worlds start at the run's
+frozen test-seed base (freeze.json `test_seeds`; 3000 for the first run, a fresh block for an extension or a
+fix cycle, so already-analysed worlds are never reused); `ape.run_gate` passes it through TEST_SEED_BASE_ENV
+while it builds the test split. Other studies (the main study, Study G) pass their own `seed_base` to
+`make_world`, so their worlds never coincide with the gate's.
 """
 
 import os
@@ -14,6 +21,16 @@ from .spec import World
 
 SPLIT_SEED_BASE = {"dev": 1000, "pilot": 2000, "test": 3000}
 TEST_SPLIT_ENV = "APE_TEST_SPLIT_RUN"  # the run id of the frozen gate run building the test split
+TEST_SEED_BASE_ENV = "APE_TEST_SEED_BASE"  # the frozen gate run's test-seed base, while its build-test runs
+SEED_BLOCK = 100  # seeds a gate run's test block spans (base .. base + 99): more than any cell's world count
+
+
+def split_seed_base(split: str) -> int:
+    """The first seed of `split`: SPLIT_SEED_BASE, except the test split while a gate run's build-test sets
+    TEST_SEED_BASE_ENV to its frozen base."""
+    if split == "test" and (raw := os.environ.get(TEST_SEED_BASE_ENV, "").strip()):
+        return int(raw)
+    return SPLIT_SEED_BASE[split]
 
 
 class TestSplitLocked(RuntimeError):
@@ -29,8 +46,11 @@ def require_test_split_unlocked(split: str) -> None:
         )
 
 
-def make_world(family: str, level: str, split: str, index: int, n_tasks: int, relational: bool = True, exception_style: str = "descriptive") -> World:
-    seed = SPLIT_SEED_BASE[split] + index
+def make_world(
+    family: str, level: str, split: str, index: int, n_tasks: int, relational: bool = True, exception_style: str = "descriptive", seed_base: int | None = None
+) -> World:
+    """World `index` of `split`: seed `seed_base + index` (default `split_seed_base(split)`)."""
+    seed = (split_seed_base(split) if seed_base is None else int(seed_base)) + index
     if family == "F7":
         return gen_f7.generate(level, relational, split, seed, n_tasks, exception_style)
     if family == "F3":

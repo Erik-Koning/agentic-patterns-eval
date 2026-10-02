@@ -136,6 +136,13 @@ Each entry records the decision, why it was made, and who made it.
 - **Run order:** the test phase runs every cell the verdict needs first: the GO rule's cells (gate.test.f7, gate.test.f3, gate.diag.s7) and the cells for PC3 (gate.diag) and PC2 (gate.f5). A budget stop can then only cost secondaries.
 - **Pull verdict:** pools F7 pull with F3 push. F3 runs push only, so both modes cover the same four cells (GATE_PREREG §3).
 
+**D-024 (2026-10-02, RELIABILITY_REVIEW S8; before any freeze).** The S7 placebo follows APG*'s delivery schedule.
+- **The problem:** S7 delivered its random context once, sized to APG*'s median per compile. A per-step APG* (APG-s) delivers that much at every step, so per sample S7 delivered a fraction of APG*'s tokens. That weakened the placebo the GO rule tests APG* against (§2: APG* > S7).
+- **The rule:** S7 runs per step when the selected APG* is per-step (`APE_S7_PER_STEP=1`, set by `ape.run_gate` from `selected.yaml`), and once per task when it is per-query.
+  - Per step, each step is a fresh random draw, seeded by the task and the step query so a trajectory replays the same draws.
+  - Each draw is sized to APG*'s per-compile median and capped at 50% of the corpus.
+- **Why per-step mirroring, not one per-sample total:** a single draw of the per-sample total would show the model up to n_steps times more context in one call than APG* ever shows at once. Mirroring matches APG* both in what the model sees at each call and in what a sample delivers in total; only relevance differs, which is what the placebo isolates.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

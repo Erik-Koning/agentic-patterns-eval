@@ -112,22 +112,29 @@ class OracleContext:
 
 
 class RandomUnits:
-    """S7: random chunks, token-matched to APG-s's realized context, seeded per task (the placebo).
+    """S7: random chunks, token-matched to APG*'s realized context (the placebo; GATE_PREREG §3, D-024).
+
+    S7 mirrors APG*'s delivery schedule. With a per-query APG* it compiles once per task (seeded by the task).
+    With a per-step APG* (`per_step=True`) it recompiles at every step like APG-s, each step a fresh draw
+    (seeded by the task and the step query, so a trajectory replays the same draws), every draw sized to
+    APG*'s per-compile median. So S7 matches APG* both in what the model sees at each call and in what a
+    sample delivers in total; only relevance differs.
 
     The target is capped at `max_corpus_fraction` of the corpus: in small KBs an uncapped
     target would deliver the whole corpus and stop being a placebo (EXPERIMENT_AUDIT B2).
     """
 
     name = "S7"
-    per_step = False
 
-    def __init__(self, chunks: list[Chunk], target_tokens: int, seed: int = 0, max_corpus_fraction: float = 0.5):
+    def __init__(self, chunks: list[Chunk], target_tokens: int, seed: int = 0, max_corpus_fraction: float = 0.5, per_step: bool = False):
         self.chunks = chunks
         corpus = sum(count_tokens(c.text) for c in chunks)
         self.target = max(1, min(target_tokens, int(max_corpus_fraction * corpus)))
         self.seed = seed
+        self.per_step = per_step
 
     async def compile(self, query: str, task: TaskItem) -> ContextResult:
-        rng = random.Random(f"{self.seed}|{task.id}")
+        key = f"{self.seed}|{task.id}" + (f"|{query}" if self.per_step and query != task.prompt else "")
+        rng = random.Random(key)
         order = rng.sample(self.chunks, len(self.chunks))
-        return _result(_pack_under(order, self.target), target=self.target)
+        return _result(_pack_under(order, self.target), target=self.target, per_step=self.per_step)
