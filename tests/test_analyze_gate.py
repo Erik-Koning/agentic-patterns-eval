@@ -187,7 +187,10 @@ def test_pc4_bound_and_matched_budget():
     over = primary.copy()
     over["compile_tokens"] = [[1500] if label == "S7" else ts for label, ts in zip(over["label"], over["compile_tokens"], strict=True)]
     bad = ag.pc4(pd.concat([over, _matched(300, 260)]), "gate.sec.matched-300", 300, True)
-    assert not bad["pass"] and "S7 (push): median 1500 tokens = 5.0× its budget 300" in bad["reason"]
+    # Descriptive (D-023, RELIABILITY_REVIEW S7): the 4× bound holds by construction, so an arm over it is flagged as
+    # an anomaly and never fails PC4 or the verdict.
+    assert bad["pass"] and bad["gated"] is False and "S7 (push): median 1500 tokens = 5.0× its budget 300" in bad["reason"]
+    assert bad["details"]["anomalies"] and bad["value"] == {"arms_over_bound": 1}
     # The ±25% clause is reported with the matched-budget secondary; it never fails PC4 (D-022).
     off = ag.pc4(pd.concat([primary, _matched(400, 260)]), "gate.sec.matched-300", 300, True)
     assert off["pass"] and off["details"]["matched"]["interpretable"] is False
@@ -210,6 +213,74 @@ def test_pc5_error_and_cap_hit_rates_in_the_verdicts_cells():
     assert not capped["pass"] and "cap hits 19.9%" in capped["reason"]
     other = pd.concat([df, pd.DataFrame([_row("gate.sec.messy", "APG*", "push", "F7-10", 0, 0, 1, 0, error=True)])])
     assert ag.pc5(other)["pass"], "only the verdict's cells are gated"
+    # S9: the placebo's cap hits are reported, not gated (a random context that keeps the agent searching is the
+    # placebo working); its errors still are.
+    s7 = df.index[df["label"] == "S7"]
+    flail = df.copy()
+    flail.loc[s7[: int(len(s7) * 0.5)], "cap_hit"] = True
+    p = ag.pc5(flail)
+    assert p["pass"] and any(r["arm"] == "S7 (push)" and r["cap_hit_rate"] >= 0.49 and not r["cap_hits_gated"] for r in p["details"]["rates"])
+    flail.loc[s7[: int(len(s7) * 0.05)], "error"] = True
+    assert not ag.pc5(flail)["pass"]
+
+
+def test_inconclusive_still_reports_the_secondary_conditions_and_dropped_tasks():
+    """RELIABILITY_REVIEW S9: the F7-1000 floor and the S7 test are computed whatever the verdict, and unpaired tasks
+    left out of the paired analysis are counted per cell."""
+    df = rows({"push": NOISY, "pull": NOISY})
+    drop = (df["label"] == "LGR*") & (df["cell"] == "F3-5") & (df["task"].str.endswith("t000"))
+    v = _verdict(df[~drop])
+    push = v["modes"]["push"]
+    assert v["label"] == "INCONCLUSIVE"
+    sec = push["details"]["secondary"]
+    assert sec["f7_1000_delta"] is not None and sec["p_apg_gt_s7"] is not None
+    assert push["details"]["dropped_tasks"] == {"F3-5": WORLDS}
+
+
+def test_holm_across_modes_in_the_combined_verdict():
+    """S4: the modes are tested with Holm at the gate run's α (0.02): the better mode at 0.01, the other at 0.02 only
+    if the first is rejected; the levels are in the decision."""
+    v = _verdict(rows({"push": 0.0, "pull": 0.0}))
+    assert v["label"] == "GO" and v["alpha"] == ag.GATE_ALPHA == 0.02
+    assert sorted(v["holm"]["levels"].values()) == [0.01, 0.02] and all(v["holm"]["rejected"].values())
+    for m in ("push", "pull"):
+        assert v["modes"][m]["details"]["inference"]["holm_rejected"] is True
+
+
+def _fake_run(tmp_path, name, worlds, label=None):
+    """A run dir with build-test/worlds.json and, optionally, an analysed report/decision.json."""
+    from types import SimpleNamespace
+
+    d = tmp_path / name
+    (d / "build-test").mkdir(parents=True)
+    (d / "build-test" / "worlds.json").write_text(json.dumps({"worlds": [{"world_id": w} for w in worlds]}))
+    if label:
+        (d / "report").mkdir()
+        (d / "report" / "decision.json").write_text(json.dumps({"verdict": {"label": label}, "extension": None, "constants": {"alpha_gate_run": 0.02}}))
+    return SimpleNamespace(dir=d)
+
+
+def test_extension_context_needs_an_inconclusive_stage1_and_fresh_worlds(tmp_path):
+    """S6: the one extension (§8) reads both runs' test worlds from their manifests, never from seed arithmetic."""
+    s1 = _fake_run(tmp_path, "s1", ["F7-10-test-s3000", "F7-10-test-s3001"], "INCONCLUSIVE")
+    s2 = _fake_run(tmp_path, "s2", ["F7-10-test-s3100", "F7-10-test-s3101"])
+    assert ag.extension_context(s2) is None  # not an extension until marked
+    (s2.dir / ag.EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": "s1", "stage1_dir": str(s1.dir)}))
+    ok = ag.extension_context(s2)
+    assert ok["problems"] == [] and ok["alpha"] == 0.005 and ok["total_alpha"] == 0.025 and ok["stage1_worlds"] == 2
+    reused = _fake_run(tmp_path, "s3", ["F7-10-test-s3001", "F7-10-test-s3200"])
+    (reused.dir / ag.EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": "s1", "stage1_dir": str(s1.dir)}))
+    assert any("reuses 1 stage-1 test world" in p for p in ag.extension_context(reused)["problems"])
+    go = _fake_run(tmp_path, "go", ["F7-10-test-s3000"], "GO")
+    after_go = _fake_run(tmp_path, "s4", ["F7-10-test-s3300"])
+    (after_go.dir / ag.EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": "go", "stage1_dir": str(go.dir)}))
+    assert any("not INCONCLUSIVE" in p for p in ag.extension_context(after_go)["problems"])
+
+
+def test_extension_verdict_uses_the_extension_alpha():
+    v = ag.verdict(rows({"push": 0.0, "pull": 0.0}), PC_OK, ("push", "pull"), reps=REPS, alpha=ag.EXTENSION_ALPHA, stage="extension")
+    assert v["alpha"] == 0.005 and sorted(v["holm"]["levels"].values()) == [0.0025, 0.005]
+    assert not any("ONE pre-registered extension" in n for n in v["notes"])
 
 
 def _tune_dir(tmp_path, records, archived=()):

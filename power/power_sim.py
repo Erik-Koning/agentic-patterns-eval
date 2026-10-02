@@ -1,5 +1,5 @@
 """Simulation-based power analysis: paired superiority contrasts (main study) and the
-non-inferiority gate (`--mode ni`, world-clustered).
+non-inferiority gate (`--mode ni`, world-clustered t-interval; push/pull with Holm, D-023).
 
 Generative model (per task type):
   logit P(y_ipr = 1) = mu + u_i + beta_p + v_ip
@@ -68,13 +68,24 @@ def min_n(target_power, **kw):
     return ">1000"
 
 
+def cluster_t_stats(world_d: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """est, se, Satterthwaite df of the gate's world-clustered t statistic (`gate_stats.cluster_t` with equal tasks
+    per world), from per-world mean paired differences of shape (sims, cells, worlds)."""
+    cells, worlds = world_d.shape[-2], world_d.shape[-1]
+    v = world_d.var(axis=-1, ddof=1) / worlds / cells**2  # (sims, cells)
+    tot = v.sum(axis=-1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        df = tot**2 / (v**2 / (worlds - 1)).sum(axis=-1)
+    return world_d.mean(axis=-1).mean(axis=-1), np.sqrt(tot), np.nan_to_num(df, nan=1e6)
+
+
 def simulate_ni_power(
     worlds_per_cell: int,
     tasks_per_world: int,
     epochs: int,
     true_delta_pp: float,
     margin_pp: float = 5.0,
-    p_base: float = 0.6,
+    p_base: float | list[float] = 0.6,
     sigma_u: float = 1.5,
     sigma_v: float = 0.5,
     sigma_w: float = 0.5,
@@ -83,33 +94,55 @@ def simulate_ni_power(
     alpha: float = 0.025,
     n_sims: int = 2000,
     rng: np.random.Generator | None = None,
+    modes: int = 1,
+    f7_cells: int = 2,
 ) -> float:
-    """Power of the gate's one-sided non-inferiority test (GATE_PREREG.md).
+    """Power of the gate's one-sided non-inferiority decision (GATE_PREREG.md §2, §3, §8; D-023).
 
-    logit P(y) = mu + u_world(sigma_w) + g_world_arm(sigma_g) + v_task(sigma_u) + e_task_arm(sigma_v) + beta_arm.
-    The estimate is the equal-weighted mean over cells of per-cell mean world-level
-    paired differences; SE from between-world variance within cells (normal
-    approximation to the world-clustered bootstrap used in the real analysis).
+    logit P(y) = mu_c + u_world(sigma_w) + g_world_arm(sigma_g) + v_task(sigma_u) + e_task_arm(sigma_v) + beta_arm.
+    `p_base` is one baseline for every cell, or one per cell. The estimate is the equal-weighted mean over cells of
+    per-cell mean world-level paired differences, tested with the analysis's world-clustered t-interval
+    (Satterthwaite df).
+
+    modes=1: P(the lower bound at one-sided `alpha` exceeds −margin).
+    modes=2: the co-primary push/pull decision: the first `f7_cells` cells are run in both modes (sharing world,
+    task and world × arm effects, as the same KG serves both; task × arm noise and epochs are independent), the rest
+    are shared push cells; the two modes' NI hypotheses are tested with Holm at familywise `alpha`. Returns
+    P(GO in both modes), the unqualified GO.
     """
-    from scipy.stats import norm
-
     rng = rng or np.random.default_rng(0)
-    mu = logit(p_base)
+    bases = np.broadcast_to(np.asarray(p_base, dtype=float), (cells,))
     other = np.hypot(sigma_w, np.hypot(sigma_g, sigma_v))
-    beta = _marginal_shift(mu, sigma_u, other, _marginal(mu, np.hypot(sigma_u, other), rng) + true_delta_pp / 100.0, rng)
-    z = norm.ppf(1 - alpha)
+    mu = logit(bases)
+    if true_delta_pp == 0:
+        beta = np.zeros(cells)  # exact: no shift solves Δ = 0 (the numeric solve would only add Monte Carlo noise)
+    else:
+        beta = np.array([_marginal_shift(m, sigma_u, other, _marginal(m, np.hypot(sigma_u, other), rng) + true_delta_pp / 100.0, rng) for m in mu])
+    mu_c, beta_c = mu[None, :, None, None], beta[None, :, None, None]
     shape = (n_sims, cells, worlds_per_cell)
     u = rng.normal(0, sigma_w, shape)[..., None]
     g_a = rng.normal(0, sigma_g, shape)[..., None]
     g_b = rng.normal(0, sigma_g, shape)[..., None]
     tshape = (*shape, tasks_per_world)
     v = rng.normal(0, sigma_u, tshape)
-    y_a = rng.binomial(epochs, expit(mu + beta + u + g_a + v + rng.normal(0, sigma_v, tshape))) / epochs
-    y_b = rng.binomial(epochs, expit(mu + u + g_b + v + rng.normal(0, sigma_v, tshape))) / epochs
-    world_d = (y_a - y_b).mean(axis=-1)  # (sims, cells, worlds)
-    est = world_d.mean(axis=-1).mean(axis=-1)
-    se = np.sqrt((world_d.var(axis=-1, ddof=1) / worlds_per_cell).sum(axis=-1)) / cells
-    return float(np.mean(est - z * se > -margin_pp / 100.0))
+
+    def world_diffs() -> np.ndarray:
+        y_a = rng.binomial(epochs, expit(mu_c + beta_c + u + g_a + v + rng.normal(0, sigma_v, tshape))) / epochs
+        y_b = rng.binomial(epochs, expit(mu_c + u + g_b + v + rng.normal(0, sigma_v, tshape))) / epochs
+        return (y_a - y_b).mean(axis=-1)  # (sims, cells, worlds)
+
+    m = -margin_pp / 100.0
+    push = world_diffs()
+    est, se, df = cluster_t_stats(push)
+    if modes == 1:
+        return float(np.mean(est - student_t.ppf(1 - alpha, df) * se > m))
+    pull = world_diffs()
+    pull[:, f7_cells:] = push[:, f7_cells:]  # F3 is push only: the pull verdict pools the same F3 cells
+    est2, se2, df2 = cluster_t_stats(pull)
+    p1 = student_t.sf((est - m) / se, df)
+    p2 = student_t.sf((est2 - m) / se2, df2)
+    lo, hi = np.minimum(p1, p2), np.maximum(p1, p2)
+    return float(np.mean((lo <= alpha / 2) & (hi <= alpha)))
 
 
 def analytic_ni_tasks(sd_diff: float, true_delta_pp: float, margin_pp: float = 5.0, alpha: float = 0.025, power: float = 0.8) -> float:
@@ -127,14 +160,16 @@ def main():
     ap.add_argument("--power", type=float, default=0.8)
     ap.add_argument("--sigma-w", type=float, default=0.5, help="NI mode: world effect (logit SD); calibrate from the pilot")
     ap.add_argument("--sigma-g", type=float, default=0.3, help="NI mode: world x arm effect (logit SD); calibrate from the pilot")
+    ap.add_argument("--alpha", type=float, default=0.020, help="NI mode: one-sided familywise alpha of the gate run (stage 1, D-023)")
+    ap.add_argument("--modes", type=int, choices=[1, 2], default=2, help="NI mode: 2 = push and pull with Holm (P(unqualified GO)); 1 = one mode")
     args = ap.parse_args()
     rng = np.random.default_rng(20260929)
 
     if args.mode == "ni":
-        print(f"NI gate power: margin 5 pp, one-sided alpha 0.025, 4 cells, sigma_w={args.sigma_w}, sigma_g={args.sigma_g}")
+        print(f"NI gate power: margin 5 pp, one-sided alpha {args.alpha} ({args.modes} mode(s), Holm), 4 cells, sigma_w={args.sigma_w}, sigma_g={args.sigma_g}")
         print("true_delta_pp  worlds/cell  tasks/world  epochs  total_tasks  power")
-        for delta, worlds, tasks, epochs in itertools.product([2, 0, -2], [4, 6, 8], [8, 12, 16], [2, 3]):
-            pw = simulate_ni_power(worlds, tasks, epochs, delta, sigma_w=args.sigma_w, sigma_g=args.sigma_g, n_sims=args.sims, rng=rng)
+        for delta, worlds, tasks, epochs in itertools.product([2, 0, -2], [8, 12, 16], [12], [3]):
+            pw = simulate_ni_power(worlds, tasks, epochs, delta, sigma_w=args.sigma_w, sigma_g=args.sigma_g, alpha=args.alpha, modes=args.modes, n_sims=args.sims, rng=rng)
             print(f"{delta:13d}  {worlds:11d}  {tasks:11d}  {epochs:6d}  {4 * worlds * tasks:11d}  {pw:5.2f}")
         return
 

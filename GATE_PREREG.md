@@ -27,14 +27,31 @@ Is APG (Adaptive Prompt Graph), with graphs built by the authoring pipeline `ape
   - Success is the programmatic task outcome (`scorers/success.py`), averaged over epochs per task.
   - Δ is the mean paired task-level difference within each gate cell, then averaged over cells with equal weights.
 - **Gate cells:** F7-10, F7-1000 (relational), F3-5, F3-60.
-- **Test.**
-  - One-sided non-inferiority at α = 0.025, margin **δ = 5 pp** (absolute).
-  - Inference uses a world-clustered bootstrap (10,000 resamples, worlds resampled within cells). The lower bound is the 2.5th percentile.
-  - Implementation: `ape.analysis.gate_stats.decide` at the frozen commit.
-- **Secondary conditions (all required for GO):**
+- **Test** (D-023).
+  - One-sided non-inferiority, margin **δ = 5 pp** (absolute).
+  - **α.** The whole procedure spends one-sided α = **0.025**, including the one extension (§8):
+    - the gate run spends **0.020**;
+    - the extension spends **0.005**, on disjoint test worlds.
+    - The familywise error is at most their sum (Bonferroni).
+  - **Interval: world-clustered t.**
+    - Each cell's Δ is the mean paired task difference over its worlds: a ratio estimator, with the linearized cluster variance Σ_w e_w² / (m (m − 1)), where e_w = (y_w − Δ_c n_w) / n̄.
+    - The pooled Δ averages the cells, with variance Σ_c var_c / 16.
+    - The t quantile uses Satterthwaite's df over cells.
+    - The lower bound at one-sided level a is Δ − t(1 − a, df) · SE.
+    - Why it replaced the percentile bootstrap (RELIABILITY_REVIEW S2). In 20,000 simulated gates per scenario at true Δ = −5 pp, under power_sim's model with per-cell baselines 0.85 / 0.45 / 0.75 / 0.60:
+      - the percentile cluster bootstrap pre-registered earlier passed 3.0–4.0% of the time at a nominal 2.5%, because with ≤ 16 worlds per cell it understates the spread;
+      - the t-interval passes 2.6% (16 worlds), 2.3% (12) and 2.4% (F7-1000 with σ_g = 1.0, the other cells 0.2). It passes 2.8% in the extreme σ_w = 1.0, σ_g = 0.6 case, where skewed world effects remain.
+    - The full procedure stays within its α in every case (see the extension rule in §8).
+    - The bootstrap is still reported, for reference.
+  - **Delivery modes (§3).** The push and pull hypotheses are tested with **Holm** at the stage's α:
+    - the mode with the smaller p-value is tested at α/2;
+    - the other at α, only if the first is rejected.
+  - **Minimum data.** Every cell needs at least 4 **paired** APG*/LGR* worlds: worlds where both arms ran a task. Other arms' worlds never count.
+  - **Implementation.** `ape.analysis.gate_stats.decide` and `holm_modes` at the frozen commit.
+- **Secondary conditions (all required for GO; computed and reported whatever the verdict):**
   - F7-1000 cell point Δ > −10 pp.
   - APG* beats the random-node placebo S7: world-level sign-flip test, one-sided p < 0.05.
-- **Superiority.** If the lower bound is > 0, superiority is also reported (fixed-sequence; no α penalty).
+- **Superiority.** Tested only after GO in both delivery modes (serial gatekeeping), with Holm across the modes at the stage's α. It is then reported for the modes whose superiority hypothesis is rejected. In 20,000 simulated gates at true Δ = 0, false superiority was 1.8% at α = 0.020.
 - **Errored samples.** A sample that still errors after its retries (tolerated up to the PC5 limit) counts as a **failure** in the primary analysis, so a system that errors more pays for it. A sensitivity analysis excludes errored samples.
 
 ## 3. Arms
@@ -60,7 +77,14 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
   - In push mode, flat retrieval delivered the exception 0/25, with ID-only *and* descriptive rendering.
   - After reading the policy, a pull query ("exceptions to Policy <id>") delivered it 25/25 in both renderings.
   - The delivery mode, not the rendering, decides relational outcomes, and both modes are realistic deployments.
-- **F7 cells:** push and pull are **co-primary**. The verdict (§8) is computed and reported per mode. An unqualified GO requires GO in both; GO in one mode only is reported as **GO_PUSH_ONLY** or **GO_PULL_ONLY**, and the user decides. Each mode's verdict pools the same four gate cells with equal weights: the F7 cells in that mode with the F3 cells, which are push only (push = F7 push + F3; pull = F7 pull + F3), against the S7 placebo (push).
+- **F7 cells:** push and pull are **co-primary**.
+  - The verdict (§8) is computed and reported per mode.
+  - An unqualified GO requires GO in both. GO in one mode only is reported as **GO_PUSH_ONLY** or **GO_PULL_ONLY**, and the user decides.
+  - Each mode's verdict pools the same four gate cells with equal weights: the F7 cells in that mode plus the F3 cells, which are push only (push = F7 push + F3; pull = F7 pull + F3). Both are compared against the S7 placebo (push).
+  - **Multiplicity** (D-023). The two modes' NI hypotheses are tested with Holm at the stage's familywise α (§2), and each mode's verdict uses its interval at its Holm level.
+    - In simulation at the margin (both modes at Δ = −5 pp; 20,000 gates), separate per-mode tests at 0.025 would issue some GO-type label 4.3% of the time.
+    - With Holm the rate is 2.2% at 0.025 and **1.8% at 0.020**.
+    - With push at the margin and pull clearly non-inferior, the false push claim stays at 2.0% (α = 0.020).
 - **F3 cells:** push only (tool procedures carry no cross-references to follow).
 - **Cost:** the F7 half of the gate runs twice, about 1.5× the push-only cost.
 
@@ -72,7 +96,10 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
   - Each gate run freezes its own block of 100 test seeds: the first run 3000–3015, and the INCONCLUSIVE extension or the NO-GO fix cycle the next unused block (3100+). A run never regenerates another run's test worlds.
   - Offline rehearsals use seeds 9000+, so they never generate the real test worlds.
 - **Size** (D-017): **[PILOT: test worlds per cell] worlds per cell × 12 tasks × 3 epochs.**
-  - Planned: 16 (768 tasks per gate arm; power ≈ 0.91 at Δ = 0 under the prior σ) if the Luna builder passes the dev quality check, otherwise 12 (power ≈ 0.79).
+  - Planned: 16 if the Luna builder passes the dev quality check, otherwise 12.
+    - 16 worlds per cell gives 768 tasks per gate arm.
+    - Power is P(unqualified GO in both modes, Holm at 0.020) at Δ = 0, under the prior σ and baselines 0.85 / 0.45 / 0.75 / 0.60 (D-023): **0.84** at 16 worlds per cell, rising to 0.885 with the extension, and 0.68 at 12.
+    - The earlier 0.91 / 0.79 described one mode's percentile bootstrap at 0.025.
   - If 12, set the `gate.build.test` and `gate.test.*` worlds in `config/run_plan.yaml` before the freeze.
   - Diagnostic arms (push), drawn from the same test worlds: S1, S5o and S6 at 100 tasks per cell × 2 epochs; the S7 placebo (in the GO rule) at 100 × 3.
   - F5 (PC2; reported separately, never pooled): APG*, LGR* and LightRAG naive × F5-1hop, F5-2hop × 100 tasks × 2 epochs.
@@ -85,7 +112,13 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
   - These sizes are set by the cost model (FIX_PLAN FX-5, D-021; `config/run_plan.yaml`, `BUDGET.md`).
   - Pilot re-simulation of the NI power: [PILOT: pilot σ_w, σ_g and power].
     - Source: `ape.run_gate pilot` → `runs/<id>/pilot/power.json`, via `power/power_sim.py`.
-    - σ: method-of-moments estimates from APG* against LGR* on the pilot, with the priors where they cannot be estimated.
+    - **Estimating σ** (D-023; `ape.analysis.pilot.variance_components`). APG* against LGR* on the pilot, by moment matching each cell's between-world variances to the power model at the cell's own baseline. 80% intervals come from the χ² distribution of those variances.
+      - It replaces the delta-method conversion, which ignored task heterogeneity and underestimated σ by about 40%.
+      - In 300 simulated 4-world pilots, the new estimator recovered σ_g of 0.30 / 0.80 as 0.28 / 0.77 (the old one: 0.50 for 0.80), and σ_w of 1.0 as 0.99. Interval coverage was 0.73–0.82.
+    - **Recommendation.** It uses the **upper ends** of the 80% intervals (`conservative`), never max(prior, estimate).
+      - A 4-world pilot bounds σ_g only loosely. So under the prior σ the recommendation mostly reads "the analyst decides", with the point-estimate power alongside.
+      - At a true σ_g of 0.8 (true power 0.38 at 16 worlds) it never claims 16 worlds reach 0.8. The old rule did in 70% of pilots.
+    - Where σ cannot be estimated, the priors are used.
 - **Models** (D-015; exact IDs confirmed at E3):
   - agent: GPT-6 Luna, effort high
   - kg (APG classify and LightRAG keywords): GPT-6 Luna, effort low
@@ -131,21 +164,30 @@ A failure here means fix and re-pilot, not NO-GO.
 | ID | Condition |
 |---|---|
 | PC1 | The LightRAG setup reproduces its published GraphRAG-Bench Medical accuracy (arXiv 2506.05690 v3, Table 2: 63.32 / 61.32 / 63.14 / 67.91) for each question type: within ±5 pp if answer, judge and build models are all gpt-4o-mini, ±10 pp otherwise. Uses hybrid mode, `n_per_type` = 200 (all 166 Creative Generation questions), and the official accuracy metric (0.75 × LLM-judged statement F1 + 0.25 × embedding similarity; prompts verbatim). Hybrid must beat naive on the **macro mean** over types; per-type wins are reported but not required, because the paper's own LightRAG loses to vanilla RAG on two types. Implementation: `ape.anchor.graphragbench.pc1_from_logs`. **If PC1 fails:** first diagnose the anchor logs for a harness defect (errors, judge parse failures, index build failures); a defect is fixed and the anchor re-run, as a logged deviation. If no defect explains the miss, the analyst may accept the failure at the freeze (`run_gate freeze --accept-pc1-failure "<diagnosis>"`), which records the diagnosis in `freeze.json` and `PROVENANCE.md`. The verdict is then reported with the caveat that the LightRAG setup is not validated by the anchor, and PC2 stands as the remaining competence check. Otherwise the gate stops. |
-| PC2 | On F5, LGR* ≥ LightRAG naive mode, with PC3's 3 pp tolerance on the pooled point estimate (F5-1hop and F5-2hop equally weighted). |
-| PC3 | Invariants: S6 ≥ S5o ≥ APG* ≥ S7, each allowing 3 pp tolerance; and S6 > S7 by a world-level sign-flip test, p < 0.05. |
-| PC4 | Sanity bound: no arm's median realized context exceeds 4× its configured budget, Reported, not gated: in the matched-budget secondary every capped arm's median should land within ±25% of the budget. A miss or a missing secondary marks that secondary "not matched" in the report and never blocks the verdict (D-022). (Replaces the earlier APG/LightRAG parity ratio, which APG's design makes unattainable: EXPERIMENT_AUDIT B1.) |
-| PC5 | Harness errors < 2%, and every arm's cap-hit rate < 10%. A cap hit is a sample that ran out of turns without answering, or that a sample limit cut short (including the runner's per-sample cost guard). The runner's abort threshold (`fail_on_error`: 2% of a task's samples, or a count of at least 3 for tasks under 150 samples) is only a circuit breaker; PC5 is judged from the logs. |
+| PC2 | On F5, no evidence that LGR* is worse than LightRAG naive mode by more than 3 pp (D-023). PC2 fails when the one-sided 97.5% upper bound of LGR* − naive is below −3 pp, with F5-1hop and F5-2hop equally weighted and the world-clustered t-interval. A true tie fails at most 2.5% of the time (simulated: 0.2%); the earlier point-estimate rule failed 18%. |
+| PC3 | Invariants: S6 ≥ S5o ≥ APG* ≥ S7 (D-023). Each adjacent pair fails only on evidence of a shortfall larger than 3 pp: its one-sided upper bound at 0.025 / 3 per pair, world-clustered t on the shared tasks, is below −3 pp. And S6 > S7 by a world-level sign-flip test, p < 0.05. A chain of ties fails at most 2.5% of the time (simulated: 0 of 1,000); the earlier rule failed 16%. |
+| PC4 | **Reported, not gated** (D-023). This is the median realized context against 4× each arm's configured budget. The bound holds by construction: LightRAG's `max_total_tokens` is 4× its budget, S7's budget is its own target, and APG and S3s pack under theirs. An arm over it is flagged as an anomaly. Also reported, not gated: in the matched-budget secondary every capped arm's median should land within ±25% of the budget. A miss or a missing secondary marks that secondary "not matched" in the report and never blocks the verdict (D-022). (This replaces the earlier APG/LightRAG parity ratio, which APG's design makes unattainable: EXPERIMENT_AUDIT B1.) |
+| PC5 | Harness errors < 2%, and every arm's cap-hit rate < 10%. A cap hit is a sample that ran out of turns without answering, or that a sample limit cut short (including the runner's per-sample cost guard). The S7 placebo is gated on errors only; its cap hits are reported (D-023), since a random context that keeps the agent searching until the cap is the placebo working. The runner's abort threshold (`fail_on_error`: 2% of a task's samples, or a count of at least 3 for tasks under 150 samples) is only a circuit breaker; PC5 is judged from the logs. |
 | PC6 | The tuning log is complete for every system. |
 
 ## 8. Decision
 
 | Verdict | Condition |
 |---|---|
-| GO | Lower bound > −5 pp, and all secondary conditions (§2) hold. |
+| GO | In both delivery modes: Holm rejects the mode's NI hypothesis (its lower bound at its Holm level is > −5 pp), and all secondary conditions (§2) hold. |
 | GO_WITH_COST_FLAG | GO, but APG* per-query cost (including classify and embeddings) is more than 2× LGR*. The user decides. |
-| GO_PUSH_ONLY / GO_PULL_ONLY | GO in one delivery mode for the F7 cells but not the other (§3). The user decides. |
-| INCONCLUSIVE | The CI spans both −5 pp and 0, or fewer than 4 worlds per cell. Allows **one** pre-registered extension on fresh test worlds, with α split 0.0125 / 0.0125. |
+| GO_PUSH_ONLY / GO_PULL_ONLY | GO, as above, in one delivery mode for the F7 cells but not the other (§3). The user decides. |
+| INCONCLUSIVE | No mode is GO, and in some mode the interval at its Holm level spans both −5 pp and 0, or some cell has fewer than 4 paired APG*/LGR* worlds. This allows **one** pre-registered extension; see the extension rule below the table. |
 | NO_GO | Anything else. |
+
+**The extension** (D-023):
+- **Data.** Fresh test worlds, a new run disjoint from stage 1's. `analyze_gate` checks the two runs' `build-test/worlds.json`.
+- **Test.** The extension's worlds are analysed **alone**, at one-sided α = **0.005**, with Holm across the modes. Its label is the gate's final verdict.
+- **Total α.** The gate run's 0.020 plus 0.005 keeps the total one-sided α at 0.025 (Bonferroni over disjoint data).
+- **Simulated** (20,000 gates):
+  - At the margin, stage 1 issues some GO-type label 1.77% of the time, it is INCONCLUSIVE 23.9% of the time, and the extension adds 0.11%, for **1.88% overall**.
+  - At Δ = 0, P(unqualified GO) is 0.837 at stage 1 and 0.885 with the extension.
+- **Command.** `python -m ape.analyze_gate --run-id <extension run> --extension-of <stage-1 run>`.
 
 **NO-GO diagnosis:**
 - If S5o is non-inferior to LGR*, the problem is **extraction**: fix `apg/author.py`.

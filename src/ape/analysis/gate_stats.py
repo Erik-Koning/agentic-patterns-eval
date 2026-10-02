@@ -1,25 +1,43 @@
 """Gate statistics and the GO / NO-GO decision (GATE_PREREG.md is the normative spec).
 
-Estimand: Δ = success(APG-s) − success(LGR*), the mean over gate cells (equal weights)
+Estimand: Δ = success(APG*) − success(LGR*), the mean over gate cells (equal weights)
 of the mean paired task-level difference, where a task's success is its mean over
-epochs. Inference resamples worlds within cells (world-clustered bootstrap), because
-KG build quality varies per world.
+epochs. Worlds are the independent units (KG build quality varies per world).
+
+Inference (D-023): a world-clustered t-interval. Each cell's Δ is a ratio estimator over its worlds (sum of
+paired task differences / number of paired tasks) with the linearized cluster variance
+Σ_w e_w² / (m (m − 1)), e_w = (y_w − Δ_c n_w) / n̄; the pooled Δ averages the cells, its variance is
+Σ_c var_c / K², and the t quantile uses Satterthwaite's df over cells. With ≤ 16 worlds per cell the
+pre-registered percentile bootstrap was anti-conservative (type I error 3.3–3.9% at a nominal 2.5%, RELIABILITY_REVIEW
+S2); the t-interval holds the nominal level in the same simulations. The bootstrap is still reported.
+
+Delivery modes (§3): each mode's NI hypothesis is tested with Holm across the modes (`holm_modes`), so the
+chance of any false GO-type label stays at α; superiority is tested only after GO in every mode (serial
+gatekeeping), again with Holm.
 """
 
 import json
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t
 
 GATE_CELLS = ("F7-10", "F7-1000", "F3-5", "F3-60")
 MARGIN = 0.05  # δ, absolute
 CELL_FLOOR = -0.10  # F7-1000 point estimate must exceed this
 INVARIANT_TOL = 0.03
 COST_FLAG_RATIO = 2.0
-MIN_WORLDS_PER_CELL = 4  # below this a cluster bootstrap understates variance
+MIN_WORLDS_PER_CELL = 4  # paired APG*/LGR* worlds per cell; below this clustered inference is not trusted
+S7_P = 0.05  # APG* > S7: world-level sign-flip, one-sided
+# One-sided α for the gate (D-023): the whole procedure, including the one pre-registered extension on fresh worlds,
+# spends 0.025. Stage 1 (the gate run) spends 0.020 and the extension 0.005, each with Holm across delivery modes;
+# the stages use disjoint worlds, so the familywise error is at most their sum (Bonferroni).
+ALPHA_TOTAL = 0.025
+STAGE_ALPHA = {"stage1": 0.020, "extension": 0.005}
 DEFAULT_MAX_TURNS = 12  # Config.max_turns without APE_MAX_TURNS
 DEFAULT_BUDGET = 2000  # config.DEFAULT_CONTEXT_BUDGET
 
@@ -193,6 +211,31 @@ def task_means(df: pd.DataFrame, value: str = "success") -> pd.DataFrame:
 
 # ---------- estimation ----------
 
+def paired(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS) -> pd.Series:
+    """Task-level paired differences a − b in `cells`, on the tasks both arms have (empty when either is absent)."""
+    if a not in tm or b not in tm:
+        return pd.Series(dtype=float, index=pd.MultiIndex.from_tuples([], names=["cell", "world", "task"]))
+    d = (tm[a] - tm[b]).dropna()
+    return d[d.index.get_level_values("cell").isin(list(cells))]
+
+
+def paired_worlds(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS) -> dict[str, int]:
+    """Per cell: worlds with at least one task both arms ran (the independent units of the paired analysis)."""
+    d = paired(tm, a, b, cells)
+    got = d.index.to_frame(index=False).groupby("cell")["world"].nunique().to_dict() if len(d) else {}
+    return {c: int(got.get(c, 0)) for c in cells}
+
+
+def dropped_tasks(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS) -> dict[str, int]:
+    """Per cell: tasks one arm ran and the other did not (left out of every paired statistic)."""
+    if a not in tm or b not in tm:
+        return {}
+    one = tm[a].notna() ^ tm[b].notna()
+    sub = one[one.index.get_level_values("cell").isin(list(cells))]
+    counts = sub.groupby(level="cell").sum().to_dict() if len(sub) else {}
+    return {c: int(counts.get(c, 0)) for c in cells if counts.get(c, 0)}
+
+
 def cell_deltas(tm: pd.DataFrame, a: str, b: str) -> pd.Series:
     d = (tm[a] - tm[b]).dropna()
     return d.groupby(level="cell").mean()
@@ -200,6 +243,68 @@ def cell_deltas(tm: pd.DataFrame, a: str, b: str) -> pd.Series:
 
 def pooled_delta(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS) -> float:
     return float(cell_deltas(tm, a, b).reindex(cells).mean())
+
+
+def cluster_t(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS) -> dict:
+    """The world-clustered t statistic of Δ = a − b pooled over `cells` (equal weights), on paired tasks.
+
+    Returns est, se, df and per-cell {est, var, worlds}. Cells need ≥ 2 paired worlds for a variance; otherwise
+    `se` is None and `reason` names them. A zero standard error (every world difference equal) gives se 0, df None.
+    """
+    d = paired(tm, a, b, cells)
+    out: dict = {"cells": {}, "est": None, "se": None, "df": None}
+    for c in cells:
+        dc = d[d.index.get_level_values("cell") == c]
+        if not len(dc):
+            out["cells"][c] = {"est": None, "var": None, "worlds": 0, "tasks": 0}
+            continue
+        g = dc.groupby(level="world")
+        y, n = g.sum().to_numpy(dtype=float), g.count().to_numpy(dtype=float)
+        m, r = len(y), float(y.sum() / n.sum())
+        var = float(np.sum(((y - r * n) / n.mean()) ** 2) / (m * (m - 1))) if m >= 2 else None
+        out["cells"][c] = {"est": r, "var": var, "worlds": int(m), "tasks": int(n.sum())}
+    if any(out["cells"][c]["est"] is None for c in cells):
+        return out | {"reason": f"no paired tasks in {[c for c in cells if out['cells'][c]['est'] is None]}"}
+    k = len(cells)
+    out["est"] = float(np.mean([out["cells"][c]["est"] for c in cells]))
+    if short := [c for c in cells if out["cells"][c]["var"] is None]:
+        return out | {"reason": f"fewer than 2 paired worlds in {short}"}
+    v = {c: out["cells"][c]["var"] / k**2 for c in cells}
+    total = sum(v.values())
+    out["se"] = math.sqrt(total)
+    if total > 0:
+        out["df"] = total**2 / sum(v[c] ** 2 / (out["cells"][c]["worlds"] - 1) for c in cells if v[c] > 0)
+    return out
+
+
+def t_bounds(st: dict, level: float) -> tuple[float | None, float | None]:
+    """The two-sided (1 − 2·level) interval of a `cluster_t` result: its lower bound is the one-sided level-`level`
+    bound. None when no variance could be estimated."""
+    if st.get("se") is None:
+        return None, None
+    if st["se"] == 0 or st["df"] is None:
+        return st["est"], st["est"]
+    q = float(student_t.ppf(1 - level, st["df"]))
+    return st["est"] - q * st["se"], st["est"] + q * st["se"]
+
+
+def t_p_greater(st: dict, null: float) -> float | None:
+    """One-sided p-value for H0: Δ ≤ `null` against Δ > `null` (NI: null = −margin; superiority: null = 0)."""
+    if st.get("se") is None:
+        return None
+    if st["se"] == 0 or st["df"] is None:
+        return 0.0 if st["est"] > null else 1.0
+    return float(student_t.sf((st["est"] - null) / st["se"], st["df"]))
+
+
+def t_p_less(st: dict, null: float) -> float | None:
+    """One-sided p-value for H0: Δ ≥ `null` against Δ < `null` (preconditions: evidence of a violation)."""
+    p = t_p_greater(st, null)
+    if p is None:
+        return None
+    if st["se"] == 0 or st["df"] is None:
+        return 0.0 if st["est"] < null else 1.0
+    return 1.0 - p
 
 
 def cluster_bootstrap(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS, reps: int = 10_000, seed: int = 0) -> np.ndarray:
@@ -236,17 +341,57 @@ def pooled_success(tm: pd.DataFrame, arm: str, cells=GATE_CELLS) -> float:
 
 # ---------- decision ----------
 
+GO_VERDICTS = ("GO", "GO_WITH_COST_FLAG")
+
+
 @dataclass
 class Decision:
     verdict: str  # GO | GO_WITH_COST_FLAG | INCONCLUSIVE | NO_GO | PRECONDITION_FAIL
-    delta: float
-    ci: tuple[float, float]
+    delta: float | None
+    ci: tuple[float | None, float | None]  # the two-sided (1 − 2·level) interval at the level the verdict used
     reasons: list[str] = field(default_factory=list)
     superiority: bool = False
     details: dict = field(default_factory=dict)
 
     def to_json(self) -> str:
-        return json.dumps(self.__dict__, indent=1, default=float)
+        return json.dumps({k: v for k, v in self.__dict__.items() if k != "details"} | {"details": {k: v for k, v in self.details.items() if k != "_stats"}}, indent=1, default=float)
+
+
+def secondary_conditions(tm: pd.DataFrame, apg_arm: str, lgr_arm: str, reps: int = 10_000, seed: int = 0) -> dict:
+    """§2's secondary conditions, computed whatever the verdict (§9): the F7-1000 point Δ against CELL_FLOOR, and
+    APG* > S7 by a world-level one-sided sign-flip test (p < S7_P)."""
+    cell = cell_deltas(tm, apg_arm, lgr_arm) if apg_arm in tm and lgr_arm in tm else pd.Series(dtype=float)
+    f7 = cell.get("F7-1000")
+    s7 = world_diffs(tm, apg_arm, "S7") if "S7" in tm and apg_arm in tm else np.array([])
+    p_s7 = sign_flip_p(s7, reps, seed) if len(s7) else None
+    return {
+        "f7_1000_delta": None if f7 is None else float(f7),
+        "f7_1000_ok": f7 is not None and float(f7) > CELL_FLOOR,
+        "p_apg_gt_s7": p_s7,
+        "s7_worlds": int(len(s7)),
+        "s7_ok": p_s7 is not None and p_s7 < S7_P,
+    }
+
+
+def classify(st: dict, level: float, secondary: dict, cost_ratio: float | None, apg_arm: str) -> tuple[str, list[str], tuple]:
+    """§8 at one-sided `level`, from a `cluster_t` result: GO when the level-`level` lower bound exceeds −MARGIN
+    and the secondary conditions hold; INCONCLUSIVE when the (1 − 2·level) interval spans both −MARGIN and 0;
+    NO_GO otherwise. Returns (verdict, reasons, interval)."""
+    lo, hi = t_bounds(st, level)
+    reasons = []
+    if lo <= -MARGIN:
+        if hi >= 0:
+            return "INCONCLUSIVE", [f"the {100 * (1 - 2 * level):.2f}% CI [{lo:+.3f}, {hi:+.3f}] spans both -{MARGIN} and 0"], (lo, hi)
+        reasons.append(f"non-inferiority not shown: lower bound {lo:+.3f} <= -{MARGIN} (one-sided level {level:g})")
+    if not secondary["f7_1000_ok"]:
+        f7 = secondary["f7_1000_delta"]
+        reasons.append(f"F7-1000 cell Δ {'missing' if f7 is None else f'{f7:+.3f}'} <= {CELL_FLOOR}")
+    if not secondary["s7_ok"]:
+        p = secondary["p_apg_gt_s7"]
+        reasons.append(f"{apg_arm} not better than random-node placebo S7 (p={'n/a' if p is None else f'{p:.3f}'})")
+    if reasons:
+        return "NO_GO", reasons, (lo, hi)
+    return ("GO_WITH_COST_FLAG" if cost_ratio is not None and cost_ratio > COST_FLAG_RATIO else "GO"), [], (lo, hi)
 
 
 def decide(
@@ -259,69 +404,153 @@ def decide(
     seed: int = 0,
     apg_arm: str = "APG-s",
 ) -> Decision:
-    """`apg_arm` / `lgr_arm` are the dev-selected configurations (APG*, LGR*; GATE_PREREG §5)."""
+    """One delivery mode's decision at one-sided level `alpha`, before any adjustment across modes (`holm_modes`).
+    `apg_arm` / `lgr_arm` are the dev-selected configurations (APG*, LGR*; GATE_PREREG §5).
+
+    Order (§8): preconditions; then at least MIN_WORLDS_PER_CELL *paired* APG*/LGR* worlds in every cell (counted on
+    the tasks both arms ran, never on other arms' worlds); then the world-clustered t-interval. Δ, its intervals,
+    the per-cell Δ, the secondary conditions and the dropped unpaired tasks are reported whatever the verdict."""
     failed = [k for k, ok in preconditions.items() if not ok]
-    delta = pooled_delta(tm, apg_arm, lgr_arm)
-    boot = cluster_bootstrap(tm, apg_arm, lgr_arm, reps=reps, seed=seed)
-    lo, hi = float(np.quantile(boot, alpha)), float(np.quantile(boot, 1 - alpha))
+    worlds = paired_worlds(tm, apg_arm, lgr_arm)
+    st = cluster_t(tm, apg_arm, lgr_arm)
+    sec = secondary_conditions(tm, apg_arm, lgr_arm, reps, seed)
+    details = {
+        "cell_deltas": cell_deltas(tm, apg_arm, lgr_arm).to_dict() if apg_arm in tm and lgr_arm in tm else {},
+        "p_apg_gt_s7": sec["p_apg_gt_s7"],
+        "secondary": sec,
+        "cost_ratio": cost_ratio,
+        "paired_worlds": worlds,
+        "dropped_tasks": dropped_tasks(tm, apg_arm, lgr_arm),
+        "inference": {
+            "method": "world-clustered t (Satterthwaite df)",
+            "level": alpha,
+            "se": st["se"],
+            "df": st["df"],
+            "p_noninferiority": t_p_greater(st, -MARGIN),
+            "p_superiority": t_p_greater(st, 0.0),
+            "ci95": list(t_bounds(st, 0.025)),
+        },
+    }
+    if st["se"] is not None:
+        boot = cluster_bootstrap(tm, apg_arm, lgr_arm, reps=reps, seed=seed)
+        details["bootstrap_ci95"] = [float(np.quantile(boot, 0.025)), float(np.quantile(boot, 0.975))]
+    ci = t_bounds(st, alpha)
     if failed:
-        return Decision("PRECONDITION_FAIL", delta, (lo, hi), [f"precondition failed: {k}" for k in failed])
-
-    cell = cell_deltas(tm, apg_arm, lgr_arm)
-    s7 = world_diffs(tm, apg_arm, "S7") if "S7" in tm else np.array([])
-    p_s7 = sign_flip_p(s7, reps, seed) if len(s7) else 1.0
-    details = {"cell_deltas": cell.to_dict(), "p_apg_gt_s7": p_s7, "cost_ratio": cost_ratio}
-    idx = tm.index.to_frame(index=False)
-    worlds = idx.groupby("cell")["world"].nunique().reindex(GATE_CELLS).fillna(0)
-    if worlds.min() < MIN_WORLDS_PER_CELL:
-        return Decision("INCONCLUSIVE", delta, (lo, hi), [f"too few worlds per cell for clustered inference ({int(worlds.min())} < {MIN_WORLDS_PER_CELL})"], details=details)
-
-    reasons = []
-    if lo <= -MARGIN:
-        if hi >= 0:
-            return Decision("INCONCLUSIVE", delta, (lo, hi), ["CI spans both -margin and 0"], details=details)
-        reasons.append(f"non-inferiority not shown: lower bound {lo:+.3f} <= -{MARGIN}")
-    if cell.get("F7-1000", 0.0) <= CELL_FLOOR:
-        reasons.append(f"F7-1000 cell Δ {cell['F7-1000']:+.3f} <= {CELL_FLOOR}")
-    if p_s7 >= 0.05:
-        reasons.append(f"{apg_arm} not better than random-node placebo S7 (p={p_s7:.3f})")
-    if reasons:
-        return Decision("NO_GO", delta, (lo, hi), reasons, details=details)
-    verdict = "GO_WITH_COST_FLAG" if cost_ratio is not None and cost_ratio > COST_FLAG_RATIO else "GO"
-    return Decision(verdict, delta, (lo, hi), [], superiority=lo > 0, details=details)
+        return Decision("PRECONDITION_FAIL", st["est"], ci, [f"precondition failed: {k}" for k in failed], details=details)
+    if short := {c: n for c, n in worlds.items() if n < MIN_WORLDS_PER_CELL}:
+        reason = f"too few paired {apg_arm}/{lgr_arm} worlds for clustered inference: {short} (< {MIN_WORLDS_PER_CELL})"
+        return Decision("INCONCLUSIVE", st["est"], ci, [reason], details=details)
+    verdict, reasons, ci = classify(st, alpha, sec, cost_ratio, apg_arm)
+    p_sup = details["inference"]["p_superiority"]
+    superior = verdict in GO_VERDICTS and p_sup is not None and p_sup <= alpha
+    return Decision(verdict, st["est"], ci, reasons, superiority=superior, details=details | {"_stats": st})
 
 
-def invariants(tm: pd.DataFrame, chain=("S6", "S5o", "APG-s", "S7"), tol: float = INVARIANT_TOL) -> dict:
-    """PC3: each arm in the chain may exceed its predecessor by at most `tol`; S6 > S7 significantly."""
+def holm_levels(pvalues: dict[str, float | None], alpha: float) -> tuple[dict[str, float], dict[str, bool]]:
+    """Holm across hypotheses at familywise one-sided `alpha`: each hypothesis's level and whether it is rejected.
+
+    Sorted by p-value, the i-th (0-based) of k is tested at alpha / (k − i) while every earlier one was rejected;
+    after the first non-rejection the rest keep the level they would have been tested at and are not rejected.
+    A None p-value (not testable) sorts last and is never rejected."""
+    order = sorted(pvalues, key=lambda m: (pvalues[m] is None, pvalues[m] if pvalues[m] is not None else 1.0))
+    k, levels, rejected, going = len(order), {}, {}, True
+    for i, m in enumerate(order):
+        levels[m] = alpha / (k - i)
+        rejected[m] = going and pvalues[m] is not None and pvalues[m] <= levels[m]
+        going = rejected[m]
+    return levels, rejected
+
+
+def holm_modes(decisions: dict[str, Decision], alpha: float) -> tuple[dict[str, Decision], dict]:
+    """The delivery modes' NI hypotheses tested with Holm at familywise `alpha` (§3, §8; D-023), then superiority
+    by serial gatekeeping (tested only after GO in every mode, again with Holm at `alpha`).
+
+    Each testable mode (a `decide` result that reached the t-interval) is re-classified at its Holm level: GO needs
+    Holm's rejection plus the secondary conditions; a mode Holm does not reject is INCONCLUSIVE or NO_GO by its
+    interval at that level. PRECONDITION_FAIL and few-worlds INCONCLUSIVE modes are kept as they are."""
+    testable = {m: d for m, d in decisions.items() if "_stats" in d.details}
+    p_ni = {m: d.details["inference"]["p_noninferiority"] for m, d in testable.items()}
+    levels, rejected = holm_levels(p_ni, alpha) if testable else ({}, {})
+    out: dict[str, Decision] = {}
+    for m, d in decisions.items():
+        if m not in testable:
+            out[m] = d
+            continue
+        lvl = levels[m]
+        verdict, reasons, ci = classify(d.details["_stats"], lvl, d.details["secondary"], d.details["cost_ratio"], "APG*")
+        if verdict in GO_VERDICTS and not rejected[m]:  # GO at lvl means p <= lvl, so Holm rejects; kept as a guard
+            verdict, reasons = "INCONCLUSIVE", [f"not rejected by Holm at {lvl:g}"]
+        info = d.details["inference"] | {"holm_level": lvl, "holm_rejected": bool(rejected[m])}
+        out[m] = replace(d, verdict=verdict, reasons=reasons, ci=ci, superiority=False, details={**d.details, "inference": info})
+    all_go = bool(out) and all(x.verdict in GO_VERDICTS for x in out.values())
+    sup: dict = {"rule": f"serial gatekeeping: tested only after GO in every mode, Holm at {alpha:g}", "tested": all_go}
+    if all_go:
+        s_levels, s_rejected = holm_levels({m: out[m].details["inference"]["p_superiority"] for m in out}, alpha)
+        for m in out:
+            out[m] = replace(out[m], superiority=bool(s_rejected[m]))
+        sup |= {"levels": s_levels, "rejected": s_rejected}
+    return out, {"alpha": alpha, "levels": levels, "rejected": rejected, "superiority": sup}
+
+
+def violation_test(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS, tol: float = INVARIANT_TOL, alpha: float = 0.025) -> dict:
+    """A precondition of the form success(a) ≥ success(b) − tol (PC2, PC3; D-023), failed only on evidence of a
+    violation: H0: Δ ≥ −tol is rejected when the world-clustered t test's one-sided p-value for Δ < −tol is at most
+    `alpha`, i.e. when the level-`alpha` upper bound of Δ is below −tol. A true tie (or anything ≥ −tol) then fails
+    at most `alpha` of the time; the earlier point-estimate rule failed 16–18% of ties (RELIABILITY_REVIEW S5).
+    Cells with fewer than 2 paired worlds are left out; with no such cell the point estimate decides, labelled."""
+    usable = tuple(c for c in cells if paired_worlds(tm, a, b, (c,))[c] >= 2)
+    st = cluster_t(tm, a, b, usable) if usable else {"se": None, "est": None}
+    p = t_p_less(st, -tol)
+    if p is None:
+        present = tuple(c for c in cells if paired_worlds(tm, a, b, (c,))[c] > 0)
+        point = pooled_delta(tm, a, b, present) if present else None
+        ok = point is not None and point >= -tol
+        return {"pass": bool(ok), "delta": point, "upper": None, "p_violation": None, "level": alpha, "cells": list(present), "method": "point estimate (no clustered variance)"}
+    return {"pass": bool(p > alpha), "delta": st["est"], "upper": t_bounds(st, alpha)[1], "p_violation": p, "level": alpha, "cells": list(usable), "method": "world-clustered t (Satterthwaite df)"}
+
+
+def invariants(tm: pd.DataFrame, chain=("S6", "S5o", "APG-s", "S7"), tol: float = INVARIANT_TOL, alpha: float = 0.025) -> dict:
+    """PC3: each arm in the chain may fall below its predecessor by at most `tol` (`violation_test`, at
+    alpha / (number of pairs), so a chain of ties fails at most `alpha` overall); and S6 > S7 by the world-level
+    sign-flip test (p < 0.05)."""
     present = [a for a in chain if a in tm]
     succ = {a: pooled_success(tm, a) for a in present}
-    pairs = {f"{hi}>={lo}": succ[hi] + tol >= succ[lo] for hi, lo in zip(present, present[1:])}
+    level = alpha / max(1, len(present) - 1)
+    tests = {f"{hi}>={lo}": violation_test(tm, hi, lo, tol=tol, alpha=level) for hi, lo in zip(present, present[1:], strict=False)}
+    pairs = {k: t["pass"] for k, t in tests.items()}
     ok_s6 = True
     if {"S6", "S7"} <= set(present):
         ok_s6 = sign_flip_p(world_diffs(tm, "S6", "S7")) < 0.05
-    return {"success": succ, "pairs": pairs, "s6_gt_s7_significant": ok_s6, "pass": all(pairs.values()) and ok_s6}
+    return {"success": succ, "pairs": pairs, "tests": tests, "level": level, "s6_gt_s7_significant": ok_s6, "pass": all(pairs.values()) and ok_s6}
 
 
 # ---------- report helpers (FX-7) ----------
 
 
 def delta_ci(tm: pd.DataFrame, a: str, b: str, cells=GATE_CELLS, alpha: float = 0.025, reps: int = 10_000, seed: int = 0) -> dict:
-    """Δ = a − b pooled over `cells` (equal weights) with its world-clustered bootstrap CI (the 100α and
-    100(1−α) percentiles), on the tasks both arms have. Cells without paired data are left out and named;
-    with none, the result has `delta` None and a `reason`."""
+    """Δ = a − b pooled over `cells` (equal weights) on the tasks both arms have, with the world-clustered
+    t-interval (two-sided 1 − 2α; `lo` is the one-sided level-α bound) and, for reference, the percentile
+    bootstrap. Cells without paired data are left out and named; with none, `delta` is None with a `reason`.
+    With fewer than 2 paired worlds in a cell no variance exists: `lo`/`hi` are None and `few_worlds` is set."""
     out: dict = {"a": a, "b": b, "cells": list(cells)}
     if a not in tm or b not in tm:
         return out | {"delta": None, "lo": None, "hi": None, "reason": f"no data for {[x for x in (a, b) if x not in tm]}"}
-    d = (tm[a] - tm[b]).dropna()
-    d = d[d.index.get_level_values("cell").isin(list(cells))]
-    present = [c for c in cells if c in set(d.index.get_level_values("cell"))]
-    worlds = d.groupby(level="cell").apply(lambda x: x.index.get_level_values("world").nunique()).to_dict()
-    out |= {"missing_cells": [c for c in cells if c not in present], "worlds_per_cell": {c: int(worlds.get(c, 0)) for c in cells}, "tasks": int(len(d))}
+    d = paired(tm, a, b, cells)
+    worlds = paired_worlds(tm, a, b, cells)
+    present = [c for c in cells if worlds[c] > 0]
+    out |= {"missing_cells": [c for c in cells if c not in present], "worlds_per_cell": worlds, "tasks": int(len(d)), "dropped_tasks": dropped_tasks(tm, a, b, cells)}
     if not present:
         return out | {"delta": None, "lo": None, "hi": None, "reason": f"no paired tasks of {a} and {b} in {list(cells)}"}
-    boot = cluster_bootstrap(tm, a, b, cells=present, reps=reps, seed=seed)
-    lo, hi = (float(x) for x in np.quantile(boot, [alpha, 1 - alpha]))
-    return out | {"delta": pooled_delta(tm, a, b, present), "lo": lo, "hi": hi, "few_worlds": min(worlds.get(c, 0) for c in present) < MIN_WORLDS_PER_CELL}
+    st = cluster_t(tm, a, b, present)
+    lo, hi = t_bounds(st, alpha)
+    out |= {"delta": st["est"], "lo": lo, "hi": hi, "se": st["se"], "df": st["df"], "method": "world-clustered t (Satterthwaite df)"}
+    out["few_worlds"] = min(worlds[c] for c in present) < MIN_WORLDS_PER_CELL
+    if st["se"] is not None:
+        boot = cluster_bootstrap(tm, a, b, cells=present, reps=reps, seed=seed)
+        out["bootstrap"] = [float(x) for x in np.quantile(boot, [alpha, 1 - alpha])]
+    else:
+        out["reason"] = st.get("reason")
+    return out
 
 
 def shared_tasks(tm: pd.DataFrame, arms) -> pd.DataFrame:
@@ -335,9 +564,6 @@ def epoch_agreement(df: pd.DataFrame) -> float | None:
     multi = df.groupby(["arm", "cell", "world", "task"])["success"].agg(["count", "nunique"])
     multi = multi[multi["count"] > 1]
     return float((multi["nunique"] == 1).mean()) if len(multi) else None
-
-
-GO_VERDICTS = ("GO", "GO_WITH_COST_FLAG")
 
 
 def combine_modes(verdicts: dict[str, str]) -> tuple[str, list[str]]:
