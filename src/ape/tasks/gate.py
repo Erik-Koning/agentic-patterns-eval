@@ -52,15 +52,19 @@ def gate_samples(
     limit_worlds: int | None = None,
     exception_style: str = "descriptive",
     seed_base: int | None = None,
+    skip_worlds: int | None = None,
 ) -> list[Sample]:
-    """The tasks of the cell's worlds, the first `limit_worlds` by seed. `seed_base` keeps only one run's seed block
-    (`seed_base` .. `seed_base` + SEED_BLOCK - 1): a later gate run's test worlds share the directory with an
-    earlier run's."""
+    """The tasks of the cell's worlds, the first `limit_worlds` by seed after skipping the first `skip_worlds` (the
+    pilot's σ cell runs the pilot worlds after those the main pilot uses, D-026). `seed_base` keeps only one run's
+    seed block (`seed_base` .. `seed_base` + SEED_BLOCK - 1): a later gate run's test worlds share the directory with
+    an earlier run's."""
     cfg = Config()
     variant = _variant(family, relational, exception_style)
     paths = sorted((cfg.worlds_dir / split).glob(f"{family}-{level}{variant}{split}-*.json"))
     if seed_base is not None:
         paths = [p for p in paths if seed_base <= _seed(p) < seed_base + SEED_BLOCK]
+    if skip_worlds:
+        paths = paths[skip_worlds:]
     if limit_worlds:
         paths = paths[:limit_worlds]
     samples = []
@@ -102,16 +106,18 @@ def gate(
     plan_cell: str | None = None,
     group: str | None = None,
     seed_base: int | None = None,
+    skip_worlds: int | None = None,
 ) -> Task:
     """`plan_cell` and `group` label a gate orchestrator run (the run_plan.yaml cell and its env group) in the
     task metadata; they are task args only when passed, so other callers' task identities are unchanged.
     `seed_base` selects one gate run's test-seed block (`gate_samples`); the orchestrator passes it only for a
-    block other than the default 3000, so the first run's task identities are unchanged too."""
+    block other than the default 3000, so the first run's task identities are unchanged too. `skip_worlds` likewise
+    is passed only by the pilot's σ cell (`gate_samples`)."""
     if delivery != "push" and arm not in PULLABLE:
         raise ValueError(f"{arm} has no retriever for delivery={delivery}; pull applies to {sorted(PULLABLE)}")
     cfg = Config()
     return Task(
-        dataset=MemoryDataset(gate_samples(family, level, split, relational, limit_worlds, exception_style, seed_base), name=f"{family}-{level}-{split}"),
+        dataset=MemoryDataset(gate_samples(family, level, split, relational, limit_worlds, exception_style, seed_base, skip_worlds), name=f"{family}-{level}-{split}"),
         # The arm reads its knobs (budgets included) when it is built inside the run, under the run's environment.
         solver=kb_agent(arm_provider(arm), load_world, exposure=exposure, max_turns=cfg.max_turns, delivery=delivery),
         scorer=[task_success(), delivered_evidence(), error_analysis()],

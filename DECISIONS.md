@@ -172,6 +172,33 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
   - Each draw is sized to APG*'s per-compile median and capped at 50% of the corpus.
 - **Why per-step mirroring, not one per-sample total:** a single draw of the per-sample total would show the model up to n_steps times more context in one call than APG* ever shows at once. Mirroring matches APG* both in what the model sees at each call and in what a sample delivers in total; only relevance differs, which is what the placebo isolates.
 
+**D-026 (2026-10-02, pre-run review; before any freeze).** The pilot estimates σ from 8 worlds per cell and makes a two-sided recommendation.
+- **The problem:** a 4-world pilot bounds σ_g so loosely that the recommendation rarely decides anything. And in about 4% of 4-world pilots the χ² pivot had no upper solution and reported σ_g's upper end as 0. That made the "conservative" scenario optimistic, and it caused the wrong "16 suffices" calls at a true power near 0.4.
+- **Simulation** (real estimator, power_sim's model, baselines 0.85/0.45/0.75/0.60, 300 pilots per row, conservative cost from `ape.budget`):
+
+  | True (σ_w, σ_g), true power at 16 | Design | Detects an underpowered gate | Wrong "suffices" | Cost |
+  |---|---|---|---|---|
+  | (0.5, 0.8), 0.39 | 4 worlds, old rule | 0.62 (two-sided) | 0.03 | $14.55 |
+  | | 4 worlds × 2 epochs | 0.71 | 0 | +$8.37 |
+  | | 6 worlds | 0.76 | 0 | +$7.28 |
+  | | **8 worlds for APG*/LGR* only (chosen)** | **0.83** | **0** | **+$8.35** |
+  | (1.0, 0.8), 0.41 | 4 → 8 worlds | 0.55 → 0.75 | 0.04 → 0 | |
+
+  - No affordable pilot makes "16 suffices" decisive near the target. At a true power of 0.83–0.86, "suffices" comes out only 8–16% of the time at any size up to 8 worlds. What extra worlds buy is catching an underpowered gate.
+  - Worlds beat epochs at equal cost.
+- **The rule** (`ape.analysis.pilot.power_report`; GATE_PREREG §4):
+  - **suffices** when the power at the upper σ ends reaches 0.8 and both upper ends are informative;
+  - **insufficient** when the power at the lower ends misses 0.8 (add test worlds within budget or rethink; 20 and 24 worlds are reported);
+  - **ambiguous** otherwise, or when σ is not estimable: proceed with the planned 16 and rely on the extension.
+  - An upper end with no pivot solution falls back to max(estimate, prior), is flagged, and never supports "suffices".
+- **The pilot:** `gate.build.pilot` builds 8 worlds per cell, and `gate.pilot.sigma` runs APG* and LGR* (push, 1 epoch) on worlds 5–8. Everything else in the pilot keeps worlds 1–4.
+- **Verified on the implementation** (300 pilots per scenario, with the zero-bound fallback):
+  - At a true power of about 0.4, 8 worlds call "insufficient" 75–83% of the time and never "suffices" (4 worlds: 55–61% and 2–4%).
+  - At about 0.85, they call "suffices" 11–12%, "insufficient" 11–12% (the 80% intervals' expected misfires near the threshold) and "ambiguous" otherwise.
+  - The upper end is flagged in 4.7% of 8-world pilots at σ_g = 0.3 (8.0% at 4 worlds).
+- **Rejected: a two-stage rule** (4 worlds, then 4 more only if not decisive). It saves about $3–6 expected, but optional stopping drops σ_g's interval coverage to 0.65–0.68 and gets close calls wrong 16–17% of the time.
+- **Cost:** +$8 conservative. Program total: $4,751 / $3,231 expected. D-017's Sol build path rises to +$1,074, because the extra pilot worlds use the same builder.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

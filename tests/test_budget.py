@@ -36,7 +36,7 @@ MOCK_PRICE = {"input": 1.0, "output": 2.0, "input_cache_write": 1.0, "input_cach
 
 # The right-sized plan's conservative $ per study, as documented in BUDGET.md and DECISIONS.md D-021
 # (priors only, no measured calibration). Update the docs with these when the plan or the priors change.
-DOCUMENTED = {"gate": 201, "main": 1164, "study_g": 3378, "total": 4743, "expected": 3223}
+DOCUMENTED = {"gate": 209, "main": 1164, "study_g": 3378, "total": 4751, "expected": 3231}
 
 
 @pytest.fixture(autouse=True)

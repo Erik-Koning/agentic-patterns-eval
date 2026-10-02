@@ -19,9 +19,11 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
     anchor      PC1: the GraphRAG-Bench index, hybrid and naive runs, `pc1_from_logs` -> anchor/pc1.json.
     pilot       the pilot worlds (`gate.build.pilot`, split "pilot") and their artifacts; `gate.pilot` arms but
                 S7 and `gate.pilot.pull`, with every selection's knobs; S7 targets (APG*'s median realized
-                context per cell) -> <config>/s7_targets.json, then S7; the matched-budget calibration of
+                context per cell) -> <config>/s7_targets.json, then S7; `gate.pilot.sigma` (APG*, LGR* on the
+                pilot worlds after the main pilot's, push; D-026); the matched-budget calibration of
                 LGR* and S3s (`calibrate_caps`) -> <config>/budget_calibration.yaml; the NI power
-                re-simulation with the pilot's σ_w, σ_g -> pilot/power.json; the cost model recalibrated
+                re-simulation with σ_w, σ_g from the main and σ cells' worlds and its two-sided recommendation
+                (suffices / insufficient / ambiguous) -> pilot/power.json; the cost model recalibrated
                 (`ape.budget.calibrate`) -> <config>/budget_calibration_measured.yaml; pilot/pilot.json.
     freeze      GATE_PREREG.md's body has no `[PILOT` / `[USER` marker left, the tree is committed, PC1
                 passes (or its failure is accepted with a diagnosis) and every phase it rests on is current
@@ -80,6 +82,7 @@ Run directory (`runs/<id>/`, git-ignored):
     pilot/worlds.json        every pilot world, as build-dev/worlds.json
     pilot/logs/main-<hash>/  the selected arms and diagnostics (push, pull); <hash> of the selections' knobs
     pilot/logs/s7-<hash>/    S7, sized by the targets in <hash>
+    pilot/logs/sigma-<hash>/ the σ cell: APG*, LGR* on pilot worlds 5-8 (offline: the second world), push
     pilot/budget-cal/        one log dir per calibration iteration, and calibration.json (every iteration); an arm
                              that never lands in the window keeps its closest caps and the file says `matched:
                              false` (`not_converged` lists the arms): the matched-budget secondary still runs and is
@@ -242,6 +245,9 @@ DEV_BUILD_CELLS = {"gate": "gate.build.dev", "id_only": "gate.build.dev-id-only"
 # The pilot (GATE_PREREG §4): its world build cell and its run cells.
 PILOT_BUILD_CELL = "gate.build.pilot"
 PILOT_RUN_CELLS = ("gate.pilot", "gate.pilot.pull", "gate.pilot.budget-cal")
+# D-026: APG* and LGR* on the pilot worlds after the main pilot's (world_offset), push only, so σ_w and σ_g are
+# estimated from twice as many worlds per cell. Optional: a plan without it estimates σ from gate.pilot alone.
+PILOT_SIGMA_CELL = "gate.pilot.sigma"
 # Matched-budget calibration (GATE_PREREG §6.2, PC4): each capped arm's knobs are scaled together by one factor,
 # searched until the arm's median realized context is within CAL_TOLERANCE of the cell's `context`.
 CAL_KNOBS = {"LGR*": ("APE_LGR_BUDGET", "APE_LGR_ENTITY_TOKENS", "APE_LGR_RELATION_TOKENS", "APE_LGR_TOTAL_TOKENS"), "S3s": ("APE_S3S_BUDGET",)}
@@ -249,7 +255,7 @@ CAL_MAX_ITERATIONS = 3
 CAL_TOLERANCE = 0.25
 CAL_STEP = (0.1, 10.0)  # bounds on one step's scale change
 APG_MATCHED_SHORTLIST_K = 48  # APG fills instead of being capped: the largest shortlistK in the tuning grid
-POWER_SIZES = (12, 16)  # test worlds per cell the pilot power re-simulation compares (D-017)
+POWER_SIZES = (12, 16, 20, 24)  # test worlds per cell the pilot power re-simulation compares (D-017; 20/24 for "insufficient", D-026)
 POWER_SIMS = {"live": 2000, "offline": 200}
 # Frozen at `freeze` (FIX_PLAN FX-6): config inputs read from config_dir, and the outputs tune and pilot write.
 FROZEN_CONFIG = ("models.yaml", "model_costs.yaml", "run_plan.yaml", "tuning_grid.yaml")
@@ -1444,9 +1450,10 @@ def _anchor(run: GateRun, record: dict) -> None:
 
 def pilot_world_specs(run: GateRun) -> list[dict]:
     """The pilot worlds (split "pilot", seeds 2000+): counts from `gate.build.pilot`, tasks per world from
-    `gate.pilot` (offline: OFFLINE_SCALE)."""
+    `gate.pilot` (offline: OFFLINE_SCALE, doubled when the σ cell runs on worlds of its own)."""
     p = plan(run)
     tasks = int(p.cell("gate.pilot").spec["tasks_per_world"])
+    tiny_count = OFFLINE_SCALE["worlds_per_cell"] * (2 if _pilot_sigma_cell(run) else 1)
     specs = []
     for world_cell, count in p.cell(PILOT_BUILD_CELL).spec["worlds"].items():
         if not smoke_keeps(run, world_cell):
@@ -1454,7 +1461,7 @@ def pilot_world_specs(run: GateRun) -> list[dict]:
         family, level = world_cell.split("-", 1)
         n_tasks = tasks
         if run.tiny:
-            count, n_tasks = OFFLINE_SCALE["worlds_per_cell"], OFFLINE_SCALE["tasks_per_world"]
+            count, n_tasks = tiny_count, OFFLINE_SCALE["tasks_per_world"]
         specs.append({"group": "pilot", "family": family, "level": level, "count": int(count), "n_tasks": int(n_tasks), "exception_style": "descriptive", "relational": True})
     return specs
 
@@ -1473,6 +1480,25 @@ def _pilot_cells(run: GateRun) -> dict[str, dict]:
         spec.setdefault("epochs", 1)
         out[cell_id] = spec
     return out
+
+
+def _pilot_sigma_cell(run: GateRun) -> dict | None:
+    """The σ cell as this run executes it (D-026), or None when the plan has none (or it is disabled). Offline and
+    smoke: OFFLINE_SCALE's worlds, after the main pilot's."""
+    try:
+        cell = plan(run).cell(PILOT_SIGMA_CELL)
+    except BudgetError:
+        return None
+    if not cell.enabled:
+        return None
+    spec = dict(cell.spec)
+    if run.tiny:
+        spec |= {"worlds": OFFLINE_SCALE["worlds_per_cell"], "world_offset": OFFLINE_SCALE["worlds_per_cell"], "epochs": OFFLINE_SCALE["epochs"]}
+    if run.smoke:
+        spec["cells"] = [c for c in spec["cells"] if smoke_keeps(run, c)]
+    spec["deliveries"] = ["push"]
+    spec.setdefault("epochs", 1)
+    return spec
 
 
 def selected_arms(selected: dict) -> dict[str, str]:
@@ -1509,8 +1535,9 @@ def _resolve_arm(name: str, arms: dict[str, str]) -> str:
 def _gate_tasks(spec: dict, arms: dict[str, str], split: str, only: Sequence[str] | None = None) -> list:
     from .tasks.gate import gate
 
+    skip = {"skip_worlds": int(spec["world_offset"])} if spec.get("world_offset") else {}  # passed only when set: task identities stay
     return [
-        gate(family=family, level=level, split=split, arm=_resolve_arm(a, arms), delivery=delivery, limit_worlds=int(spec["worlds"]))
+        gate(family=family, level=level, split=split, arm=_resolve_arm(a, arms), delivery=delivery, limit_worlds=int(spec["worlds"]), **skip)
         for a in spec["arms"]
         if only is None or a in only
         for delivery in spec["deliveries"]
@@ -1611,6 +1638,7 @@ def _pilot_params(run: GateRun) -> dict:
         "scale": scale(run),
         "worlds": pilot_world_specs(run),
         "cells": _pilot_cells(run),
+        "sigma_cell": _pilot_sigma_cell(run),
         "calibration": {"knobs": CAL_KNOBS, "max_iterations": CAL_MAX_ITERATIONS, "tolerance": CAL_TOLERANCE, "step": CAL_STEP, "apg_shortlist_k": APG_MATCHED_SHORTLIST_K},
         "power": {"sizes": POWER_SIZES, "sims": POWER_SIMS["offline" if run.tiny else "live"]},
         "lightrag_kind": "oracle" if run.offline else "extract",
@@ -1623,7 +1651,8 @@ def _pilot_projected(run: GateRun) -> float:
     """The pilot's cells, with the budget calibration at its worst case (every iteration runs)."""
     p = plan(run)
     main, pull, cal = (p.cell(c) for c in PILOT_RUN_CELLS)
-    return project(run, [p.cell(PILOT_BUILD_CELL), main, pull]) + CAL_MAX_ITERATIONS * project(run, [cal])
+    sigma = [p.cell(PILOT_SIGMA_CELL)] if _pilot_sigma_cell(run) else []
+    return project(run, [p.cell(PILOT_BUILD_CELL), main, pull, *sigma]) + CAL_MAX_ITERATIONS * project(run, [cal])
 
 
 def _fmt_env(env: dict | None) -> str:
@@ -1684,6 +1713,18 @@ def _pilot(run: GateRun, record: dict) -> None:
             s7_logs = run_gate_tasks(run, gp, models, _gate_tasks(main, arms, "pilot", ["S7"]), s7_dir, int(main["epochs"]), "pilot S7 runs", per_sample)
         logs += s7_logs
         tokens |= realized_tokens(s7_logs, "push")
+    # 3b. The σ cell (D-026): APG* and LGR* on the pilot worlds after the main pilot's, push, for σ only. S7 targets
+    #     and the calibration starts above come from the main pilot's worlds, unchanged.
+    sigma_logs: list[str] = []
+    if sigma := _pilot_sigma_cell(run):
+        sigma_dir = pdir / "logs" / f"sigma-{_digest({'env': env, 'arms': arms})}"
+        record["log_dirs"].append(_show(sigma_dir))
+        with _environ(env):
+            tasks = _gate_tasks(sigma, arms, "pilot")
+            per = sample_usd(project(run, [plan(run).cell(PILOT_SIGMA_CELL)]), [(tasks, int(sigma["epochs"]))])
+            print(f"[pilot] σ cell: {', '.join(sigma['arms'])} x {sigma['cells']} on pilot worlds {int(sigma['world_offset']) + 1}-{int(sigma['world_offset']) + int(sigma['worlds'])} (push)", flush=True)
+            sigma_logs = run_gate_tasks(run, gp, models, tasks, sigma_dir, int(sigma["epochs"]), "pilot σ runs", per)
+        logs += sigma_logs
     # 4. Matched-budget calibration of the capped arms (LGR*, S3s) on the budget-cal cell's worlds.
     context = int(cal["context"])
     capped = [a for a in cal["arms"] if a in CAL_KNOBS]
@@ -1741,10 +1782,11 @@ def _pilot(run: GateRun, record: dict) -> None:
     run.budget_calibration_path.parent.mkdir(parents=True, exist_ok=True)
     run.budget_calibration_path.write_text(header + yaml.safe_dump(json.loads(json.dumps(calibration)), sort_keys=False))  # plain copies: no YAML aliases
     record["outputs"] |= {"budget_calibration": _show(run.budget_calibration_path)}
-    # 5. Power re-simulation with the pilot's world variance components (APG* against LGR*, push).
+    # 5. Power re-simulation with the pilot's world variance components (APG* against LGR*, push): the main pilot's
+    #    worlds plus the σ cell's (D-026), so 8 worlds per cell at full scale.
     test = plan(run).cell("gate.test.f7").spec
     main_logs = [f for f in logs if Path(f).resolve().is_relative_to(main_dir.resolve())]
-    tm = load_task_means(main_logs, require_cost=not run.offline, delivery="push")
+    tm = load_task_means(main_logs + sigma_logs, require_cost=not run.offline, delivery="push")
     vc = variance_components(tm, apg, arms["LGR*"])
     power = {"variance_components": vc} | power_report(
         vc, POWER_SIZES, int(test["worlds"]), int(test["tasks_per_world"]), int(test["epochs"]), POWER_SIMS["offline" if run.tiny else "live"]
@@ -1782,7 +1824,8 @@ def _pilot(run: GateRun, record: dict) -> None:
         "budget_calibration": record["budget_calibration"],
         "budget_calibration_matched": calibration["matched"],
         "s7_delivery": "per step (APG* is per-step)" if s7_env(selected)["APE_S7_PER_STEP"] == "1" else "once per task (APG* is per-query)",
-        "power": {k: power[k] for k in ("recommended_worlds_per_cell", "recommendation")} | {"pilot": pw, "conservative": power["scenarios"]["conservative"]},
+        "power": {k: power[k] for k in ("decision", "recommended_worlds_per_cell", "recommendation")}
+        | {"pilot": pw, "conservative": power["scenarios"]["conservative"], "optimistic": power["scenarios"]["optimistic"], "sigma_worlds_per_cell": vc.get("worlds_per_cell")},
         "cost_model_entries": len(measured["entries"]),
         "build_quality": {"verdict": bq["verdict"], "offline": bq["offline"], "path": _show(build_quality_path(run))} if bq else None,
         "prereg_items": items,
