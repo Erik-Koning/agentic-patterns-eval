@@ -287,6 +287,14 @@ def test_smoke_runs_are_isolated_and_never_freeze(clean_env, monkeypatch):
         rg._check_mode(rg.GateRun("s", runs_root=clean_env / "runs"))
 
 
+def test_the_d017_check_has_no_coverage_code_of_its_own():
+    """One definition of D-017's coverage (`ape.build_quality`) for the smoke check and run_gate's build-dev."""
+    from ape import build_quality
+
+    assert smoke.SPEC_THRESHOLD == build_quality.THRESHOLD
+    assert not any(hasattr(smoke, name) for name in ("_coverage", "_entity_names", "_entity_file", "ID_PATTERN"))
+
+
 def test_the_dry_smoke_passes_every_check_end_to_end(clean_env, monkeypatch):
     """`readiness/smoke.py --dry` from scratch (~20 s): every check, the orchestrator chain at SMOKE_SCALE included,
     passes offline; nothing outside its scratch area changes."""
@@ -300,4 +308,8 @@ def test_the_dry_smoke_passes_every_check_end_to_end(clean_env, monkeypatch):
     orch = report["checks"]["orchestrator"]["measured"]
     assert orch["phases"] == dict.fromkeys(sc.SMOKE_PHASES, "done") and "is a smoke run" in orch["freeze_refusal"]
     assert report["checks"]["recovery"]["measured"]["retries"] == 1
+    # D017 measures through `ape.build_quality`, the code run_gate's build-dev check uses: one decisive F7-100 world.
+    d017 = report["checks"]["D017"]["measured"]
+    assert d017["verdict"] == "builder_passes" and d017["offline"] is True and d017["world"]["decisive"]
+    assert d017["world"]["cell"] == "F7-100" and d017["lightrag_id_coverage"] == d017["world"]["lightrag"]["coverage"] == 1.0
     assert (ROOT / "PROVENANCE.md").read_bytes() == provenance and smoke._tree_hash(ROOT / "config") == config

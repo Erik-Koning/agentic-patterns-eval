@@ -8,8 +8,9 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
                 cache/openai_probe.json lists every model the profiles call; the installed apg-core is the
                 pinned commit recorded in PROVENANCE.md; a dirty git tree is a warning.
     build-dev   dev worlds (see `dev_world_specs`) and their artifacts through `ape.artifacts`: chunk
-                embeddings, the authored APG graph, the LightRAG index (extract; offline: oracle).
-    tune        `ape.tuning.tune` for APG, LightRAG and S3s on the grid's dev cells -> tune/selected.yaml
+                embeddings, the authored APG graph, the LightRAG index (extract; offline: oracle); then
+                D-017's build-quality check (`ape.build_quality`) -> build-dev/build_quality.json.
+    tune      `ape.tuning.tune` for APG, LightRAG and S3s on the grid's dev cells -> tune/selected.yaml
                 and <config>/selected.yaml.
     anchor      PC1: the GraphRAG-Bench index, hybrid and naive runs, `pc1_from_logs` -> anchor/pc1.json.
     pilot       the pilot worlds (`gate.build.pilot`, split "pilot") and their artifacts; `gate.pilot` arms but
@@ -46,6 +47,8 @@ Run directory (`runs/<id>/`, git-ignored):
     run.json                 run id, mode (offline or live), created; a run never switches mode
     <phase>/manifest.json    one per phase (fields below)
     build-dev/worlds.json    every dev world: id, path, group, family, level, style, tasks, artifact status
+    build-dev/build_quality.json  D-017: APG and LightRAG ID coverage per world and gate cell, the verdict and the
+                             builder recommendation (offline: marked offline, coverage 1.0 by construction)
     tune/selected.yaml       the selection (format below); also written to <config>/selected.yaml
     tune/tuning_log.jsonl    every candidate tried and each system's selection (PC6); a re-run archives the old one
     tune/logs/<system>/<candidate>-<hash>/   Inspect logs + runner_index.json, one dir per candidate
@@ -73,7 +76,7 @@ inputs {key: {path, sha256}} (the config files that determine the phase's output
 files the budget guard read), params (scale and other non-file inputs), upstream {phase: fingerprint},
 fingerprint, projected_usd, spend_at_start and spend (`ape.budget.remaining`: Inspect cost over every
 log in the run's runner indexes + the ledger, against the plan's budget.total_usd), outputs, log_dirs,
-warnings, errors, history, plus phase-specific results (checks, selected, pc1_pass, budget_calibration,
+warnings, errors, history, plus phase-specific results (checks, build_quality, selected, pc1_pass, budget_calibration,
 s7_targets, power, placeholders, frozen, offline_check, ...).
 
 Idempotence. A phase is complete when its status is `done` or `skipped`. A complete phase whose
@@ -151,6 +154,7 @@ from typing import Any
 import yaml
 
 from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, projected_cost, remaining, require_affordable
+from .build_quality import worlds_per_cell_note
 from .config import ROOT, Config, embedding_cache
 from .models import PreflightError, Profile, load_profile, preflight
 from .runner import INDEX_NAME
@@ -829,7 +833,69 @@ def build_world_set(run: GateRun, record: dict, phase: str, split: str, specs: l
 
 
 def _build_dev(run: GateRun, record: dict) -> None:
-    build_world_set(run, record, "build-dev", "dev", dev_world_specs(run))
+    worlds = build_world_set(run, record, "build-dev", "dev", dev_world_specs(run))
+    record_build_quality(run, record, worlds)
+
+
+def build_quality_path(run: GateRun) -> Path:
+    return run.phase_dir("build-dev") / "build_quality.json"
+
+
+def read_build_quality(run: GateRun) -> dict | None:
+    path = build_quality_path(run)
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def _builder_label(spec: Any) -> str:
+    return f"{spec.model} ({spec.reasoning_effort} effort)" if spec.reasoning_effort else spec.model
+
+
+def record_build_quality(run: GateRun, record: dict, worlds: list[dict]) -> dict:
+    """D-017's build-quality check on the dev worlds just built (`ape.build_quality`): writes
+    build-dev/build_quality.json and a summary in the manifest. A failing or incomplete check is a warning, not a
+    failure: the outcome is a builder decision for the user (GATE_PREREG's `[USER: builder]`), not a broken build.
+    The decisive cells are the gate's dev cells (`gate.build.dev`) even in a smoke run, so a smoke run, which
+    builds only some of them, reports `incomplete` rather than a pass."""
+    from .budget import fallback_build_delta
+    from .build_quality import assess
+    from .worlds.spec import World
+
+    cfg = Config()
+    gp = gate_profile(run)
+    build = gp.role("build")
+    fallback = gp.roles.get("build_fallback")
+    builder = f"scripted perfect_author (offline stand-in for {_builder_label(build)})" if run.offline else _builder_label(build)
+    try:
+        fallback_usd: float | None = fallback_build_delta(plan(run), **_cost_kwargs(run))
+    except Exception as e:  # noqa: BLE001  (the check stands without the price; say why it is missing)
+        fallback_usd = None
+        record["warnings"].append(f"build quality: could not price the D-017 fallback builder ({type(e).__name__}: {e})")
+    report = assess(
+        (World.load(cfg.world_path(w["world_id"])) for w in worlds),
+        cfg,
+        "oracle" if run.offline else "extract",
+        offline=run.offline,
+        builder=builder,
+        fallback_builder=_builder_label(fallback) if fallback else "the build_fallback role (not in this profile)",
+        fallback_usd=fallback_usd,
+        expected_cells=list(plan(run).cell(DEV_BUILD_CELLS["gate"]).spec["worlds"]),
+    )
+    path = build_quality_path(run)
+    _write_json(path, report)
+    record["outputs"] |= {"build_quality": _show(path)}
+    record["build_quality"] = {
+        "verdict": report["verdict"],
+        "offline": report["offline"],
+        "recommendation": report["recommendation"],
+        "cells": {
+            c: {"apg": s["apg"]["coverage"] if s["apg"] else None, "lightrag": s["lightrag"]["coverage"] if s["lightrag"] else None, "pass": s["pass"]}
+            for c, s in report["cells"].items()
+        },
+    }
+    if report["verdict"] != "builder_passes":
+        record["warnings"].append(f"D-017 build check: {report['recommendation']}")
+    print(f"[build-dev] D-017 build check: {report['recommendation']}", flush=True)
+    return report
 
 
 # tune ----------------------------------------------------------------------------------------------
@@ -1294,8 +1360,10 @@ def _pilot(run: GateRun, record: dict) -> None:
     realized = {a: _medians(tokens, a, main["cells"])[1] for a in sorted({a for a, _ in tokens})}
     pw = power["scenarios"]["pilot"]
     rec = power["recommended_worlds_per_cell"]
+    bq = read_build_quality(run)  # D-017, measured on the dev builds
     items = {
-        "test worlds per cell": f"{rec if rec is not None else 'analyst decides'} ({power['recommendation']}; D-017 build check decides between 16 and 12)",
+        "test worlds per cell": f"{rec if rec is not None else 'analyst decides'} ({power['recommendation']}; {worlds_per_cell_note(bq)})",
+        "builder": bq["recommendation"] if bq else "D-017 build check not recorded (build-dev/build_quality.json missing): re-run build-dev",
         "pilot σ_w, σ_g and power": f"σ_w {pw['sigma_w']:.2f}, σ_g {pw['sigma_g']:.2f} ({'pilot estimates' if vc['estimable'] else 'priors: not estimable'}); power at Δ = 0: "
         + ", ".join(f"{n} worlds {p:.2f}" for n, p in pw["power"].items()),
         "S7 targets per cell": ", ".join(f"{c} {t}" for c, t in targets.items()) + " tokens",
@@ -1314,6 +1382,7 @@ def _pilot(run: GateRun, record: dict) -> None:
         "budget_calibration": record["budget_calibration"],
         "power": {k: power[k] for k in ("recommended_worlds_per_cell", "recommendation")} | {"pilot": pw, "conservative": power["scenarios"]["conservative"]},
         "cost_model_entries": len(measured["entries"]),
+        "build_quality": {"verdict": bq["verdict"], "offline": bq["offline"], "path": _show(build_quality_path(run))} if bq else None,
         "prereg_items": items,
         "files": {k: record["outputs"][k] for k in ("s7_targets", "budget_calibration", "power", "measured")},
     }
