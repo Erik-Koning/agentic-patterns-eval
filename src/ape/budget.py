@@ -740,8 +740,9 @@ def logs_spend(log_files: Iterable[str | Path], seen: set[str] | None = None) ->
     return {"inspect_usd": usd, "samples": samples, "partial_logs": partial, "unreadable": unreadable}
 
 
-def ledger_spend(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH) -> float:
-    """$ of every entry in one build/embedding ledger, priced from the table."""
+def ledger_spend(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH, since: float | None = None) -> float:
+    """$ of every entry in one build/embedding ledger, priced from the table; with `since` (a Unix time), only the
+    entries written from then on."""
     from .analysis.cost import load_prices, price_entry
     from .llm.ledger import Ledger
 
@@ -749,7 +750,7 @@ def ledger_spend(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH) 
         return 0.0
     prices = load_prices(costs_path)
     try:
-        return float(sum(price_entry(e, prices) for e in Ledger(ledger_path).read()))
+        return float(sum(price_entry(e, prices) for e in Ledger(ledger_path).read() if since is None or e.ts >= since))
     except KeyError as e:
         raise BudgetError(f"ledger {ledger_path}: {e}") from None
 

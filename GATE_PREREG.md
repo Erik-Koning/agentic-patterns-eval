@@ -10,11 +10,12 @@
 2. Fill every `[PILOT: …]` and `[USER: …]` item in the body, set the status to FROZEN, and commit.
 3. Run `python -m ape.run_gate freeze --run-id <id>`.
    - It refuses while a marker remains in the body, a tracked file has uncommitted changes, or PC1 fails.
-   - It records in `runs/<id>/freeze.json` and `PROVENANCE.md`: the sha256 of this file, `config/selected.yaml`, `config/s7_targets.json`, `config/budget_calibration.yaml`, `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`; the analysis code (`src/ape/analyze_gate.py`, `src/ape/analysis/`) and `uv.lock`; the commit; the analysis-code commit; and the APG pin.
+   - It also refuses unless build-dev, tune, anchor and pilot are current: a re-run of each would be a skip. Otherwise a re-tune after the pilot would freeze a new APG*/LGR* with S7 targets and caps sized for the old one.
+   - It records in `runs/<id>/freeze.json` and `PROVENANCE.md`: the sha256 of this file, `config/selected.yaml`, `config/s7_targets.json`, `config/budget_calibration.yaml`, `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`; the analysis code (`src/ape/analyze_gate.py`, `src/ape/analysis/`) and `uv.lock`; the commit; the analysis-code commit; the APG pin; and the run's test-seed block (§4).
    - Commit `PROVENANCE.md` afterwards.
-4. Only then is the test split generated (`run_gate build-test`). It refuses unless every frozen file still matches its hash.
+4. Only then is the test split generated (`run_gate build-test`). It refuses unless every frozen file still matches its hash, and unless `src/`, `power/` and `uv.lock` are exactly the freeze commit's (scorers, generators, the agent loop and the adapters included). `test` refuses on the same conditions.
 
-After the freeze, any change to this file or to a frozen file is a logged deviation (see the end of this document). `tune` and `pilot` refuse to re-run on a frozen run.
+After the freeze, any change to this file, to a frozen file or to the code is a logged deviation (see the end of this document). `tune`, `pilot` and `anchor` refuse to re-run on a frozen run.
 
 ## 1. Question
 
@@ -50,7 +51,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 | LGRo-* | diagnostic, optional | Oracle LightRAG custom KG |
 | S1 | diagnostic | Whole corpus in the system prompt |
 | S6 | diagnostic | Gold facts only |
-| S7 | diagnostic / placebo | Random chunks, sized per cell to APG*'s realized median context on the pilot (`config/s7_targets.json`: [PILOT: S7 targets per cell]), capped at 50% of the corpus |
+| S7 | diagnostic / placebo | Random chunks, sized per cell to APG*'s realized median context per compile on the pilot (`config/s7_targets.json`: [PILOT: S7 targets per cell]), capped at 50% of the corpus. S7 follows APG*'s delivery schedule (D-024): once per task for a per-query APG*, and a fresh random draw at every step for a per-step APG*, so it matches APG* both in what the model sees at each call and in what a sample delivers in total. |
 
 **Delivery modes** (EXPERIMENT_AUDIT B3; decided D-016).
 - **push:** the harness compiles context (per query or per step) and hands it to the agent.
@@ -68,6 +69,8 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 ## 4. Samples
 
 - **Splits.** `dev` (seeds 1000+) is for tuning, `pilot` (2000+) for calibration, `test` (3000+) for the gate. The test split is generated after the freeze and never inspected before the gate run.
+  - Each gate run freezes its own block of 100 test seeds: the first run 3000–3015, and the INCONCLUSIVE extension or the NO-GO fix cycle the next unused block (3100+). A run never regenerates another run's test worlds.
+  - Offline rehearsals use seeds 9000+, so they never generate the real test worlds.
 - **Size** (D-017): **[PILOT: test worlds per cell] worlds per cell × 12 tasks × 3 epochs.**
   - Planned: 16 (768 tasks per gate arm; power ≈ 0.91 at Δ = 0 under the prior σ) if the Luna builder passes the dev quality check, otherwise 12 (power ≈ 0.79).
   - If 12, set the `gate.build.test` and `gate.test.*` worlds in `config/run_plan.yaml` before the freeze.

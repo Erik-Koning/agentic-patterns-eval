@@ -60,6 +60,14 @@ def s7_target(cfg: Config, world: World) -> int:
     return int(os.environ.get("APE_S7_TARGET", cfg.context_budget_tokens))
 
 
+def s7_per_step() -> bool:
+    """Whether S7 recompiles every step (APE_S7_PER_STEP=1): the gate orchestrator sets it when APG* is per-step,
+    so the placebo mirrors APG*'s delivery schedule (D-024)."""
+    import os
+
+    return os.environ.get("APE_S7_PER_STEP", "").strip() in ("1", "true", "yes")
+
+
 async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
     chunks = chunk_world(world)
     if arm == "S1":
@@ -71,7 +79,7 @@ async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
     if arm == "S6":
         return OracleContext(world)
     if arm == "S7":
-        return RandomUnits(chunks, s7_target(cfg, world))
+        return RandomUnits(chunks, s7_target(cfg, world), per_step=s7_per_step())
     if arm.startswith("APG") or arm == "S5o":
         from ..apg.arm import build_apg_arm
 

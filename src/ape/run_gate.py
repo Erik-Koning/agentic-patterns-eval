@@ -19,13 +19,17 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
                 LGR* and S3s (`calibrate_caps`) -> <config>/budget_calibration.yaml; the NI power
                 re-simulation with the pilot's σ_w, σ_g -> pilot/power.json; the cost model recalibrated
                 (`ape.budget.calibrate`) -> <config>/budget_calibration_measured.yaml; pilot/pilot.json.
-    freeze      GATE_PREREG.md's body has no `[PILOT` / `[USER` marker left, the tree is committed and PC1
-                passes (offline: a rehearsal on a filled copy, and warnings); then the sha256 of the
-                pre-registration, the FROZEN_CONFIG and FROZEN_OUTPUTS files, the commits and the APG pin
-                -> freeze.json and PROVENANCE.md. `require_frozen` is the guard build-test and test call.
-    build-test  the test worlds (split "test", seeds 3000+; `test_world_specs`) and their artifacts, from the frozen
-                plan's TEST_BUILD_CELLS. Only this phase may generate the test split: it sets TEST_SPLIT_ENV
-                after its freeze guard, and every other generator refuses (`worlds.generate`).
+    freeze      GATE_PREREG.md's body has no `[PILOT` / `[USER` marker left, the tree is committed, PC1
+                passes (or its failure is accepted with a diagnosis) and every phase it rests on is current
+                (`stale_upstream`: a re-run of build-dev, tune, anchor and pilot would each be a skip); offline: a
+                rehearsal on a filled copy, with warnings. Then the sha256 of the pre-registration, the
+                FROZEN_CONFIG, FROZEN_OUTPUTS and FROZEN_CODE files, the commit (`code_commit`), the APG pin and
+                the run's test-seed block (`choose_test_seed_base`) -> freeze.json and PROVENANCE.md.
+                `require_frozen` is the guard build-test and test call.
+    build-test  the test worlds (split "test", the run's frozen seed block; `test_world_specs`) and their
+                artifacts, from the frozen plan's TEST_BUILD_CELLS. Only this phase may generate the test split:
+                it sets TEST_SPLIT_ENV (and TEST_SEED_BASE_ENV) after its freeze guard, and every other generator
+                refuses (`worlds.generate`).
     test        every enabled run cell of the frozen plan's TEST_RUN_PHASES (`test_groups`), one eval set per
                 cell and environment, PRIMARY_CELLS first; the budget is re-checked before each group, a
                 failing group is recorded and the others still run (the phase then fails; a re-run resumes).
@@ -37,10 +41,25 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
 
 `all` runs every phase through analyze.
 
-Freeze. A run is frozen once: after freeze.json exists, `tune` and `pilot` refuse to run (even with
---force; they would rewrite frozen inputs), and `freeze` re-runs only as a skip. `build-test` and `test`
-take the frozen files as inputs and refuse (naming the file) unless every one still matches its hash. Any
-change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log) and a new --run-id.
+Freeze. A run is frozen once: after freeze.json exists, `tune`, `pilot` and `anchor` refuse to run (even with
+--force; they would rewrite frozen inputs or pc1.json), and `freeze` re-runs only as a skip. `build-test` and
+`test` take the frozen files as inputs and refuse (naming the file) unless every one still matches its hash,
+and, live, unless CODE_PATHS (src/, power/, uv.lock) are exactly the freeze commit's (`code_drift`; offline
+rehearsals only warn). Any change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log) and
+a new --run-id.
+
+Test seeds (RELIABILITY_REVIEW S6). Each frozen run owns one block of SEED_BLOCK test seeds: the first run 3000,
+a later one (an INCONCLUSIVE extension, a NO-GO fix cycle) the next block no other frozen run used, or
+`--test-seed-base` (refused if it overlaps one). Used blocks come from runs/*/freeze.json and PROVENANCE.md's
+`<!-- ape:test-seeds ... -->` markers. The test tasks of a run past the first block select only that block
+(`tasks.gate.gate_samples`), since every run's test worlds share worlds/test/. Offline rehearsals use
+OFFLINE_TEST_SEED_BASE, so they never generate the real test worlds.
+
+Environment. Operational settings (OPERATIONAL_ENV: APE_BACKUP_DIR, build concurrency) are recorded in each
+manifest but never enter a fingerprint. A live, full-size run refuses a paid phase (PAID_PHASES) in a stray
+environment (`stray_environment`: moved worlds/cache/indices, fake embeddings, another embedding model or
+profile, a builder override) instead of silently overriding a value someone set; the test split's lock and seed
+base are always cleared (`run_environment`), since only build-test may set them.
 
 Run directory (`runs/<id>/`, git-ignored):
 
@@ -57,10 +76,14 @@ Run directory (`runs/<id>/`, git-ignored):
     pilot/worlds.json        every pilot world, as build-dev/worlds.json
     pilot/logs/main-<hash>/  the selected arms and diagnostics (push, pull); <hash> of the selections' knobs
     pilot/logs/s7-<hash>/    S7, sized by the targets in <hash>
-    pilot/budget-cal/        one log dir per calibration iteration, and calibration.json (every iteration)
+    pilot/budget-cal/        one log dir per calibration iteration, and calibration.json (every iteration); an arm
+                             that never lands in the window keeps its closest caps and the file says `matched:
+                             false` (`not_converged` lists the arms): the matched-budget secondary still runs and is
+                             reported as not matched, never failing the pilot
     pilot/power.json         variance components and NI power at POWER_SIZES (`ape.analysis.pilot`)
     pilot/pilot.json         the summary the analyst transcribes; `prereg_items` is keyed by placeholder label
-    freeze.json              frozen files {key: {path, sha256}}, git, analysis commit, APG pin, rehearsal
+    freeze.json              frozen files {key: {path, sha256}}, git, code_commit, analysis commit, APG pin,
+                             rehearsal, phases (the fingerprints it rests on), test_seeds {base, count, block, last}
     build-test/worlds.json   every test world, as build-dev/worlds.json (groups test, id_only, f5)
     test/<cell>/<group>-<hash>/   one eval set: Inspect logs + runner_index.json; <cell> the plan cell id,
                              <group> its env group, <hash> of the group's env and arms (knobs are not part of
@@ -87,10 +110,14 @@ whose recorded outputs still exist is skipped: its manifest is marked `skipped` 
 `ape.runner` reuses finished eval logs and `ape.artifacts` skips current artifacts. Before a phase runs
 (after the skip check), its `refuse` check may stop it without touching its manifest (the freeze rules).
 
-Budget guard. Before a phase runs, its projected cost (`ape.budget.projected_cost`, conservative, over
-the plan cells the phase runs, adjusted to what it actually runs) must fit in budget.total_usd ($5,000)
-minus the whole program's spend so far (`require_affordable`); otherwise the phase is refused and its
-manifest is `failed`.
+Budget guard. Before a phase runs, the projected cost of its remaining work must fit in budget.total_usd
+($5,000) minus the whole program's spend so far (`require_affordable`); otherwise the phase is refused and its
+manifest is `failed`. `projected_usd` is the phase's whole conservative projection (`ape.budget.projected_cost`
+over the plan cells it runs, adjusted to what it actually runs); `projected_remaining_usd`, which the guard
+checks, subtracts what earlier attempts with the same fingerprint already spent (`resume_credit_usd`,
+`prior_attempt_spend`: a resume reuses their finished logs and artifacts, whose spend is already counted). The
+test phase guards its PRIMARY_CELLS groups' remaining work at the start and every other group before it runs
+(finished groups count 0), so a short budget stops secondaries and leaves the verdict's evidence complete.
 - **Spend so far** comes from the program spend registry (`ape.spend`). It covers every run id, smoke run and
   later study, plus killed runs' flushed samples.
 - **Offline runs** apply the same guard with the live projection (they spend $0) against their own registry
@@ -136,7 +163,11 @@ same seeds as the primary's; offline: OFFLINE_SCALE). test/manifest.json adds:
         status: done | failed | stopped (budget) | pending,
         primary: bool,
         groups: [{name, arms: [{declared, run}], split, cells, deliveries, exposure, exception_style,
-                  epochs, n_worlds: {task cell: n}, env, log_dir, log_files, status, projected_usd, error?}]}}
+                  epochs, n_worlds: {task cell: n}, env, log_dir, log_files, status, projected_usd,
+                  projected_remaining_usd, calibration? ({matched, not_converged}: the `matched` group only),
+                  seed_base? (a run past the first test-seed block), error?}]}}
+
+A group that runs S7 carries APE_S7_PER_STEP in its env: S7 follows APG*'s delivery schedule (D-024, `s7_env`).
 
 Every test-phase task also records, in its eval metadata: arm (as run), delivery, exposure, split,
 exception_style, plan_cell, group and knobs (the APE_* arm knobs it ran under, `tasks.gate`).
@@ -167,7 +198,7 @@ from .config import ROOT, Config, embedding_cache
 from .models import PreflightError, Profile, load_profile, preflight
 from .runner import INDEX_NAME
 from .spend import LABEL_ENV, REGISTRY_ENV
-from .worlds.generate import TEST_SPLIT_ENV, require_test_split_unlocked
+from .worlds.generate import SEED_BLOCK, SPLIT_SEED_BASE, TEST_SEED_BASE_ENV, TEST_SPLIT_ENV, require_test_split_unlocked
 
 STUDY = "gate"
 PHASES = ("preflight", "build-dev", "tune", "anchor", "pilot", "freeze", "build-test", "test", "analyze")
@@ -215,6 +246,9 @@ FROZEN_OUTPUTS = ("selected.yaml", "s7_targets.json", "budget_calibration.yaml")
 # Code the verdict depends on, frozen with the design (GATE_PREREG §2: "decide at the frozen commit"): the analysis
 # code and the dependency lockfile. A change after the freeze is a logged deviation, like a config change.
 FROZEN_CODE = ("uv.lock", "src/ape/analyze_gate.py", "src/ape/analysis/gate_stats.py", "src/ape/analysis/cost.py", "src/ape/analysis/pilot.py")
+# Everything the results depend on that git tracks. After the freeze, build-test and test refuse to run unless these
+# are exactly the frozen commit's (`code_drift`): scorers, generators, the agent loop, the adapters, S7, the lockfile.
+CODE_PATHS = ("src", "power", "uv.lock")
 PLACEHOLDER = re.compile(r"\[(PILOT|USER)\b")  # any marker in GATE_PREREG.md's body blocks the freeze
 PLACEHOLDER_ITEM = re.compile(r"\[(PILOT|USER)(?::\s*([^\]\n]*))?\]")
 PC1_REASON_MIN_CHARS = 40  # an acceptance states the diagnosis, not just "ok"
@@ -227,8 +261,22 @@ TEST_RUN_PHASES = ("test", "diagnostics", "f5", "secondaries")
 PRIMARY_CELLS = ("gate.test.f7", "gate.test.f3", "gate.diag.s7", "gate.diag", "gate.f5")
 # Plan arms that run as another arm under extra knobs: LightRAG naive (PC2) is LGR* in naive mode.
 ARM_VARIANTS = {"LGR-naive": ("LGR*", {"APE_LGR_MODE": "naive"})}
+# Test seeds (S6). Each gate run's test worlds are one block of SEED_BLOCK seeds from its frozen base: the first run
+# 3000 (SPLIT_SEED_BASE), a later run (an INCONCLUSIVE extension, a NO-GO fix cycle) the next unused block, so
+# already-analysed worlds are never reused. Offline rehearsals use their own block and never touch a real one.
+FIRST_TEST_SEED_BASE = SPLIT_SEED_BASE["test"]
+OFFLINE_TEST_SEED_BASE = 9000
+TEST_SEED_MARKER = re.compile(r"<!-- ape:test-seeds run=(\S+) base=(\d+) count=(\d+) -->")
 # Environment variables the orchestrator manages itself; every other APE_* knob is recorded in params.
-MANAGED_ENV = ("APE_WORLDS", "APE_INDICES", "APE_CACHE", "APE_EMBEDDINGS", "APE_EMBEDDING_MODEL", "APE_MODEL_PROFILE", "APE_S7_TARGETS", TEST_SPLIT_ENV, REGISTRY_ENV, LABEL_ENV)
+MANAGED_ENV = (
+    "APE_WORLDS", "APE_INDICES", "APE_CACHE", "APE_EMBEDDINGS", "APE_EMBEDDING_MODEL", "APE_MODEL_PROFILE", "APE_S7_TARGETS",
+    TEST_SPLIT_ENV, TEST_SEED_BASE_ENV, REGISTRY_ENV, LABEL_ENV,
+)  # fmt: skip
+# Operational settings change how a run executes (backups, build concurrency), never what it measures. They stay out
+# of phase fingerprints (toggling a backup must not re-run, or after a freeze block, a phase) and the knob warning.
+OPERATIONAL_ENV = ("APE_BACKUP_DIR", "APE_BUILD_LLM_CONCURRENCY", "APE_BUILD_PARALLEL_INSERT", "APE_BUILD_EMBED_CONCURRENCY", "APE_BUILD_WORKERS")
+# Phases that call models or build artifacts: a live run refuses them in a stray environment (`stray_environment`).
+PAID_PHASES = ("build-dev", "tune", "anchor", "pilot", "build-test", "test")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
@@ -262,6 +310,7 @@ class GateRun:
     budget_usd: float | None = None  # lowers the guard's budget below the plan's budget.total_usd (smoke: what --max-usd leaves)
     anchor_data_dir: Path | None = None  # GraphRAG-Bench data; default <cache>/graphragbench (smoke: the repo's cache/)
     accept_pc1_failure: str | None = None  # freeze only: the analyst's recorded reason for freezing despite a failed PC1 (GATE_PREREG §7)
+    test_seed_base: int | None = None  # freeze only: the test-seed block to freeze (default 3000, else the next unused block)
 
     def __post_init__(self) -> None:
         if not _RUN_ID.match(self.run_id):
@@ -408,6 +457,18 @@ def git_tracked_changes() -> list[str] | None:
     return list(dict.fromkeys(line.split(maxsplit=1)[1] for line in lines if line.strip()))
 
 
+def code_drift(commit: str | None) -> list[str] | None:
+    """The files under CODE_PATHS that differ from `commit` (the freeze commit): changed in a later commit, modified
+    or staged in the working tree, or new and untracked. None when git cannot tell (or there is no commit)."""
+    if not commit:
+        return None
+    diff = _git("diff", "--name-only", commit, "--", *CODE_PATHS)
+    untracked = _git("ls-files", "--others", "--exclude-standard", "--", *CODE_PATHS)
+    if diff is None or untracked is None:
+        return None
+    return sorted({f for f in (*diff.splitlines(), *untracked.splitlines()) if f.strip()})
+
+
 @contextlib.contextmanager
 def _environ(updates: dict[str, str | Path | None]) -> Iterator[None]:
     """Set (or, for None, remove) environment variables for the duration; restore them after."""
@@ -430,9 +491,11 @@ def _environ(updates: dict[str, str | Path | None]) -> Iterator[None]:
 @contextlib.contextmanager
 def run_environment(run: GateRun) -> Iterator[None]:
     """Offline: every path under runs/<id>/work, fake embeddings, and an OpenAI key that cannot reach anything.
-    Live: the embedding model from the gate profile unless APE_EMBEDDING_MODEL is set (as the CLIs do); smoke
-    also puts worlds, indices and cache under runs/<id>/work.
-    Both: APE_S7_TARGETS is the run's S7 targets file."""
+    Live: the embedding model from the gate profile unless APE_EMBEDDING_MODEL is set (as the CLIs do; a value other
+    than the profile's is refused by `stray_environment`); smoke also puts worlds, indices and cache under
+    runs/<id>/work.
+    Both: APE_S7_TARGETS is the run's S7 targets file, and the test split's lock and seed base are cleared: only
+    build-test sets them, after its freeze guard, so a stray value from the shell never unlocks or re-seeds it."""
     if run.offline:
         w = run.work_dir
         updates: dict[str, str | Path | None] = {
@@ -453,6 +516,8 @@ def run_environment(run: GateRun) -> Iterator[None]:
             w = run.work_dir
             updates |= {"APE_WORLDS": w / "worlds", "APE_INDICES": w / "indices", "APE_CACHE": w / "cache"}
     updates["APE_S7_TARGETS"] = run.s7_targets_path  # S7 reads the targets this run's pilot writes
+    updates[TEST_SPLIT_ENV] = None
+    updates[TEST_SEED_BASE_ENV] = None
     # Spend registry (ape.spend): every log dir and ledger this run writes is labelled with the run; an offline run
     # has its own registry, so its guard exercises the program-wide count without touching the real one.
     updates[LABEL_ENV] = f"gate{'-offline' if run.offline else '-smoke' if run.smoke else ''}/{run.run_id}"
@@ -641,6 +706,27 @@ def spend(run: GateRun) -> dict:
     }
 
 
+def prior_attempt_spend(run: GateRun, name: str, old: dict | None, fingerprint: str) -> float:
+    """$ that earlier attempts of this phase with the same fingerprint already spent on its current work (a resume
+    after a crash, a failure or a budget stop, or a --force re-run): `ape.runner` reuses their finished eval logs and
+    `ape.artifacts` their current artifacts, so the guard should project only the rest. It is the Inspect spend of
+    the eval logs under the phase's directory written since the first such attempt, plus the build/embedding
+    ledger's entries since then. 0 for a first run or changed inputs (new work: new log dirs, new artifacts).
+    An approximation: a retried sample's first, wasted attempt is credited too, and a concurrent run's ledger
+    entries in that window would be."""
+    from .budget import ledger_spend, logs_spend
+
+    if not old or old.get("fingerprint") != fingerprint:
+        return 0.0
+    same = [h["at"] for h in old.get("history") or [] if h.get("action") == "run" and h.get("fingerprint") == fingerprint]
+    since = min(same) if same else old.get("started")
+    if not since:
+        return 0.0
+    t0 = datetime.fromisoformat(since).timestamp()
+    logs = [p for p in run.phase_dir(name).rglob("*.eval") if p.stat().st_mtime >= t0]
+    return logs_spend(logs)["inspect_usd"] + ledger_spend(Config().ledger_path, run.costs_path, since=t0)
+
+
 def verify_offline(run: GateRun) -> dict:
     """Offline runs must not have called any real model: every log's models mockllm, the ledger empty."""
     from .llm.ledger import Ledger
@@ -663,11 +749,44 @@ def verify_offline(run: GateRun) -> dict:
 
 
 def _env_knobs() -> dict[str, str]:
-    return {k: v for k, v in sorted(os.environ.items()) if k.startswith("APE_") and k not in MANAGED_ENV}
+    """APE_* knobs in the environment that can change a phase's results: part of its params (fingerprint)."""
+    return {k: v for k, v in sorted(os.environ.items()) if k.startswith("APE_") and k not in MANAGED_ENV and k not in OPERATIONAL_ENV}
+
+
+def _operational_env() -> dict[str, str]:
+    """OPERATIONAL_ENV as set: recorded in each manifest, never part of a fingerprint."""
+    return {k: os.environ[k] for k in OPERATIONAL_ENV if os.environ.get(k)}
+
+
+def stray_environment(run: GateRun) -> list[str]:
+    """Live, full-size runs: environment settings that would silently move a paid phase off the gate's design or
+    its directories. They are refused, not cleared: a value someone set on purpose must not be overridden quietly.
+    - APE_WORLDS, APE_INDICES, APE_CACHE: the gate reads and writes worlds/, indices/ and cache/ under the repo
+      (put them on another disk with a symlink); a moved cache also moves the ledger.
+    - APE_EMBEDDINGS: any value (the fake embedder is for offline runs).
+    - APE_EMBEDDING_MODEL, APE_MODEL_PROFILE: only the gate profile's values.
+    - APE_BUILD_MODEL, APE_BUILD_EFFORT: the builder comes from config/models.yaml (APE_BUILD_FALLBACK=1 selects
+      D-017's fallback builder, recorded in the phase params)."""
+    if run.isolated:
+        return []
+    out = []
+    for name, default in (("APE_WORLDS", ROOT / "worlds"), ("APE_INDICES", ROOT / "indices"), ("APE_CACHE", ROOT / "cache")):
+        raw = os.environ.get(name, "").strip()
+        if raw and Path(raw).resolve() != default.resolve():
+            out.append(f"{name}={raw} (the gate uses {_show(default)})")
+    if raw := os.environ.get("APE_EMBEDDINGS", "").strip():
+        out.append(f"APE_EMBEDDINGS={raw} (live runs use the profile's embedding model)")
+    gp = gate_profile(run)
+    for name, want in (("APE_EMBEDDING_MODEL", gp.role("embeddings").model), ("APE_MODEL_PROFILE", gp.name)):
+        raw = os.environ.get(name, "").strip()
+        if raw and raw != want:
+            out.append(f"{name}={raw} (the gate profile's is {want})")
+    out += [f"{name}={os.environ[name]} (the builder comes from config/models.yaml)" for name in ("APE_BUILD_MODEL", "APE_BUILD_EFFORT") if os.environ.get(name, "").strip()]
+    return out
 
 
 def _result_knobs() -> list[str]:
-    """APE_* knobs in the environment that change what arms do (build concurrency knobs do not)."""
+    """APE_* knobs in the environment that change what arms do (the builder's knobs act on builds only)."""
     return [k for k in _env_knobs() if not k.startswith("APE_BUILD_")]
 
 
@@ -741,6 +860,9 @@ class Phase:
     requires: tuple[str, ...] = ()
     upstream: tuple[str, ...] = ()  # phases whose fingerprint is part of this one's
     refuse: Callable[[GateRun], str | None] | None = None  # a reason the phase must not run now (checked before any record)
+    # The projected $ of the work still to do, for the budget guard; default: `projected` less what earlier attempts
+    # with the same fingerprint already spent (`prior_attempt_spend`).
+    remaining: Callable[[GateRun], float] | None = None
 
 
 def _cfg_inputs(run: GateRun, *names: str) -> dict[str, Path]:
@@ -1160,6 +1282,17 @@ def selected_env(selected: dict) -> dict[str, str]:
     return env
 
 
+def s7_env(selected: dict) -> dict[str, str]:
+    """S7's delivery schedule mirrors APG*'s (D-024): per step when the selected APG* is per-step (APG-s), else once
+    per task. Applied wherever S7 runs; tasks record it with their knobs."""
+    from .apg.arm import ARMS as APG_ARMS
+
+    arm = selected["APG*"]["arm"]
+    if arm not in APG_ARMS:
+        raise PhaseError(f"selected.yaml: APG* is {arm!r}, not an APG arm ({sorted(APG_ARMS)})")
+    return {"APE_S7_PER_STEP": "1" if APG_ARMS[arm][1] else "0"}
+
+
 def _resolve_arm(name: str, arms: dict[str, str]) -> str:
     return arms.get(name, name)
 
@@ -1288,6 +1421,15 @@ def _fmt_env(env: dict | None) -> str:
     return ", ".join(f"{k}={v}" for k, v in (env or {}).items()) or "defaults"
 
 
+def _cap_item(caps: dict[str, dict], arm: str) -> str:
+    """pilot.json's line for a capped arm's matched-budget setting; a miss says so."""
+    if arm not in caps:
+        return "n/a"
+    c = caps[arm]
+    line = f"{_fmt_env(c['env'])} (median {c['median']:.0f} tokens)"
+    return line if c["converged"] else line + f"; NOT MATCHED: outside ±{CAL_TOLERANCE:.0%} of {c['target']:.0f} after {len(c['iterations'])} iterations"
+
+
 def _pilot(run: GateRun, record: dict) -> None:
     from .analysis.pilot import load_task_means, power_report, realized_tokens, variance_components
     from .budget import calibrate
@@ -1326,9 +1468,10 @@ def _pilot(run: GateRun, record: dict) -> None:
     _write_json(run.s7_targets_path, targets)
     record["outputs"] |= {"s7_targets": _show(run.s7_targets_path)}
     if "S7" in main["arms"]:
-        s7_dir = pdir / "logs" / f"s7-{_digest({'env': env, 'targets': targets})}"
+        s7_knobs = env | s7_env(selected)
+        s7_dir = pdir / "logs" / f"s7-{_digest({'env': s7_knobs, 'targets': targets})}"
         record["log_dirs"].append(_show(s7_dir))
-        with _environ(env):
+        with _environ(s7_knobs):
             s7_logs = run_gate_tasks(run, gp, models, _gate_tasks(main, arms, "pilot", ["S7"]), s7_dir, int(main["epochs"]), "pilot S7 runs", per_sample)
         logs += s7_logs
         tokens |= realized_tokens(s7_logs, "push")
@@ -1350,24 +1493,31 @@ def _pilot(run: GateRun, record: dict) -> None:
         return {a: dict(zip(("median", "per_cell"), _medians(got, arms[a], cal["cells"]), strict=True)) | {"log_dir": _show(d)} for a in knobs}
 
     caps = calibrate_caps(context, base, start, measure)
+    if unmeasured := [a for a in capped if caps[a]["env"] is None]:
+        raise PhaseError(f"budget calibration: {unmeasured} delivered no context in any iteration (no compiles in their logs, see {_show(cal_dir)}): the arm is broken, not uncalibrated")
+    failed = [a for a in capped if not caps[a]["converged"]]
     calibration = {
         "context": context,
         "tolerance": CAL_TOLERANCE,
         "cells": list(cal["cells"]),
+        # `matched` is false when a capped arm's closest caps miss the window: the matched-budget secondary still runs
+        # with them, and is reported as not matched (GATE_PREREG §6.2, D-022); it never blocks the pilot or the verdict.
+        "matched": not failed,
+        "not_converged": failed,
         "arms": {"APG*": {"arm": arms["APG*"], "env": _matched_apg_env(selected, context), "method": "fill (not capped); PC4 checks its realized median at test time"}}
         | {a: {"arm": arms[a], "method": "capped: knobs scaled together until the median realized context is in the window"} | caps[a] for a in capped},
     }
     _write_json(cal_dir / "calibration.json", calibration)
     record["budget_calibration"] = {a: {"converged": c["converged"], "env": c["env"], "median": c["median"], "iterations": len(c["iterations"])} for a, c in caps.items()}
-    if failed := [a for a in capped if not caps[a]["converged"]]:
+    record["budget_calibration_matched"] = not failed
+    if failed:
         detail = "; ".join(f"{a}: " + ", ".join(f"[{_fmt_env(i['env'])}] -> {i['median']}" for i in caps[a]["iterations"]) for a in failed)
-        if run.smoke:  # one world and two tasks per cell cannot pin a median; the search ran, and a smoke run never freezes
-            record["warnings"].append(f"budget calibration (smoke sizes): {failed} did not converge ({detail}); the closest caps are recorded")
-        else:
-            raise PhaseError(
-                f"budget calibration: {failed} did not land within ±{CAL_TOLERANCE:.0%} of {context} tokens in {CAL_MAX_ITERATIONS} iterations ({detail}); "
-                f"see {_show(cal_dir / 'calibration.json')}. Change the arm's knobs (e.g. explicit APE_LGR_*_TOKENS caps) with the skeptic and re-run pilot."
-            )
+        record["warnings"].append(
+            f"budget calibration{' (smoke sizes)' if run.smoke else ''}: {failed} did not land within ±{CAL_TOLERANCE:.0%} of {context} tokens in "
+            f"{CAL_MAX_ITERATIONS} iterations ({detail}). The closest caps are recorded and the matched-budget secondary runs with them, marked not "
+            f"matched (budget_calibration.yaml `matched: false`). The calibration knobs apply to that secondary only; the selections (selected.yaml) "
+            f"define LGR* and S3s and are never changed to make it converge."
+        )
     for a in capped:
         if not caps[a]["converged"]:
             continue
@@ -1409,8 +1559,8 @@ def _pilot(run: GateRun, record: dict) -> None:
         + ", ".join(f"{n} worlds {p:.2f}" for n, p in pw["power"].items()),
         "S7 targets per cell": ", ".join(f"{c} {t}" for c, t in targets.items()) + " tokens",
         "APG* matched-budget settings": _fmt_env(calibration["arms"]["APG*"]["env"]),
-        "LGR* matched-budget caps": f"{_fmt_env(caps['LGR*']['env'])} (median {caps['LGR*']['median']:.0f} tokens)" if "LGR*" in caps else "n/a",
-        "S3s matched-budget cap": f"{_fmt_env(caps['S3s']['env'])} (median {caps['S3s']['median']:.0f} tokens)" if "S3s" in caps else "n/a",
+        "LGR* matched-budget caps": _cap_item(caps, "LGR*"),
+        "S3s matched-budget cap": _cap_item(caps, "S3s"),
     } | {f"{key} selection": f"{selected[key]['arm']} ({selected[key]['candidate']}: {_fmt_env(selected[key].get('env'))})" for _, key in TUNED_SYSTEMS}
     summary = {
         "run_id": run.run_id,
@@ -1421,6 +1571,8 @@ def _pilot(run: GateRun, record: dict) -> None:
         "realized_median_tokens": realized,
         "s7_targets": targets,
         "budget_calibration": record["budget_calibration"],
+        "budget_calibration_matched": calibration["matched"],
+        "s7_delivery": "per step (APG* is per-step)" if s7_env(selected)["APE_S7_PER_STEP"] == "1" else "once per task (APG* is per-query)",
         "power": {k: power[k] for k in ("recommended_worlds_per_cell", "recommendation")} | {"pilot": pw, "conservative": power["scenarios"]["conservative"]},
         "cost_model_entries": len(measured["entries"]),
         "build_quality": {"verdict": bq["verdict"], "offline": bq["offline"], "path": _show(build_quality_path(run))} if bq else None,
@@ -1430,6 +1582,75 @@ def _pilot(run: GateRun, record: dict) -> None:
     _write_json(pdir / "pilot.json", summary)
     record["outputs"] |= {"pilot": _show(pdir / "pilot.json")}
     record["s7_targets"], record["power"] = targets, summary["power"]
+
+
+# test seeds ----------------------------------------------------------------------------------------
+
+
+def test_seed_count(run: GateRun) -> int:
+    """Seeds a run's test worlds use: the largest world count of any test build cell (world i has seed base+i)."""
+    p = plan(run)
+    count = max(int(n) for cell_id in TEST_BUILD_CELLS.values() for n in p.cell(cell_id).spec["worlds"].values())
+    if count > SEED_BLOCK:
+        raise PhaseError(f"run_plan.yaml builds {count} test worlds per cell, more than a seed block ({SEED_BLOCK}); raise SEED_BLOCK in worlds/generate.py")
+    return count
+
+
+def used_test_seed_blocks(run: GateRun) -> list[dict]:
+    """Test-seed blocks other live gate runs froze: their runs_root/<id>/freeze.json (`test_seeds`; a live freeze
+    from before seed bases existed used 3000) and PROVENANCE.md's machine-readable markers, which survive a lost
+    runs/ directory. Offline rehearsals use OFFLINE_TEST_SEED_BASE and never count."""
+    used: dict[tuple[str, int], dict] = {}
+    for path in sorted(run.runs_root.glob("*/freeze.json")):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        rid = rec.get("run_id") or path.parent.name
+        if rid == run.run_id or rec.get("offline"):
+            continue
+        seeds = rec.get("test_seeds") or {"base": FIRST_TEST_SEED_BASE, "count": SEED_BLOCK}
+        used[(rid, int(seeds["base"]))] = {"run": rid, "base": int(seeds["base"]), "count": int(seeds["count"]), "source": _show(path)}
+    text = run.provenance_path.read_text() if run.provenance_path.is_file() else ""
+    for m in TEST_SEED_MARKER.finditer(text):
+        rid, base, count = m.group(1), int(m.group(2)), int(m.group(3))
+        if rid != run.run_id:
+            used.setdefault((rid, base), {"run": rid, "base": base, "count": count, "source": _show(run.provenance_path)})
+    return sorted(used.values(), key=lambda u: u["base"])
+
+
+def _overlaps(base: int, count: int, used: list[dict]) -> list[dict]:
+    return [u for u in used if base < u["base"] + u["count"] and u["base"] < base + count]
+
+
+def choose_test_seed_base(run: GateRun) -> tuple[int, list[str]]:
+    """(base, problems): the test-seed block this run would freeze. Offline: OFFLINE_TEST_SEED_BASE (a rehearsal never
+    materialises a real block). Live: `run.test_seed_base` if given, else 3000 if no other frozen run used it, else the
+    next free block of SEED_BLOCK seeds. A given base that overlaps another run's block is a problem, never adjusted."""
+    count = test_seed_count(run)
+    if run.offline:
+        return (run.test_seed_base if run.test_seed_base is not None else OFFLINE_TEST_SEED_BASE), []
+    used = used_test_seed_blocks(run)
+    if run.test_seed_base is not None:
+        base, problems = int(run.test_seed_base), []
+        if not FIRST_TEST_SEED_BASE <= base <= OFFLINE_TEST_SEED_BASE - count:
+            problems.append(f"--test-seed-base {base}: test seeds live in [{FIRST_TEST_SEED_BASE}, {OFFLINE_TEST_SEED_BASE}) ({OFFLINE_TEST_SEED_BASE}+ is the offline rehearsals')")
+        if clash := _overlaps(base, count, used):
+            problems.append(f"--test-seed-base {base}: seeds {base}-{base + count - 1} overlap " + "; ".join(f"run {u['run']!r}'s {u['base']}-{u['base'] + u['count'] - 1} ({u['source']})" for u in clash) + ": those worlds were already generated (and possibly analysed)")
+        return base, problems
+    base = FIRST_TEST_SEED_BASE
+    while _overlaps(base, count, used):
+        base += SEED_BLOCK
+    return base, []
+
+
+def run_test_seed_base(run: GateRun) -> int:
+    """The run's test-seed base: the frozen one (freeze.json; a freeze from before seed bases existed used 3000), or
+    before the freeze the one the freeze would choose."""
+    freeze = read_freeze(run)
+    if freeze is not None:
+        return int((freeze.get("test_seeds") or {}).get("base", FIRST_TEST_SEED_BASE))
+    return choose_test_seed_base(run)[0]
 
 
 # freeze --------------------------------------------------------------------------------------------
@@ -1527,6 +1748,33 @@ def _rehearsal_prereg(run: GateRun, text: str, items: dict[str, str]) -> tuple[P
     return copy, replaced
 
 
+FREEZE_RESTS_ON = ("build-dev", "tune", "anchor", "pilot")  # the phases whose outputs the freeze fixes (O2)
+
+
+def stale_upstream(run: GateRun) -> list[str]:
+    """The phases the freeze rests on that are not current: missing, not complete, or whose fingerprint (recomputed
+    from their inputs, params and upstream now, as `run_phase` would) differs from the one they ran with; a
+    pilot that ran on an older tune shows here, since tune's fingerprint is part of the pilot's."""
+    out = []
+    for name in FREEZE_RESTS_ON:
+        m = read_manifest(run, name)
+        if m is None or m.get("status") not in COMPLETE:
+            out.append(f"{name} has not completed")
+            continue
+        try:
+            state = phase_state(run, name)
+        except (PhaseError, OSError, ValueError, BudgetError) as e:
+            out.append(f"{name}: cannot verify it is current ({type(e).__name__}: {e})")
+            continue
+        if state["fingerprint"] != m.get("fingerprint"):
+            changed = sorted(k for k, v in state["inputs"].items() if (m.get("inputs") or {}).get(k, {}).get("sha256") != v["sha256"])
+            changed += [f"upstream {u}" for u, f in state["upstream"].items() if (m.get("upstream") or {}).get(u) != f]
+            if state["params"] != m.get("params"):
+                changed.append("params")
+            out.append(f"{name} ran with other inputs than now ({', '.join(changed) or 'fingerprint'}): re-run {name} and the phases after it")
+    return out
+
+
 def _freeze_inputs(run: GateRun) -> dict[str, Path]:
     return {"GATE_PREREG.md": run.prereg_path} | {k: p for k, p in frozen_files(run, run.prereg_path).items() if k != "GATE_PREREG.md"}
 
@@ -1561,6 +1809,12 @@ def _freeze(run: GateRun, record: dict) -> None:
     elif changes:
         msg = f"the git tree has uncommitted changes {changes[:10]}{' ...' if len(changes) > 10 else ''}: commit them so the frozen design traces to a commit"
         (record["warnings"] if run.offline else problems).append(msg)
+    # O2: the phases the freeze rests on must be current, i.e. a re-run of each would be a skip. A tune re-run
+    # after the pilot would otherwise freeze a new APG*/LGR* with S7 targets and caps sized for the old one.
+    if stale := stale_upstream(run):
+        (record["warnings"] if run.offline else problems).append("not current, so the frozen design would not be what ran: " + "; ".join(stale))
+    seed_base, seed_problems = choose_test_seed_base(run)
+    problems += seed_problems
     pc1 = (read_manifest(run, "anchor") or {}).get("pc1_pass")
     pc1_accepted = None
     if pc1 is not True:
@@ -1595,6 +1849,11 @@ def _freeze(run: GateRun, record: dict) -> None:
         "apg_core": {"installed_commit": _apg_installed_commit(), "pinned_commit": APG_PIN},
         "pilot": {"path": _show(run.phase_dir("pilot") / "pilot.json"), "sha256": _sha256(run.phase_dir("pilot") / "pilot.json")},
         "upstream": record["upstream"],
+        # Every phase this freeze rests on, by fingerprint (O2 checked they are current).
+        "phases": {n: (read_manifest(run, n) or {}).get("fingerprint") for n in FREEZE_RESTS_ON},
+        # build-test and test run only at this commit's CODE_PATHS (O3, `code_drift`).
+        "code_commit": git["commit"],
+        "test_seeds": {"base": seed_base, "count": test_seed_count(run), "block": SEED_BLOCK, "last": seed_base + test_seed_count(run) - 1},
         "pc1_accepted": pc1_accepted,
     }
     if rehearsal is not None:
@@ -1606,6 +1865,9 @@ def _freeze(run: GateRun, record: dict) -> None:
         "- **Frozen files** (sha256):",
         *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         *([f"- **PC1 failed and was accepted at the freeze:** {pc1_accepted['reason']}"] if pc1_accepted else []),
+        f"- **Test seeds:** {seed_base}-{freeze['test_seeds']['last']} (block base {seed_base}). A later gate run (an extension or a fix cycle) freezes a fresh block. "
+        f"<!-- ape:test-seeds run={run.run_id} base={seed_base} count={freeze['test_seeds']['count']} -->",
+        f"- **Code:** build-test and test run only at `{git['commit']}` ({', '.join(CODE_PATHS)} unchanged).",
         f"- **Record:** `{_show(run.freeze_path)}`. {DEVIATION[0].upper() + DEVIATION[1:]}.",
         "",
     ]
@@ -1614,7 +1876,9 @@ def _freeze(run: GateRun, record: dict) -> None:
     with provenance.open("a") as f:
         f.write("\n".join(lines))
     record["outputs"] |= {"freeze": _show(run.freeze_path), "provenance": _show(provenance)} | ({"prereg_rehearsal": _show(prereg)} if rehearsal is not None else {})
-    record["frozen"] = {"files": freeze["files"], "rehearsal": freeze["rehearsal"], "analysis_commit": freeze["analysis_commit"]}
+    record["frozen"] = {"files": freeze["files"], "rehearsal": freeze["rehearsal"], "analysis_commit": freeze["analysis_commit"], "code_commit": freeze["code_commit"], "test_seeds": freeze["test_seeds"]}
+    if run.accept_pc1_failure:  # recorded, but not part of the freeze's fingerprint (O4): a later `all` without it still skips
+        record["accept_pc1_failure"] = run.accept_pc1_failure
     if not run.offline:
         record["warnings"].append(f"commit {_show(run.provenance_path)} (the freeze record) before build-test")
 
@@ -1629,7 +1893,16 @@ def _frozen_inputs(run: GateRun) -> dict[str, Path]:
     return {k: _resolve(f["path"]) for k, f in (record.get("files") or {}).items()}
 
 
+def frozen_code_drift(run: GateRun) -> list[str] | None:
+    """CODE_PATHS files that differ from the freeze commit (`code_drift`); None when git cannot tell."""
+    freeze = read_freeze(run) or {}
+    return code_drift(freeze.get("code_commit") or (freeze.get("git") or {}).get("commit"))
+
+
 def _refuse_unless_frozen(name: str) -> Callable[[GateRun], str | None]:
+    """build-test and test: the run is frozen, every frozen file matches its hash, and (live) the code is exactly the
+    freeze commit's (O3). Offline rehearsals run on a working tree, so drift is only a warning there (`_warn_drift`)."""
+
     def refuse(run: GateRun) -> str | None:
         if run.smoke:
             return f"{name}: run {run.run_id!r} is a smoke run; smoke runs never freeze, so they never reach the test split"
@@ -1637,9 +1910,22 @@ def _refuse_unless_frozen(name: str) -> Callable[[GateRun], str | None]:
             require_frozen(run)
         except PhaseError as e:
             return f"{name}: {e}"
+        if run.offline:
+            return None
+        drift = frozen_code_drift(run)
+        if drift is None:
+            return f"{name}: cannot verify that {', '.join(CODE_PATHS)} are the freeze commit's (git unavailable, or freeze.json has no commit)"
+        if drift:
+            return f"{name}: code changed since the freeze commit {(read_freeze(run) or {}).get('code_commit')}: {drift[:10]}{' ...' if len(drift) > 10 else ''}. Check out that commit to run it; {DEVIATION}"
         return None
 
     return refuse
+
+
+def _warn_drift(run: GateRun, record: dict) -> None:
+    """Offline rehearsals: code drift since the rehearsal freeze is a warning (a live run refuses)."""
+    if run.offline and (drift := frozen_code_drift(run)):
+        record["warnings"].append(f"code differs from the rehearsal freeze's commit: {drift[:10]}{' ...' if len(drift) > 10 else ''} (a live run would refuse)")
 
 
 def _test_tasks_per_world(p: Plan) -> int:
@@ -1651,10 +1937,10 @@ def _test_tasks_per_world(p: Plan) -> int:
 
 
 def test_world_specs(run: GateRun, offline: bool | None = None) -> list[dict]:
-    """The test worlds (split "test", seeds 3000+) from the frozen plan's build cells (TEST_BUILD_CELLS): counts
-    and exception style from the cell, tasks per world from the test cells (offline: OFFLINE_SCALE; `offline`
-    overrides the run's mode, for the live projection). World i of every group has seed 3000+i, so the id_only
-    worlds are paired renderings of the first gate test worlds."""
+    """The test worlds (split "test", the run's frozen seed block; `run_test_seed_base`) from the frozen plan's build
+    cells (TEST_BUILD_CELLS): counts and exception style from the cell, tasks per world from the test cells
+    (offline: OFFLINE_SCALE; `offline` overrides the run's mode, for the live projection). World i of every group
+    has seed base+i, so the id_only worlds are paired renderings of the first gate test worlds."""
     offline = run.offline if offline is None else offline
     p = plan(run)
     tasks = _test_tasks_per_world(p)
@@ -1674,7 +1960,12 @@ def test_world_specs(run: GateRun, offline: bool | None = None) -> list[dict]:
 def _build_test(run: GateRun, record: dict) -> None:
     freeze = require_frozen(run)
     record["frozen_at"] = freeze["frozen_at"]
-    with _environ({TEST_SPLIT_ENV: run.run_id}):
+    _warn_drift(run, record)
+    base = run_test_seed_base(run)
+    if not run.offline and (clash := _overlaps(base, test_seed_count(run), used_test_seed_blocks(run))):
+        raise PhaseError(f"build-test: the frozen test seeds {base}+ overlap another frozen run's block: {clash}; {DEVIATION}")
+    record["test_seeds"] = {"base": base, "count": test_seed_count(run)}
+    with _environ({TEST_SPLIT_ENV: run.run_id, TEST_SEED_BASE_ENV: str(base)}):
         build_world_set(run, record, "build-test", "test", test_world_specs(run))
 
 
@@ -1732,13 +2023,14 @@ def read_calibration(run: GateRun) -> dict:
 
 
 def matched_env(calibration: dict, context: int) -> dict[str, str]:
-    """The matched-budget knobs of every arm (budget_calibration.yaml), together; applied on top of the selected env."""
+    """The matched-budget knobs of every arm (budget_calibration.yaml), together; applied on top of the selected env.
+    An arm whose calibration did not converge runs with its closest caps (the secondary is then `matched: false`)."""
     if int(calibration.get("context", -1)) != int(context):
         raise PhaseError(f"budget_calibration.yaml calibrates {calibration.get('context')} tokens, but the matched-budget cell runs at {context}: re-pilot")
     env: dict[str, str] = {}
     for key, a in (calibration.get("arms") or {}).items():
-        if a.get("converged") is False or not a.get("env"):
-            raise PhaseError(f"budget_calibration.yaml: {key} has no converged matched-budget setting: re-pilot")
+        if not a.get("env"):
+            raise PhaseError(f"budget_calibration.yaml: {key} has no matched-budget setting: re-pilot")
         knobs = {k: str(v) for k, v in a["env"].items()}
         if clash := sorted(set(knobs) & set(env)):
             raise PhaseError(f"budget_calibration.yaml: {key} sets {clash}, which another arm also sets")
@@ -1755,6 +2047,7 @@ def test_groups(run: GateRun, selected: dict, calibration: dict, offline: bool |
     Knobs are not part of Inspect's task identity, so each group has its own log dir, named by its env."""
     offline = run.offline if offline is None else offline
     arms, base = selected_arms(selected), selected_env(selected)
+    seed_base = run_test_seed_base(run)
     p = plan(run)
     groups = []
     for cell in _test_cells(p):
@@ -1772,6 +2065,12 @@ def test_groups(run: GateRun, selected: dict, calibration: dict, offline: bool |
             g = by_name.setdefault(name, {"cell": cell.id, "name": name, "env": env, "arms": []})
             g["arms"].append({"declared": a, "run": run_arm})
         for g in by_name.values():
+            if any(a["run"] == "S7" for a in g["arms"]):
+                g["env"] = g["env"] | s7_env(selected)  # S7 mirrors APG*'s delivery schedule (D-024)
+            if g["name"] == "matched":
+                g["calibration"] = {"matched": bool(calibration.get("matched", True)), "not_converged": list(calibration.get("not_converged") or [])}
+            # The run's frozen test-seed block; passed to the tasks only when it is not the first run's (identities kept).
+            g["seed_base"] = seed_base if worlds["split"] == "test" and seed_base != FIRST_TEST_SEED_BASE else None
             g |= {
                 "primary": cell.id in PRIMARY_CELLS,
                 "split": worlds["split"],
@@ -1805,6 +2104,45 @@ def _group_cell(run: GateRun, g: dict) -> PlanCell:
 
 def _group_projected(run: GateRun, g: dict) -> float:
     return project(run, [_group_cell(run, g)])
+
+
+def _group_expected_tasks(g: dict) -> int:
+    return len(g["arms"]) * len(g["deliveries"]) * len(g["cells"])
+
+
+def group_done(log_dir: Path, g: dict) -> bool:
+    """Whether a test group's eval set already finished: its runner index's last run is `done` and every one of its
+    tasks has a successful log (a resume reuses them all, so nothing is left to pay for)."""
+    from .runner import read_index
+
+    index = read_index(log_dir)
+    runs = index.get("runs") or []
+    ok = [t for t in (index.get("tasks") or {}).values() if t.get("status") == "success"]
+    return bool(runs) and runs[-1].get("status") == "done" and len(ok) >= _group_expected_tasks(g)
+
+
+def group_spent(log_dir: Path) -> float:
+    """Inspect $ the group's eval logs already hold (each sample once)."""
+    from .budget import logs_spend
+
+    return logs_spend(sorted(log_dir.rglob("*.eval")))["inspect_usd"] if log_dir.is_dir() else 0.0
+
+
+def group_remaining(run: GateRun, g: dict, projected: float) -> float:
+    """What a group still costs: 0 when it finished, else its projection less what its logs already hold."""
+    log_dir = run.phase_dir("test") / g["dir"]
+    return 0.0 if group_done(log_dir, g) else max(0.0, projected - group_spent(log_dir))
+
+
+def _test_remaining(run: GateRun) -> float:
+    """What the test phase's start must afford (O4): the PRIMARY_CELLS groups still to do, group by group (finished
+    groups count 0, partly run ones their projection less their logs' spend). Every other group is guarded before
+    it runs, so a short budget stops the secondaries and leaves the verdict's evidence complete. Before the freeze,
+    the whole projection (the freeze check refuses the phase anyway)."""
+    if read_freeze(run) is None or not run.selected_path.is_file() or not run.budget_calibration_path.is_file():
+        return _test_projected(run)
+    groups = test_groups(run, read_selected(run.selected_path), read_calibration(run))
+    return sum(group_remaining(run, g, _group_projected(run, g)) for g in groups if g["primary"])
 
 
 def _test_projected(run: GateRun) -> float:
@@ -1843,6 +2181,7 @@ def _test_group_tasks(g: dict) -> list:
             limit_worlds=g["n_worlds"][task_cell],
             plan_cell=g["cell"],
             group=g["name"],
+            **({"seed_base": g["seed_base"]} if g.get("seed_base") is not None else {}),
         )
         for a in g["arms"]
         for delivery in g["deliveries"]
@@ -1862,6 +2201,7 @@ def _cell_status(groups: list[dict]) -> str:
 def _test(run: GateRun, record: dict) -> None:
     freeze = require_frozen(run)
     record["frozen_at"] = freeze["frozen_at"]
+    _warn_drift(run, record)
     selected = read_selected(run.selected_path)
     groups = test_groups(run, selected, read_calibration(run))
     gp = gate_profile(run)
@@ -1884,7 +2224,7 @@ def _test(run: GateRun, record: dict) -> None:
             "log_dir": _show(tdir / g["dir"]),
             "log_files": [],
             "status": "pending",
-        }
+        } | ({"calibration": g["calibration"]} if "calibration" in g else {}) | ({"seed_base": g["seed_base"]} if g.get("seed_base") is not None else {})
         cells.setdefault(g["cell"], {"status": "pending", "primary": g["primary"], "groups": []})["groups"].append(entry)
         entries.append((g, entry))
     record["cells"], record["primary_complete"] = cells, False
@@ -1895,7 +2235,8 @@ def _test(run: GateRun, record: dict) -> None:
         if stopped is None:
             try:
                 entry["projected_usd"] = round(_group_projected(run, g), 4)
-                require_affordable(entry["projected_usd"], spend(run)["remaining_usd"], what)
+                entry["projected_remaining_usd"] = round(group_remaining(run, g, entry["projected_usd"]), 4)  # a resume pays only the rest
+                require_affordable(entry["projected_remaining_usd"], spend(run)["remaining_usd"], what)
             except BudgetError as e:
                 stopped = e
         if stopped is not None:
@@ -2009,6 +2350,7 @@ PHASE_DEFS: dict[str, Phase] = {
         projected=lambda r: project(r, _anchor_cells(r, anchor_profile_name(r)[0])),
         profile=lambda r: load_profile(anchor_profile_name(r)[0], r.models_path),
         requires=("preflight",),
+        refuse=_refuse_if_frozen("anchor"),  # pc1.json is part of what the freeze decided on (O3)
     ),
     "pilot": Phase(
         "pilot",
@@ -2025,7 +2367,8 @@ PHASE_DEFS: dict[str, Phase] = {
         "freeze",
         _freeze,
         inputs=_freeze_inputs,
-        params=lambda r: {"scale": scale(r), "frozen": list(frozen_files(r, r.prereg_path)), "rehearsal": r.offline, "accept_pc1_failure": r.accept_pc1_failure},
+        # --accept-pc1-failure is recorded by the freeze, not part of its fingerprint (O4): `all` without it skips.
+        params=lambda r: {"scale": scale(r), "frozen": list(frozen_files(r, r.prereg_path)), "rehearsal": r.offline},
         projected=lambda r: 0.0,
         profile=gate_profile,
         requires=("preflight", "tune", "anchor", "pilot"),
@@ -2036,7 +2379,7 @@ PHASE_DEFS: dict[str, Phase] = {
         "build-test",
         _build_test,
         inputs=_frozen_inputs,
-        params=lambda r: {"scale": scale(r), "worlds": test_world_specs(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline},
+        params=lambda r: {"scale": scale(r), "worlds": test_world_specs(r), "test_seed_base": run_test_seed_base(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline},
         projected=lambda r: project(r, [plan(r).cell(c) for c in TEST_BUILD_CELLS.values()]),
         profile=gate_profile,
         requires=("freeze",),
@@ -2053,6 +2396,7 @@ PHASE_DEFS: dict[str, Phase] = {
         requires=("freeze", "build-test"),
         upstream=("freeze", "build-test"),
         refuse=_refuse_unless_frozen("test"),
+        remaining=_test_remaining,
     ),
     "analyze": Phase(
         "analyze",
@@ -2074,14 +2418,22 @@ def _fingerprint(inputs: dict, params: dict, upstream: dict) -> str:
     return hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def phase_state(run: GateRun, name: str) -> dict:
+    """A phase's inputs (hashed), params, upstream fingerprints and fingerprint, as they are now. `run_phase` skips a
+    complete phase whose recorded fingerprint equals this one; the freeze requires that of what it rests on."""
+    phase = PHASE_DEFS[name]
+    inputs = {k: {"path": _show(p), "sha256": _sha256(p)} for k, p in phase.inputs(run).items()}
+    params = json.loads(json.dumps(phase.params(run), default=str))  # as a manifest stores them
+    upstream = {u: (read_manifest(run, u) or {}).get("fingerprint") for u in phase.upstream}
+    return {"inputs": inputs, "params": params, "upstream": upstream, "fingerprint": _fingerprint(inputs, params, upstream)}
+
+
 def run_phase(run: GateRun, name: str) -> str:
     """Run one phase (inside `run_environment`); returns "done" or "skipped", raises when it fails or is refused."""
     phase = PHASE_DEFS[name]
     _check_mode(run)
-    inputs = {k: {"path": _show(p), "sha256": _sha256(p)} for k, p in phase.inputs(run).items()}
-    params = phase.params(run)
-    upstream = {u: (read_manifest(run, u) or {}).get("fingerprint") for u in phase.upstream}
-    fingerprint = _fingerprint(inputs, params, upstream)
+    state = phase_state(run, name)
+    inputs, params, upstream, fingerprint = state["inputs"], state["params"], state["upstream"], state["fingerprint"]
     old = read_manifest(run, name)
     history = list((old or {}).get("history") or [])
     missing = _missing_outputs(old) if old else []
@@ -2096,6 +2448,8 @@ def run_phase(run: GateRun, name: str) -> str:
     for req in phase.requires:
         if not is_complete(run, req):
             raise PhaseError(f"{name} needs {req} first: python -m ape.run_gate {req} --run-id {run.run_id}{' --offline' if run.offline else ''}{' --smoke' if run.smoke else ''}")
+    if name in PAID_PHASES and (stray := stray_environment(run)):
+        raise PhaseError(f"{name}: the environment would move this live run off the gate's design or directories; unset: " + "; ".join(stray))
     profile = phase.profile(run)
     record: dict[str, Any] = {
         "phase": name,
@@ -2113,6 +2467,7 @@ def run_phase(run: GateRun, name: str) -> str:
         "params": params,
         "upstream": upstream,
         "fingerprint": fingerprint,
+        "operational_env": _operational_env(),
         "projected_usd": None,
         "spend_at_start": None,
         "spend": None,
@@ -2120,7 +2475,7 @@ def run_phase(run: GateRun, name: str) -> str:
         "log_dirs": [],
         "warnings": [],
         "errors": [],
-        "history": [*history, {"action": "run", "at": _now(), "forced": bool(run.force and old and old.get("status") in COMPLETE)}],
+        "history": [*history, {"action": "run", "at": _now(), "forced": bool(run.force and old and old.get("status") in COMPLETE), "fingerprint": fingerprint}],
     }
     if missing and old.get("status") in COMPLETE:
         record["warnings"].append(f"re-run because recorded output(s) are missing: {missing}")
@@ -2135,8 +2490,15 @@ def run_phase(run: GateRun, name: str) -> str:
         if run.budget_usd is not None:
             record["budget_basis"] = f"run budget ${run.budget_usd:,.2f} (not the plan's budget.total_usd)"
         record["spend_at_start"] = spend(run)
+        # The guard checks the work that is left (O4): a resume reuses finished eval logs and current artifacts, and
+        # their spend is already in spend_at_start, so counting it again in the projection would count it twice.
+        if phase.remaining is not None:
+            record["projected_remaining_usd"] = round(phase.remaining(run), 4)
+        else:
+            record["resume_credit_usd"] = round(prior_attempt_spend(run, name, old, fingerprint), 4)
+            record["projected_remaining_usd"] = round(max(0.0, record["projected_usd"] - record["resume_credit_usd"]), 4)
         _write_json(run.manifest_path(name), record)
-        require_affordable(record["projected_usd"], record["spend_at_start"]["remaining_usd"], f"phase {name}")
+        require_affordable(record["projected_remaining_usd"], record["spend_at_start"]["remaining_usd"], f"phase {name}")
         phase.body(run, record)
         if run.offline:
             record["offline_check"] = verify_offline(run)
@@ -2206,12 +2568,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--runs-dir", type=Path, help=f"where run directories live (default: runs/; smoke: {_show(SMOKE_RUNS)})")
     ap.add_argument("--config-dir", type=Path, default=ROOT / "config", help="read config inputs from here (offline runs and tests only)")
     ap.add_argument("--accept-pc1-failure", metavar="DIAGNOSIS", help="freeze only: freeze despite a failed PC1, recording the analyst's diagnosis (GATE_PREREG §7)")
+    ap.add_argument(
+        "--test-seed-base", type=int, metavar="SEED",
+        help=f"freeze only: the first test seed (a block of {SEED_BLOCK}); default {FIRST_TEST_SEED_BASE}, or the next block no other frozen run used",
+    )  # fmt: skip
     a = ap.parse_args(argv)
     if a.accept_pc1_failure and a.phase not in ("freeze", "all"):
         ap.error("--accept-pc1-failure applies to the freeze phase")
+    if a.test_seed_base is not None and a.phase not in ("freeze", "all"):
+        ap.error("--test-seed-base applies to the freeze phase (build-test and test use the frozen base)")
     a.runs_dir = a.runs_dir or (SMOKE_RUNS if a.smoke else ROOT / "runs")
     try:
-        run = GateRun(a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd, accept_pc1_failure=a.accept_pc1_failure)
+        run = GateRun(
+            a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd,
+            accept_pc1_failure=a.accept_pc1_failure, test_seed_base=a.test_seed_base,
+        )  # fmt: skip
         statuses = run_phases(run, a.phase)
     except (PhaseError, PreflightError, BudgetError) as e:
         print(f"run_gate: {e}", file=sys.stderr)

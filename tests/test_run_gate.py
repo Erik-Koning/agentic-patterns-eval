@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 import yaml
@@ -280,25 +281,39 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
     run_dir, out = run.dir, run.out_config_dir
     real_provenance = (ROOT / "PROVENANCE.md").read_bytes()
 
-    # 1. A calibration that cannot land fails the pilot clearly, after recording every iteration; nothing frozen.
+    # 1. A calibration that cannot land does not abort the pilot (O1): the closest caps are recorded with every
+    #    iteration, the matched-budget secondary is marked not matched, and pilot.json and power.json exist.
     real_calibrate = run_gate.calibrate_caps
 
     def never_lands(target, base, start, measure, **kw):
         return real_calibrate(target, base, start, lambda it, knobs: {a: {"median": 5000.0, "per_cell": {}, "log_dir": None} for a in knobs}, **kw)
 
     monkeypatch.setattr(run_gate, "calibrate_caps", never_lands)
-    with pytest.raises(PhaseError, match=r"budget calibration: \['LGR\*', 'S3s'\] did not land within ±25% of 300 tokens in 3 iterations"):
-        run_phases(run, "all")
-    assert read_manifest(run, "pilot")["status"] == "failed" and read_manifest(run, "freeze") is None
+    for phase in PHASES[: PHASES.index("pilot") + 1]:
+        run_phases(run, phase)
+    pm = read_manifest(run, "pilot")
+    assert pm["status"] == "done" and pm["budget_calibration_matched"] is False
+    assert any("['LGR*', 'S3s'] did not land within ±25% of 300 tokens in 3 iterations" in w and "never changed" in w for w in pm["warnings"])
     cal = json.loads((run_dir / "pilot" / "budget-cal" / "calibration.json").read_text())
     assert all(len(cal["arms"][a]["iterations"]) == run_gate.CAL_MAX_ITERATIONS for a in ("LGR*", "S3s"))
-    assert not (out / "budget_calibration.yaml").exists() and not run.freeze_path.exists()
+    written = yaml.safe_load((out / "budget_calibration.yaml").read_text())
+    assert written["matched"] is False and written["not_converged"] == ["LGR*", "S3s"]
+    assert all(written["arms"][a]["converged"] is False and written["arms"][a]["env"] for a in ("LGR*", "S3s")), "the closest caps are kept"
+    assert run_gate.matched_env(written, 300), "the matched-budget secondary still runs, with the closest caps"
+    early = json.loads((run_dir / "pilot" / "pilot.json").read_text())
+    assert early["budget_calibration_matched"] is False and "NOT MATCHED" in early["prereg_items"]["LGR* matched-budget caps"]
+    assert (run_dir / "pilot" / "power.json").is_file() and read_manifest(run, "freeze") is None
     monkeypatch.setattr(run_gate, "calibrate_caps", real_calibrate)
 
-    # 2. The re-run resumes the pilot and completes every phase through a rehearsal freeze.
+    # The skeptic re-runs the pilot (same inputs, so --force; nothing is frozen yet); this time both arms land.
+    assert run_phases(GateRun("t2", offline=True, force=True, runs_root=tmp / "runs", config_dir=config), "pilot") == {"pilot": "done"}
+    assert yaml.safe_load((out / "budget_calibration.yaml").read_text())["matched"] is True
+    assert read_manifest(run, "pilot")["resume_credit_usd"] == 0.0, "offline logs cost $0"
+
+    # 2. The re-run skips what is done and completes every phase through a rehearsal freeze.
     assert max(main([p, *argv]) for p in THROUGH_FREEZE) == 0
     m = _manifests(run_dir, THROUGH_FREEZE)
-    assert {p: x["status"] for p, x in m.items()} == {**dict.fromkeys(PART_A, "skipped"), "pilot": "done", "freeze": "done"}
+    assert {p: x["status"] for p, x in m.items()} == {**dict.fromkeys(PART_A, "skipped"), "pilot": "skipped", "freeze": "done"}
     assert m["pilot"]["upstream"] == {"tune": m["tune"]["fingerprint"]} and m["pilot"]["projected_usd"] > 0
     assert m["pilot"]["offline_check"]["ledger_entries"] == 0 and m["freeze"]["offline_check"]["ledger_entries"] == 0
     worlds = json.loads((run_dir / "pilot" / "worlds.json").read_text())["worlds"]
@@ -350,6 +365,13 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
     assert "OFFLINE REHEARSAL" in (run.work_dir / "PROVENANCE.freeze.md").read_text()
     assert (ROOT / "PROVENANCE.md").read_bytes() == real_provenance
     assert run_gate.require_frozen(run)["run_id"] == "t2"
+    # S6/O3: an offline rehearsal freezes its own seed block (never a real one), the code commit and the phases it rests on.
+    assert freeze["test_seeds"]["base"] == run_gate.OFFLINE_TEST_SEED_BASE and freeze["test_seeds"]["count"] == run_gate.test_seed_count(run)
+    assert freeze["code_commit"] == freeze["git"]["commit"] and set(freeze["phases"]) == set(run_gate.FREEZE_RESTS_ON)
+    assert "<!-- ape:test-seeds run=t2 base=9000" in (run.work_dir / "PROVENANCE.freeze.md").read_text()
+    # S8 (D-024): S7 mirrors APG*'s delivery schedule.
+    sel = read_selected(out / "selected.yaml")
+    assert pilot["s7_delivery"].startswith("per step" if sel["APG*"]["arm"] == "APG-s" else "once per task")
 
     # 3. Re-running skips everything, freeze included.
     assert max(main([p, *argv]) for p in THROUGH_FREEZE) == 0
@@ -423,6 +445,21 @@ def _fake_done(run: GateRun, phase: str, **extra) -> None:
     run_gate._write_json(run.manifest_path(phase), {"phase": phase, "status": "done", "fingerprint": f"fake-{phase}", "finished": "2026-10-01T00:00:00+00:00", "outputs": {}} | extra)
 
 
+def _fake_current(run: GateRun, **anchor_extra) -> None:
+    """Done manifests for preflight and every phase the freeze rests on, carrying their real current fingerprints (as
+    if each had just run), so the freeze's currency check (O2) passes until an input changes."""
+    _fake_done(run, "preflight")
+    for phase in run_gate.FREEZE_RESTS_ON:
+        st = run_gate.phase_state(run, phase)
+        _fake_done(run, phase, fingerprint=st["fingerprint"], inputs=st["inputs"], params=st["params"], upstream=st["upstream"], **(anchor_extra if phase == "anchor" else {}))
+
+
+def _probe(tmp) -> Path:
+    path = tmp / "openai_probe.json"
+    path.write_text(json.dumps({"models_available": ["gpt-4o-mini", "gpt-6-luna", "text-embedding-3-small"]}))
+    return path
+
+
 def test_live_freeze_refuses_placeholders_and_uncommitted_changes_and_its_guard_names_changed_files(clean_env, monkeypatch):
     tmp = clean_env
     monkeypatch.setenv("APE_CACHE", str(tmp / "cache"))  # the spend check reads this ledger, not the real one
@@ -435,12 +472,10 @@ def test_live_freeze_refuses_placeholders_and_uncommitted_changes_and_its_guard_
     prereg, provenance = tmp / "GATE_PREREG.md", tmp / "PROVENANCE.md"
     shutil.copy(ROOT / "GATE_PREREG.md", prereg)
     shutil.copy(ROOT / "PROVENANCE.md", provenance)
-    paths = {"runs_root": tmp / "runs", "prereg_path": prereg, "provenance_path": provenance}
+    paths = {"runs_root": tmp / "runs", "prereg_path": prereg, "provenance_path": provenance, "probe_path": _probe(tmp)}
     run = GateRun("live-freeze", **paths)
     run_gate._check_mode(run)
-    for phase in ("preflight", "tune", "pilot"):
-        _fake_done(run, phase)
-    _fake_done(run, "anchor", pc1_pass=True)
+    _fake_current(run, pc1_pass=True)
     changes: list[str] = []
     monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: list(changes))
 
@@ -457,13 +492,28 @@ def test_live_freeze_refuses_placeholders_and_uncommitted_changes_and_its_guard_
     changes[:] = ["src/ape/analysis/gate_stats.py"]
     with pytest.raises(PhaseError, match=r"uncommitted changes \['src/ape/analysis/gate_stats.py'\]"):
         run_phases(run, "freeze")
+    changes.clear()
+
+    # 2b. O2: a re-tune after the pilot (selected.yaml no longer what the pilot ran with) makes the pilot stale.
+    original = (out / "selected.yaml").read_text()
+    (out / "selected.yaml").write_text(yaml.safe_dump({k: {"arm": a, "env": {}, "candidate": "c2"} for k, a in (("APG*", "APG-q"), ("LGR*", "LGR-s"), ("S3s", "S3s"))}))
+    with pytest.raises(PhaseError, match=r"not current(.|\n)*pilot ran with other inputs than now \(config/selected.yaml(.|\n)*re-run pilot"):
+        run_phases(run, "freeze")
+    (out / "selected.yaml").write_text(original)
 
     # 3. Committed: frozen, recorded in PROVENANCE.md; the real one is untouched.
-    changes.clear()
     real = (ROOT / "PROVENANCE.md").read_bytes()
     assert run_phases(run, "freeze") == {"freeze": "done"}
     freeze = run_gate.require_frozen(run)
     assert freeze["rehearsal"] is False and freeze["files"]["GATE_PREREG.md"]["sha256"] == run_gate._sha256(prereg)
+    # S6: the first live run freezes the first test-seed block, recorded machine-readably in PROVENANCE.md.
+    assert freeze["test_seeds"]["base"] == run_gate.FIRST_TEST_SEED_BASE == 3000
+    assert f"<!-- ape:test-seeds run=live-freeze base=3000 count={freeze['test_seeds']['count']} -->" in provenance.read_text()
+    assert run_gate.choose_test_seed_base(GateRun("next-run", **paths))[0] == 3000 + run_gate.SEED_BLOCK, "a later run gets a fresh block"
+    assert "overlap" in run_gate.choose_test_seed_base(GateRun("next-run", test_seed_base=3010, **paths))[1][0]
+    # O3: the anchor's pc1.json is frozen too.
+    with pytest.raises(PhaseError, match=r"anchor: run 'live-freeze' is frozen"):
+        run_phases(GateRun("live-freeze", force=True, **paths), "anchor")
     assert "Gate freeze: run `live-freeze`" in provenance.read_text() and (ROOT / "PROVENANCE.md").read_bytes() == real
 
     # 4. The guard names a changed frozen file; tune, pilot and freeze refuse to run, --force or not.
@@ -566,6 +616,9 @@ def test_offline_all_builds_the_test_split_after_the_freeze_runs_the_primary_fir
     assert {w["group"] for w in worlds} == {"test", "id_only", "f5"} and all("-test-" in w["world_id"] for w in worlds)
     seeds = {g: {w["world_id"].rsplit("-", 1)[1] for w in worlds if w["group"] == g} for g in ("test", "id_only")}
     assert seeds["id_only"] <= seeds["test"]
+    # S6: an offline rehearsal builds its test worlds from its own seed block, never the first real one (3000+).
+    assert all(int(w["world_id"].rsplit("-s", 1)[1]) >= run_gate.OFFLINE_TEST_SEED_BASE for w in worlds)
+    assert m["build-test"]["test_seeds"]["base"] == run_gate.OFFLINE_TEST_SEED_BASE
 
     # Every plan cell's groups: their logs, and what each log says it ran.
     selected = read_selected(out / "selected.yaml")
@@ -662,12 +715,21 @@ def test_test_groups_at_live_sizes_follow_the_plan():
     assert by[("gate.sec.matched-300", "matched")]["env"] == {"APE_APG_SHORTLIST_K": "48", "APE_LGR_MODE": "mix", "APE_S3S_BUDGET": "310", "APE_APG_FILL": "1", "APE_APG_BUDGET": "300", "APE_LGR_BUDGET": "350"}
     assert by[("gate.f5", "lgr-naive")]["arms"] == [{"declared": "LGR-naive", "run": "LGR-s"}] and by[("gate.f5", "lgr-naive")]["env"]["APE_LGR_MODE"] == "naive"
     assert [a["declared"] for a in by[("gate.f5", "selected")]["arms"]] == ["APG*", "LGR*"]
-    assert by[("gate.diag.s7", "selected")]["env"] == {"APE_APG_SHORTLIST_K": "24", "APE_LGR_MODE": "mix", "APE_S3S_BUDGET": "2000"}
-    # A calibration for another budget, or one that did not converge, is refused.
+    # S7 mirrors APG*'s delivery schedule (D-024): APG-s is per-step, so S7 recompiles every step too.
+    assert by[("gate.diag.s7", "selected")]["env"] == {"APE_APG_SHORTLIST_K": "24", "APE_LGR_MODE": "mix", "APE_S3S_BUDGET": "2000", "APE_S7_PER_STEP": "1"}
+    assert "APE_S7_PER_STEP" not in by[("gate.diag", "selected")]["env"], "only groups that run S7 carry its knob"
+    # O1: the matched group carries the calibration's verdict; the first run's seed block passes no seed filter.
+    assert by[("gate.sec.matched-300", "matched")]["calibration"] == {"matched": True, "not_converged": []}
+    assert all(g["seed_base"] is None for g in groups)
+    # A calibration for another budget, or one with no setting at all, is refused. One that did not converge runs with
+    # its closest caps (O1), and the matched group says it is not matched.
     with pytest.raises(PhaseError, match="calibrates 2000 tokens"):
         run_gate.test_groups(run, selected, calibration | {"context": 2000}, offline=False)
-    with pytest.raises(PhaseError, match="S3s has no converged"):
-        run_gate.test_groups(run, selected, {**calibration, "arms": {**calibration["arms"], "S3s": {"converged": False, "env": {"APE_S3S_BUDGET": "9"}}}}, offline=False)
+    with pytest.raises(PhaseError, match="S3s has no matched-budget setting"):
+        run_gate.test_groups(run, selected, {**calibration, "arms": {**calibration["arms"], "S3s": {"converged": False, "env": None}}}, offline=False)
+    missed = {**calibration, "matched": False, "not_converged": ["S3s"], "arms": {**calibration["arms"], "S3s": {"converged": False, "env": {"APE_S3S_BUDGET": "9"}}}}
+    m300 = {(g["cell"], g["name"]): g for g in run_gate.test_groups(run, selected, missed, offline=False)}[("gate.sec.matched-300", "matched")]
+    assert m300["env"]["APE_S3S_BUDGET"] == "9" and m300["calibration"] == {"matched": False, "not_converged": ["S3s"]}
     # The projection prices what runs: n_tasks-cells as whole worlds (108 tasks for 100).
     assert run_gate._test_projected(run) > run_gate.project(run, [c for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES])
 
@@ -694,13 +756,11 @@ def test_live_freeze_needs_a_written_diagnosis_to_accept_a_failed_pc1(clean_env,
     start = run_gate.prereg_body_start(text)
     prereg.write_text(text[:start] + run_gate.PLACEHOLDER_ITEM.sub("filled", text[start:]))
     shutil.copy(ROOT / "PROVENANCE.md", provenance)
-    paths = {"runs_root": tmp / "runs", "prereg_path": prereg, "provenance_path": provenance}
+    paths = {"runs_root": tmp / "runs", "prereg_path": prereg, "provenance_path": provenance, "probe_path": _probe(tmp)}
     monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: [])
     run = GateRun("pc1-fail", **paths)
     run_gate._check_mode(run)
-    for phase in ("preflight", "tune", "pilot"):
-        _fake_done(run, phase)
-    _fake_done(run, "anchor", pc1_pass=False)
+    _fake_current(run, pc1_pass=False)
 
     with pytest.raises(PhaseError, match=r"PC1 does not pass(.|\n)*Diagnose the anchor logs(.|\n)*--accept-pc1-failure"):
         run_phases(run, "freeze")
@@ -732,3 +792,173 @@ def test_backup_runs_after_live_phases_only_and_never_fails_one(clean_env, monke
     record = {"warnings": []}
     run_gate.backup_after_phase(live, "preflight", record)
     assert "backup to" in record["warnings"][0] and "disk full" in record["warnings"][0]
+
+
+# --- RELIABILITY_REVIEW R4: orchestration (O1-O4, S6 seeds, S8 S7 matching) -----------------------
+
+
+def test_build_test_and_test_refuse_code_that_differs_from_the_freeze_commit(clean_env, monkeypatch):
+    """O3: live, build-test and test run only at the freeze commit's src/, power/ and uv.lock."""
+    run = GateRun("drift", runs_root=clean_env / "runs")
+    monkeypatch.setattr(run_gate, "require_frozen", lambda r: {"frozen_at": "t", "code_commit": "abc123"})
+    monkeypatch.setattr(run_gate, "read_freeze", lambda r: {"code_commit": "abc123"})
+    refuse = run_gate._refuse_unless_frozen("test")
+    monkeypatch.setattr(run_gate, "frozen_code_drift", lambda r: ["src/ape/scorers/success.py"])
+    assert "code changed since the freeze commit abc123: ['src/ape/scorers/success.py']" in refuse(run)
+    monkeypatch.setattr(run_gate, "frozen_code_drift", lambda r: None)
+    assert "cannot verify" in refuse(run)
+    monkeypatch.setattr(run_gate, "frozen_code_drift", lambda r: [])
+    assert refuse(run) is None
+    # Offline rehearsals run on a working tree: drift is a warning in the phase record, never a refusal.
+    off = GateRun("drift-off", offline=True, runs_root=clean_env / "runs")
+    monkeypatch.setattr(run_gate, "frozen_code_drift", lambda r: ["src/ape/run_gate.py"])
+    assert refuse(off) is None
+    record = {"warnings": []}
+    run_gate._warn_drift(off, record)
+    assert "a live run would refuse" in record["warnings"][0]
+    # code_drift itself: a later commit or a working-tree change (git diff) and new untracked files, under CODE_PATHS only.
+    seen = []
+
+    def fake_git(*args):
+        seen.append(args)
+        return "src/ape/a.py\nuv.lock" if args[0] == "diff" else "src/ape/new.py"
+
+    monkeypatch.setattr(run_gate, "_git", fake_git)
+    assert run_gate.code_drift("abc123") == ["src/ape/a.py", "src/ape/new.py", "uv.lock"]
+    assert seen[0] == ("diff", "--name-only", "abc123", "--", *run_gate.CODE_PATHS)
+    assert run_gate.code_drift(None) is None
+
+
+def test_operational_settings_never_change_a_fingerprint_and_pc1_acceptance_is_not_one(clean_env, monkeypatch):
+    """O4: toggling a backup (or build concurrency) neither re-runs a phase nor, after a freeze, blocks `all`."""
+    config = clean_env / "config"
+    shutil.copytree(ROOT / "config", config)
+    run = GateRun("ops", offline=True, runs_root=clean_env / "runs", config_dir=config)
+    before = run_gate.phase_state(run, "tune")["fingerprint"]
+    monkeypatch.setenv("APE_BACKUP_DIR", str(clean_env / "bk"))
+    monkeypatch.setenv("APE_BUILD_WORKERS", "2")
+    assert run_gate.phase_state(run, "tune")["fingerprint"] == before
+    assert run_gate._operational_env() == {"APE_BACKUP_DIR": str(clean_env / "bk"), "APE_BUILD_WORKERS": "2"} and run_gate._result_knobs() == []
+    monkeypatch.setenv("APE_S3S_BUDGET", "999")  # a result knob still does
+    assert run_gate.phase_state(run, "tune")["fingerprint"] != before
+    accepted = GateRun("ops", offline=True, runs_root=clean_env / "runs", config_dir=config, accept_pc1_failure="x" * 50)
+    assert "accept_pc1_failure" not in run_gate.PHASE_DEFS["freeze"].params(accepted)
+
+
+def test_a_resume_is_guarded_on_the_work_that_is_left(clean_env, monkeypatch):
+    """O4: earlier attempts with the same fingerprint already paid for logs and artifacts that a resume reuses."""
+    from datetime import datetime
+
+    import ape.budget as budget
+    from ape.runner import INDEX_NAME
+
+    run = GateRun("resume", offline=True, runs_root=clean_env / "runs")
+    pdir = run.phase_dir("tune")
+    (pdir / "logs").mkdir(parents=True)
+    old_log, new_log = pdir / "logs" / "old.eval", pdir / "logs" / "new.eval"
+    old_log.write_text("x")
+    os.utime(old_log, (1_000_000_000, 1_000_000_000))  # 2001: before the attempts with this fingerprint
+    new_log.write_text("x")
+    seen: dict = {}
+
+    def logs_spend(logs):
+        seen["logs"] = sorted(Path(p).name for p in logs)
+        return {"inspect_usd": 4.0}
+
+    def ledger_spend(path, costs, since=None):
+        seen["since"] = since
+        return 1.5
+
+    monkeypatch.setattr(budget, "logs_spend", logs_spend)
+    monkeypatch.setattr(budget, "ledger_spend", ledger_spend)
+    history = [
+        {"action": "run", "at": "2026-10-01T09:00:00+00:00", "fingerprint": "OTHER"},
+        {"action": "run", "at": "2026-10-02T08:00:00+00:00", "fingerprint": "F"},
+        {"action": "run", "at": "2026-10-02T10:00:00+00:00", "fingerprint": "F"},
+    ]
+    old = {"fingerprint": "F", "started": "2026-10-02T10:00:00+00:00", "history": history}
+    assert run_gate.prior_attempt_spend(run, "tune", old, "F") == 5.5
+    assert seen["logs"] == ["new.eval"], "only logs written since the first attempt with this fingerprint"
+    assert seen["since"] == datetime.fromisoformat("2026-10-02T08:00:00+00:00").timestamp()
+    assert run_gate.prior_attempt_spend(run, "tune", old, "CHANGED") == 0.0, "changed inputs are new work"
+    assert run_gate.prior_attempt_spend(run, "tune", None, "F") == 0.0
+    # Test groups: a finished group costs 0; a partly run one its projection less its logs' spend.
+    g = {"dir": "gate.test.f7/selected-x", "arms": [{"run": "APG-s"}], "deliveries": ["push"], "cells": ["F7-10", "F7-1000"]}
+    gdir = run.phase_dir("test") / g["dir"]
+    monkeypatch.setattr(run_gate, "group_spent", lambda d: 3.0)
+    assert run_gate.group_remaining(run, g, 10.0) == 7.0
+    gdir.mkdir(parents=True)
+    (gdir / INDEX_NAME).write_text(json.dumps({"runs": [{"status": "done"}], "tasks": {"a": {"status": "success"}, "b": {"status": "success"}}}))
+    assert run_gate.group_remaining(run, g, 10.0) == 0.0
+
+
+def test_a_live_paid_phase_refuses_a_stray_environment(clean_env, monkeypatch):
+    run = GateRun("stray", runs_root=clean_env / "runs")
+    assert run_gate.stray_environment(run) == []
+    monkeypatch.setenv("APE_WORLDS", str(ROOT / "worlds"))  # the default is fine
+    monkeypatch.setenv("APE_CACHE", str(clean_env / "elsewhere"))
+    monkeypatch.setenv("APE_EMBEDDINGS", "fake")
+    monkeypatch.setenv("APE_BUILD_MODEL", "openai/gpt-6-sol")
+    monkeypatch.setenv("APE_BUILD_FALLBACK", "1")  # D-017's switch is allowed
+    stray = run_gate.stray_environment(run)
+    assert [s.split("=", 1)[0] for s in stray] == ["APE_CACHE", "APE_EMBEDDINGS", "APE_BUILD_MODEL"]
+    assert run_gate.stray_environment(GateRun("stray-off", offline=True, runs_root=clean_env / "runs")) == []
+    run_gate._check_mode(run)
+    _fake_done(run, "preflight")
+    with pytest.raises(PhaseError, match=r"build-dev: the environment would move this live run(.|\n)*APE_CACHE="):
+        run_phases(run, "build-dev")
+    assert read_manifest(run, "build-dev") is None, "refused before any record"
+
+
+def test_test_seed_blocks_keep_runs_apart(clean_env, monkeypatch):
+    """S6: a later run's test worlds come from a fresh seed block, and the gate task reads only its run's block."""
+    from ape.tasks.gate import gate_samples
+    from ape.worlds.generate import SEED_BLOCK, TEST_SEED_BASE_ENV, make_world
+
+    monkeypatch.setenv("APE_WORLDS", str(clean_env / "worlds"))
+    assert make_world("F3", "5", "test", 1, 2).id.endswith("-s3001")
+    monkeypatch.setenv(TEST_SEED_BASE_ENV, "3100")  # what build-test sets from the frozen base
+    assert make_world("F3", "5", "test", 1, 2).id.endswith("-s3101")
+    assert make_world("F3", "5", "dev", 1, 2).id.endswith("-s1001"), "only the test split follows the run's base"
+    assert make_world("F3", "5", "dev", 1, 2, seed_base=5000).id.endswith("-s5001"), "another study's namespace"
+    monkeypatch.delenv(TEST_SEED_BASE_ENV)
+    cfg = Config()
+    for base in (3000, 3100):
+        for i in range(2):
+            w = make_world("F3", "5", "test", i, 2, seed_base=base)
+            w.save(cfg.world_path(w.id))
+
+    def worlds(samples):
+        return sorted({s.metadata["world_id"].rsplit("-", 1)[1] for s in samples})
+
+    assert worlds(gate_samples("F3", "5", "test", limit_worlds=2)) == ["s3000", "s3001"], "the first run's block sorts first"
+    assert worlds(gate_samples("F3", "5", "test", limit_worlds=2, seed_base=3100)) == ["s3100", "s3101"]
+    assert worlds(gate_samples("F3", "5", "test", seed_base=3000 + SEED_BLOCK)) == ["s3100", "s3101"]
+    # An extension's groups pass their block to every test-split task; the first run's pass none (identities kept).
+    run = GateRun("ext", runs_root=clean_env / "runs")
+    monkeypatch.setattr(run_gate, "run_test_seed_base", lambda r: 3100)
+    sel = {"APG*": {"arm": "APG-q", "env": {}}, "LGR*": {"arm": "LGR-s", "env": {}}, "S3s": {"arm": "S3s", "env": {}}}
+    cal = {"context": 300, "arms": {"APG*": {"env": {"APE_APG_FILL": "1"}}, "LGR*": {"env": {"APE_LGR_BUDGET": "350"}}, "S3s": {"env": {"APE_S3S_BUDGET": "310"}}}}
+    groups = run_gate.test_groups(run, sel, cal, offline=False)
+    assert {g["seed_base"] for g in groups if g["split"] == "test"} == {3100} and {g["seed_base"] for g in groups if g["split"] == "dev"} == {None}
+    assert {(g["cell"], g["name"]): g for g in groups}[("gate.diag.s7", "selected")]["env"]["APE_S7_PER_STEP"] == "0", "APG-q: S7 compiles once"
+
+
+def test_s7_mirrors_a_per_step_apg_with_a_fresh_draw_each_step():
+    """S8 (D-024): per-step S7 redraws at every step (seeded by the step query) at the per-compile target; per-query
+    S7 compiles once per task, as before."""
+    from ape.kb.baselines import RandomUnits
+    from ape.worlds.generate import make_world
+    from ape.worlds.render import chunk_world
+
+    world = make_world("F7", "1000", "dev", 0, 2)
+    chunks, task = chunk_world(world), world.tasks[0]
+    once, each = RandomUnits(chunks, 300), RandomUnits(chunks, 300, per_step=True)
+    assert once.per_step is False and each.per_step is True
+
+    def ids(arm, q):
+        return asyncio.run(arm.compile(q, task)).unit_ids
+
+    assert ids(once, task.prompt) == ids(once, "a later step query") == ids(each, task.prompt), "the first draw is the per-task draw"
+    assert ids(each, "step 2 query") != ids(each, "step 3 query"), "each step a fresh draw"
+    assert ids(each, "step 2 query") == ids(each, "step 2 query"), "a trajectory replays the same draws"
