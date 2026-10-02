@@ -331,7 +331,7 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
     n_markers = len(run_gate.prereg_placeholders((ROOT / "GATE_PREREG.md").read_text()))
     assert freeze["rehearsal"] is True and len(freeze["placeholders_replaced"]) == n_markers > 0
     assert run_gate.prereg_placeholders((run.work_dir / "GATE_PREREG.md").read_text()) == []
-    expected = {"GATE_PREREG.md", "GATE_PREREG.md (draft)", *(f"config/{n}" for n in run_gate.FROZEN_CONFIG + run_gate.FROZEN_OUTPUTS)}
+    expected = {"GATE_PREREG.md", "GATE_PREREG.md (draft)", *(f"config/{n}" for n in run_gate.FROZEN_CONFIG + run_gate.FROZEN_OUTPUTS), *run_gate.FROZEN_CODE}
     assert set(freeze["files"]) == expected and all(f["sha256"] for f in freeze["files"].values())
     assert freeze["apg_core"]["installed_commit"] == run_gate.APG_PIN and freeze["analysis_commit"]
     assert "OFFLINE REHEARSAL" in (run.work_dir / "PROVENANCE.freeze.md").read_text()

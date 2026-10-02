@@ -140,6 +140,6 @@ Each entry records the decision, why it was made, and who made it.
 
 | ID | Decision | Blocks |
 |---|---|---|
-| O-1 | **Create a new OpenAI project key with a hard spend limit** (recommended: the D-018 budget, $1,500), then replace the contents of `.env`: `! echo "OPENAI_API_KEY=<new key>" > .env`. The shell's `OPENAI_KEY` is rejected (401 invalid_api_key). | E2–E5, L2, L4, L5, H4, the Luna build-quality check, everything live |
+| O-1 | **Create a new OpenAI project key with a hard spend limit** (recommended: staged limits, about $300 for the probe, smoke and gate, then raised per study up to the $5,000 program budget, D-021), then replace the contents of `.env`: `! echo "OPENAI_API_KEY=<new key>" > .env`. The shell's `OPENAI_KEY` is rejected (401 invalid_api_key). | E2–E5, L2, L4, L5, H4, the Luna build-quality check, everything live |
 | O-3 | Names for the three roles in D-018. The skeptic must not be on the APG side. | Dev tuning (the skeptic owns the LightRAG/S3s candidates) |
 | H5 | A human reviews `readiness/spotcheck.md` (30–45 min). | Pilot |

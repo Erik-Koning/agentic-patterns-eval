@@ -41,7 +41,7 @@ Last updated: 2026-09-30.
 
 | ID | Check | Status | Evidence / notes | Owner |
 |---|---|---|---|---|
-| D1 (B) | `ORCHESTRATOR_BRIEF_v2.md` §0 filled | ⚠️ | Filled: `kg_framework`, `kg_ingestion_pipeline`, provider. **Still TODO-BLOCKING:** `team` (including the skeptic) and `compute_budget_usd`. Model IDs wait on E3. | user |
+| D1 (B) | `ORCHESTRATOR_BRIEF_v2.md` §0 filled | ⚠️ | Filled: `kg_framework`, `kg_ingestion_pipeline`, provider. `compute_budget_usd` = 5000 (D-021). **Still TODO-BLOCKING:** `team` (including the skeptic; O-3). Model IDs wait on E3. | user |
 | D2 | Claude-specific text adapted for OpenAI | ⏳ | Sampling rejection and preserved-thinking notes in §6.3 and §5.3 of the brief. | — |
 | D3 | `EVAL_DESIGN.md` flagged for OpenAI re-pricing | ⏳ | | — |
 

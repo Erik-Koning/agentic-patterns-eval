@@ -10,7 +10,7 @@
 2. Fill every `[PILOT: …]` and `[USER: …]` item in the body, set the status to FROZEN, and commit.
 3. Run `python -m ape.run_gate freeze --run-id <id>`.
    - It refuses while a marker remains in the body, a tracked file has uncommitted changes, or PC1 fails.
-   - It records in `runs/<id>/freeze.json` and `PROVENANCE.md`: the sha256 of this file, `config/selected.yaml`, `config/s7_targets.json`, `config/budget_calibration.yaml`, `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`; the commit; the analysis-code commit (`src/ape/analysis/`); and the APG pin.
+   - It records in `runs/<id>/freeze.json` and `PROVENANCE.md`: the sha256 of this file, `config/selected.yaml`, `config/s7_targets.json`, `config/budget_calibration.yaml`, `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`; the analysis code (`src/ape/analyze_gate.py`, `src/ape/analysis/`) and `uv.lock`; the commit; the analysis-code commit; and the APG pin.
    - Commit `PROVENANCE.md` afterwards.
 4. Only then is the test split generated (`run_gate build-test`). It refuses unless every frozen file still matches its hash.
 
@@ -91,7 +91,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 
 ## 5. Tuning (dev split only; equal budget)
 
-- **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.run_gate tune --run-id <id>`. Every configuration tried is logged in `runs/<id>/tune/tuning_log.jsonl`; a re-run archives the previous log beside it (`tuning_log.<UTC time>.jsonl`), and archived logs count toward PC6 and are reported. The selections go to `runs/<id>/tune/selected.yaml`, which the freeze hashes. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
+- **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.run_gate tune --run-id <id>`. Every configuration tried is logged in `runs/<id>/tune/tuning_log.jsonl`; a re-run archives the previous log beside it (`tuning_log.<UTC time>.jsonl`), and archived logs count toward PC6 and are reported. The selections go to `runs/<id>/tune/selected.yaml` and `config/selected.yaml`; the freeze hashes `config/selected.yaml`. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
 - **Selections** (`config/selected.yaml`, fixed at freeze): APG* = [PILOT: APG* selection]; LGR* = [PILOT: LGR* selection]; S3s = [PILOT: S3s selection].
 - **Roles** (D-018, O-3):
   - APG owner: [USER: APG owner]

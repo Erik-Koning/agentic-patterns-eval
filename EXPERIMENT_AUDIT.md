@@ -182,7 +182,7 @@ Status key: ✅ built and producing data · 🟡 partially built · ❌ not buil
 | B2 placebo sizing | ✅ per-cell target from `config/s7_targets.json` (pilot), capped at 50% of corpus | `kb/baselines.py`, `agent/arms.py`, D-012 |
 | B3 relational artifact | ✅ `exception_style` knob (paired worlds) + `search_kb` pull delivery; verdict per delivery mode for F7 (O-6) | `worlds/gen_f7.py`, `agent/kb_react.py`, `tasks/gate.py`, D-013 |
 | B4 kg-role fallback | ✅ `required=True`; kg model name per compile | `apg/arm.py`, `lgr/adapter.py`, D-014 |
-| B5 gate size | ⏳ user decision (O-5) | `DECISIONS.md` |
+| B5 gate size | ✅ 16 worlds per cell (D-017, D-021), re-simulated with pilot σ before the freeze | `DECISIONS.md`, `GATE_PREREG.md` §4 |
 | B6 asymmetric selection | ✅ APG* chosen from APG-q/APG-s; APG knobs tunable; `decide(apg_arm=...)` | `analysis/gate_stats.py`, `GATE_PREREG.md`, D-014 |
 | Log: exposed tools per step | ✅ `step_log` | `agent/kb_react.py` |
 | Log: shortlist IDs, gold in shortlist/matches/contributors | ✅ compile meta | `apg/arm.py` |
@@ -190,8 +190,8 @@ Status key: ✅ built and producing data · 🟡 partially built · ❌ not buil
 | Log: embedding attribution | ✅ `EMBED_CONTEXT` sets `{arm, world, sample, epoch, source}` on every ledger entry | `llm/embeddings.py`, `agent/kb_react.py` |
 | Cost guard | ✅ `load_results` fails on missing cost | `analysis/gate_stats.py` |
 | Per-step evidence | ✅ first-compile and per-step recall | `scorers/success.py` |
-| Tuning runner and log (PC6), `analysis/cost.py` | ⏳ P1 | — |
-| `messy` rendering, `HYPOTHESES.md` registry | ⏳ P1 | — |
+| Tuning runner and log (PC6), `analysis/cost.py` | ✅ | `tuning.py`, `run_gate.py` tune, `analysis/cost.py` |
+| `messy` rendering, `HYPOTHESES.md` registry | ✅ | `worlds/gen_f7.py`, `HYPOTHESES.md` |
 
 **Update to B3 from re-measurement:**
 - Descriptive rendering alone does **not** restore push-mode flat retrieval of exceptions at 1,000 policies (still 0/25 with lexical fake embeddings). A single query cannot lexically match the numeric band, and ~300 similar exceptions compete.

@@ -9,5 +9,6 @@ __pycache__/
 /indices/
 /cache/
 /runs/
+/.claude/
 *.sqlite
 .DS_Store

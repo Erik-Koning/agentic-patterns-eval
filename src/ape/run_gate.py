@@ -199,6 +199,9 @@ POWER_SIMS = {"live": 2000, "offline": 200}
 # Frozen at `freeze` (FIX_PLAN FX-6): config inputs read from config_dir, and the outputs tune and pilot write.
 FROZEN_CONFIG = ("models.yaml", "model_costs.yaml", "run_plan.yaml", "tuning_grid.yaml")
 FROZEN_OUTPUTS = ("selected.yaml", "s7_targets.json", "budget_calibration.yaml")
+# Code the verdict depends on, frozen with the design (GATE_PREREG §2: "decide at the frozen commit"): the analysis
+# code and the dependency lockfile. A change after the freeze is a logged deviation, like a config change.
+FROZEN_CODE = ("uv.lock", "src/ape/analyze_gate.py", "src/ape/analysis/gate_stats.py", "src/ape/analysis/cost.py", "src/ape/analysis/pilot.py")
 PLACEHOLDER = re.compile(r"\[(PILOT|USER)\b")  # any marker in GATE_PREREG.md's body blocks the freeze
 PLACEHOLDER_ITEM = re.compile(r"\[(PILOT|USER)(?::\s*([^\]\n]*))?\]")
 DEVIATION = "any change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log): record it there and start a new --run-id"
@@ -1344,7 +1347,12 @@ def prereg_placeholders(text: str) -> list[dict]:
 
 def frozen_files(run: GateRun, prereg: Path) -> dict[str, Path]:
     """What the freeze hashes: the pre-registration as frozen, the config inputs and the tune/pilot outputs."""
-    return {"GATE_PREREG.md": prereg} | {f"config/{n}": run.config(n) for n in FROZEN_CONFIG} | {f"config/{n}": run.out_config_dir / n for n in FROZEN_OUTPUTS}
+    return (
+        {"GATE_PREREG.md": prereg}
+        | {f"config/{n}": run.config(n) for n in FROZEN_CONFIG}
+        | {f"config/{n}": run.out_config_dir / n for n in FROZEN_OUTPUTS}
+        | {n: ROOT / n for n in FROZEN_CODE}
+    )
 
 
 def frozen_changes(record: dict) -> list[str]:
@@ -1459,7 +1467,7 @@ def _freeze(run: GateRun, record: dict) -> None:
         "placeholders_replaced": rehearsal or [],
         "files": {k: {"path": _show(p), "sha256": _sha256(p)} for k, p in files.items()},
         "git": git,
-        "analysis_commit": _git("log", "-1", "--format=%H", "--", "src/ape/analysis/"),
+        "analysis_commit": _git("log", "-1", "--format=%H", "--", "src/ape/analysis/", "src/ape/analyze_gate.py"),
         "apg_core": {"installed_commit": _apg_installed_commit(), "pinned_commit": APG_PIN},
         "pilot": {"path": _show(run.phase_dir("pilot") / "pilot.json"), "sha256": _sha256(run.phase_dir("pilot") / "pilot.json")},
         "upstream": record["upstream"],
@@ -1469,7 +1477,7 @@ def _freeze(run: GateRun, record: dict) -> None:
     _write_json(run.freeze_path, freeze)
     lines = [
         f"\n## Gate freeze: run `{run.run_id}` ({freeze['frozen_at']}){' (OFFLINE REHEARSAL)' if run.offline else ''}\n",
-        f"- **Commit:** `{git['commit']}`; analysis code (`src/ape/analysis/`) at `{freeze['analysis_commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{APG_PIN}`).",
+        f"- **Commit:** `{git['commit']}`; analysis code (`src/ape/analysis/`, `src/ape/analyze_gate.py`) at `{freeze['analysis_commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{APG_PIN}`).",
         "- **Frozen files** (sha256):",
         *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         f"- **Record:** `{_show(run.freeze_path)}`. {DEVIATION[0].upper() + DEVIATION[1:]}.",

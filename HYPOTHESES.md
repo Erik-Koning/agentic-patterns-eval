@@ -22,7 +22,7 @@ Last updated 2026-09-30.
 
 | ID | Statement | Source | Arms | Cells | Primary measure | Test | Status |
 |---|---|---|---|---|---|---|---|
-| K1 | Graph structure beats equally engineered flat retrieval on relational policies and tool scoping | brief H2-struct | APG*, LGR*, S3s | F7 (descriptive, id_only, messy), F3 | Success; error labels (missed_exception, wrong_tool); evidence recall | Paired contrasts per rendering and delivery mode | ✅ (gate data, plus id_only/messy runs) |
+| K1 | Graph structure beats equally engineered flat retrieval on relational policies and tool scoping | brief H2-struct | APG*, LGR*, S3s | F7 (descriptive, id_only, messy), F3 | Success; error labels (missed_exception, wrong_tool); evidence recall | Paired contrasts per rendering and delivery mode | 🟡 data from the gate and its id_only/messy runs; the report shows the contrasts, but no multiplicity-corrected test across renderings and modes is implemented |
 | K2 | KG delivery substitutes for multi-agent specialization (negative delivery × architecture interaction) | brief H2 | S1, S5, M1, M1k | F3, F7 | Success | 2×2 interaction | ❌ needs M1, M1k |
 | K3 | Persona content adds ≈ 0 on objective tasks | brief H2b | S5 vs S5-P0 | F3, F7 | Success | TOST ±2 pp | ❌ needs persona content in worlds |
 | K4 | Monolith degrades with KB size; KG stays flat (only when policies are relational) | brief H2c | S1, S5, S3s | F7 levels 10/100/1000 × relational/independent | Success vs log(KB size) | Slope interaction; TOST on the S5 slope | 🟡 generators and arms exist; add level 100 and the independent variant to the run plan |
