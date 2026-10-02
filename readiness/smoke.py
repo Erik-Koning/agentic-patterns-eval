@@ -8,8 +8,10 @@
 
 Checks, in run order (`STEPS`; pass criteria in `smoke_checks.py`):
 
-    effort        reasoning effort honoured per role model: high uses more reasoning tokens than low
-                  (read from cache/openai_probe.json; run readiness/probe_openai.py first)
+    effort        per role, on the call path the run uses (Inspect's Responses API for agent/kg/judge, BuildLlm
+                  for build): the role's config and strict JSON are accepted, and effort is honoured (high uses
+                  more reasoning tokens than low). Read from cache/openai_probe.json (run
+                  readiness/probe_openai.py first); --dry runs the probe's own code on mock models
     L2            LightRAG extraction on an F7-100 world; source ids map to our chunks
     D017          the build model's authoring ID coverage and LightRAG's ID coverage >= 0.95 (needs L2)
     H4            S3s on F3-60: OpenAI accepts tool sets that change across turns (warn if they never changed)
@@ -63,6 +65,7 @@ import smoke_checks as sc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "cache" / "smoke"
+PROBE_PATH = ROOT / "cache" / "openai_probe.json"  # readiness/probe_openai.py's report (effort, burst's TPM header)
 ID_PATTERN = re.compile(r"\b(?:P-\d+|X-\d+|SOP-[\w-]+)")
 SPEC_THRESHOLD = 0.95  # D-017
 F7_TASKS = 20  # the F7-100 world's tasks: enough for the retrieval rates; runs take the first n (Inspect `limit`)
@@ -71,7 +74,7 @@ BURST = {"tasks": 12, "epochs": 2}  # 24 samples
 DEFAULT_MAX_USD = 3.0
 # name -> (checks it needs, what it checks)
 STEPS: dict[str, tuple[tuple[str, ...], str]] = {
-    "effort": ((), "reasoning effort honoured per role model (from the probe)"),
+    "effort": ((), "per role and call path: config accepted, effort honoured (from the probe)"),
     "L2": ((), "LightRAG extraction and source mapping on F7-100"),
     "D017": (("L2",), "build-quality check: authoring and LightRAG ID coverage >= 0.95"),
     "H4": ((), "S3s on F3-60: changing tool sets accepted"),
@@ -370,20 +373,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 # Each takes the run context and returns (result, logs).
 
 
+def _probe_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("readiness_probe_openai", Path(__file__).resolve().parent / "probe_openai.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def check_effort(c: dict) -> tuple[dict, list]:
-    probe_path = ROOT / "cache" / "openai_probe.json"
-    if c["args"].dry:
-        synthetic = {r: {"model": "mockllm/model", "effort": {"verdict": sc.effort_verdict(
-            {"accepted": True, "usage": {"completion_tokens_details": {"reasoning_tokens": 900}}},
-            {"accepted": True, "usage": {"completion_tokens_details": {"reasoning_tokens": 120}}},
-        )}} for r in sc.EFFORT_ROLES}
-        res = sc.effort_from_probe(synthetic)
-        res["measured"]["source"] = "dry: a synthetic probe record (the probe is live-only)"
+    if c["args"].dry:  # the probe's own code on both call paths, with mock models: no network, no ledger
+        from types import SimpleNamespace
+
+        probe = _probe_module()
+        report = asyncio.run(probe.run_probe(c["profile"], factory=probe.offline_factory, build_client=probe.OfflineBuildClient(), ledger=SimpleNamespace(append=lambda entry: None)))
+        res = sc.effort_from_probe(report)
+        res["measured"]["source"] = "dry: readiness/probe_openai.py on mock models (the probe itself is live-only)"
         return res, []
-    if not probe_path.is_file():
-        return sc.result(sc.FAIL, {}, reason=f"{probe_path.relative_to(ROOT)} missing: run readiness/probe_openai.py --profile {c['profile'].name}"), []
-    res = sc.effort_from_probe(json.loads(probe_path.read_text()))
-    res["measured"]["source"] = str(probe_path.relative_to(ROOT))
+    if not PROBE_PATH.is_file():
+        return sc.result(sc.FAIL, {}, reason=f"{PROBE_PATH} missing: run readiness/probe_openai.py --profile {c['profile'].name}"), []
+    res = sc.effort_from_probe(json.loads(PROBE_PATH.read_text()))
+    res["measured"]["source"] = str(PROBE_PATH)
     return res, []
 
 
@@ -505,10 +516,9 @@ def check_burst(c: dict) -> tuple[dict, list]:
 
     logs = c["run_gate_check"]("burst_F7", gate(family="F7", level="100", split="dev", arm="S3s"), limit=BURST["tasks"], epochs=BURST["epochs"])
     samples = [s for lg in logs for s in (lg.samples or [])]
-    probe = ROOT / "cache" / "openai_probe.json"
     headers = None
-    if not c["args"].dry and probe.is_file():
-        headers = ((json.loads(probe.read_text()).get("agent") or {}).get("plain") or {}).get("ratelimit")
+    if not c["args"].dry and PROBE_PATH.is_file():  # the agent model's x-ratelimit headers (E4)
+        headers = sc.ratelimit_headers(json.loads(PROBE_PATH.read_text()), c["profile"].role("agent").model)
     res = sc.burst_verdict(
         int(c["profile"].concurrency.max_connections or 16),
         [{"error": s.error.message if s.error else None, "total_time": s.total_time, "working_time": s.working_time} for s in samples],

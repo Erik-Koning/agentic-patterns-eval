@@ -740,7 +740,8 @@ def _preflight(run: GateRun, record: dict) -> None:
     ap = load_profile(anchor_name, run.models_path)
     record["anchor_profile"] = {"name": ap.name, "roles": ap.summary()}
     # 1. FX-2: prices for every model both profiles call; live: an API key.
-    fx2 = [x for p in (gp, ap) for x in preflight(p, live=not run.offline, costs_path=run.costs_path, env_path=run.env_path)]
+    # Live, this includes the model-snapshot check against this run's probe and PROVENANCE.md (ape.snapshots).
+    fx2 = [x for p in (gp, ap) for x in preflight(p, live=not run.offline, costs_path=run.costs_path, env_path=run.env_path, probe_path=run.probe_path, provenance_path=run.provenance_path)]
     checks["fx2_preflight"] = "ok" if not fx2 else "failed (see errors)"
     problems += fx2
     # 2. Live: the readiness probe lists every model the run calls.

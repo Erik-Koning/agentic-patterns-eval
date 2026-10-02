@@ -22,6 +22,7 @@ eval-wide config reaches only the agent), and `ape.runner.run_evals` passes `max
 """
 
 import os
+import warnings
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -188,6 +189,10 @@ def embedding_model(profile: Profile | None = None) -> str:
 # --- Prices and preflight (FX-2) ---------------------------------------------------------------
 
 
+class SnapshotWarning(UserWarning):
+    """A live preflight's model-snapshot check found nothing to refuse, but something to look at (`ape.snapshots`)."""
+
+
 class PreflightError(RuntimeError):
     """A run would spend money it cannot account for, or cannot start; the message lists every problem."""
 
@@ -246,6 +251,8 @@ def preflight(
     overrides: Mapping[str, str | None] | None = None,
     costs_path: Path = COSTS_PATH,
     env_path: Path = ENV_PATH,
+    probe_path: Path | None = None,
+    provenance_path: Path | None = None,
 ) -> list[str]:
     """Problems that should stop a run before it spends money; an empty list means go.
 
@@ -254,7 +261,10 @@ def preflight(
     - the build, build_fallback and embedding models are priced under their bare names, as the ledger
       looks them up (`load_prices`);
     - `overrides` (role -> model, from CLI flags) and the build/embedding env overrides are checked the same way;
-    - live runs only: OPENAI_API_KEY is set in the environment or in `env_path` (never printed).
+    - live runs only: OPENAI_API_KEY is set in the environment or in `env_path` (never printed);
+    - live runs only: every model the run calls is still served by the snapshot PROVENANCE.md pins for it, as the
+      latest readiness probe saw it (`ape.snapshots.snapshot_status`). Warnings (nothing pinned yet, a pin not
+      re-checked, an old probe) are issued as `SnapshotWarning`.
     `mockllm` models are exempt from the price requirement unless the file prices them.
     """
     try:
@@ -280,6 +290,19 @@ def preflight(
             problems.append(f"profile {p.name!r} role {label}: no price for {key!r} in {costs_path} (under {where})")
     if live and not _api_key_present(env_path):
         problems.append(f"OPENAI_API_KEY is not set in the environment or in {env_path}")
+    if live:
+        from . import snapshots
+
+        fallback = os.environ.get("APE_BUILD_FALLBACK") == "1"  # the D-017 fallback builder is called only then
+        called = {
+            snapshots.alias(m)
+            for label, m, _ in _called_models(p, overrides or {})
+            if not m.startswith("mockllm/") and (label != "build_fallback" or fallback)
+        }
+        status = snapshots.snapshot_status(probe_path or snapshots.PROBE_PATH, provenance_path or snapshots.PROVENANCE_PATH, aliases=called)
+        problems += status["problems"]
+        for w in status["warnings"]:
+            warnings.warn(w, SnapshotWarning, stacklevel=2)
     return problems
 
 

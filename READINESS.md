@@ -12,8 +12,8 @@ Last updated: 2026-09-30.
 |---|---|---|---|---|
 | E1 (B) | Venv imports all dependencies; lockfile committed | ✅ | Python 3.14.0. inspect-ai 0.3.273, lightrag-hku 1.5.7, apg-core 0.1.0, openai 3.22.1 import cleanly. `uv.lock` is committed. Python 3.12 is **not** usable; see G0 and D-001. | — |
 | E2 (B) | `OPENAI_API_KEY` in gitignored `.env`; `models.list()` succeeds | ❌ | 2026-09-30: the shell's `OPENAI_KEY` is **rejected by OpenAI (401 invalid_api_key)**, meaning it was revoked or has expired. `.env` (gitignored, mode 600) still holds that rejected key; replace it with a new one (O-1). No spend occurred. | user |
-| E3 (B) | Model IDs chosen per role (agent, kg, build, embeddings); honoured params probed, including reasoning effort | ⛔ | Blocked on E2. `readiness/probe_openai.py --profile gate` probes plain, temperature 0, seed, effort low and strict JSON per role model, and (FX-8) whether effort is honoured: one problem at effort high and low, passing when high uses more reasoning tokens than low (`readiness/smoke_checks.py`; ≈ $0.02 for the gate profile). `readiness/smoke.py`'s `effort` check reads the result. | — |
-| E4 | Rate-limit tier / TPM fits the concurrency plan | ⛔ | Blocked on E2. Closed by `readiness/smoke.py`'s `burst` check (FX-8): 24 samples at the profile's `max_connections`, recording failed samples, retries, rate-limit signals and latency, and writing a recommended `max_connections` (capped by the probe's TPM header). Passes `--dry`. | — |
+| E3 (B) | Model IDs chosen per role (agent, kg, judge, build, embeddings); each role probed **on the call path the run uses**, including reasoning effort; snapshots pinned | ⛔ | Blocked on E2. `readiness/probe_openai.py --profile gate` (≈ $0.01 for the gate profile) probes each role where its calls go. Agent, kg and judge go through Inspect's own model, which for GPT-6 is the Responses API; the API Inspect chose is recorded. Build goes through `BuildLlm` (chat completions). Per path it checks the role's own config, a strict JSON schema call, and effort high vs low (pass when high uses more reasoning tokens). It records the snapshot that served each alias. After review, `--pin` writes the snapshots into PROVENANCE.md, and live preflight then refuses any run whose latest probe sees a different snapshot (`ape.snapshots`). `readiness/smoke.py`'s `effort` check reads the probe; `--dry` runs the probe's code on mock models. Tested offline against a fake OpenAI server through the real SDK, Inspect and `BuildLlm` paths (`tests/test_probe.py`). | — |
+| E4 | Rate-limit tier / TPM fits the concurrency plan | ⛔ | Blocked on E2. Closed by `readiness/smoke.py`'s `burst` check (FX-8): 24 samples at the profile's `max_connections`, recording failed samples, retries, rate-limit signals and latency, and writing a recommended `max_connections`, capped by the agent model's TPM header (the probe's `ratelimits`, captured per alias on that alias's API). Passes `--dry`. | — |
 | E5 (B) | Price table (source URL + date) in Inspect's model-cost config | ⚠️ | `config/model_costs.yaml` filled with listed GPT-6 and embedding prices (2026-09-30). Cached-input prices are set equal to input (conservative) until confirmed. Model keys are confirmed at E3. | — |
 
 ## APG
@@ -113,10 +113,14 @@ Each API was checked two ways: introspected in the installed **inspect-ai 0.3.27
 ## One-command live readiness (after O-1)
 
 ```
-uv run python readiness/probe_openai.py --list --profile gate      # E2-E4, effort honoured (≈ $0.02)
+uv run python readiness/probe_openai.py --list --profile gate      # E2-E4 on the run's call paths (≈ $0.01)
+# review cache/openai_probe.json: every role/path accepted, effort honoured, one snapshot per alias
+uv run python readiness/probe_openai.py --pin                      # pin the snapshots in PROVENANCE.md (no API calls); commit it
 uv run python readiness/smoke.py                                   # every check below, cap --max-usd 3 (projected ≈ $1.4)
 uv run python readiness/smoke.py --only pull,burst                 # re-run some checks (with the checks they need)
 ```
+
+Re-run the probe before each live session, since preflight compares the pins with the latest probe. Probing another profile (e.g. `study_g_sol`) and pinning adds its aliases and keeps the existing pins. A changed snapshot is kept under "Superseded pins", and after a freeze it is a logged deviation.
 
 `readiness/smoke.py` (FX-8) runs, on the gate profile: `effort` (from the probe), `L2` (live LightRAG extraction and source mapping), `D017` (the build-quality check: authoring `id_coverage` and LightRAG ID coverage ≥ 0.95), `H4` (changing tool sets), `L4_L5` (one keyword call per compile; realized context against `max_total_tokens`), `APG`, `pull`, `recovery`, `burst`, `retrieval` and `orchestrator` (the real `run_gate` at SMOKE_SCALE through pilot, then a refused freeze). Before spending it prints each check's projected cost and refuses a total over `--max-usd`; before each check it stops if spend plus that check's projection would pass the cap. It writes `cache/smoke/report.json` and `report.md`, and exits non-zero when a check fails. Everything lives in `cache/smoke/`; nothing touches `config/`, `PROVENANCE.md` or `runs/`. `--dry` passes every check offline ($0, ~20 s; `tests/test_smoke.py`).
 

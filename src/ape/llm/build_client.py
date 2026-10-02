@@ -24,6 +24,9 @@ class BuildLlm:
         self.reasoning_effort = reasoning_effort
         self.context = {**context, "reasoning_effort": reasoning_effort} if reasoning_effort else context
         self._client = client
+        # The last call's served snapshot (`response.model`) and usage, for the readiness probe (E3).
+        self.last_model: str | None = None
+        self.last_usage: dict | None = None
 
     def _client_(self):
         if self._client is None:
@@ -37,6 +40,8 @@ class BuildLlm:
             kwargs.setdefault("reasoning_effort", self.reasoning_effort)
         resp = await self._client_().chat.completions.create(model=self.model, messages=messages, **kwargs)
         u = resp.usage
+        self.last_model = getattr(resp, "model", None)
+        self.last_usage = u.model_dump() if hasattr(u, "model_dump") else None
         self.ledger.append(
             LedgerEntry(
                 role="build",

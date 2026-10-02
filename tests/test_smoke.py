@@ -55,16 +55,33 @@ def test_effort_passes_only_when_high_reasons_more_than_low():
     rejected = sc.effort_verdict({"accepted": False, "error": "BadRequestError: unsupported"}, {"accepted": True, "usage": _usage(1)})
     assert rejected["status"] == sc.FAIL and "high rejected" in rejected["reason"] and "unsupported" in rejected["reason"]
     no_field = sc.effort_verdict({"accepted": True, "usage": _usage(None)}, {"accepted": True, "usage": _usage(None)})
-    assert no_field["status"] == sc.FAIL and "reasoning_tokens" in no_field["reason"]
+    assert no_field["status"] == sc.FAIL and "no reasoning tokens" in no_field["reason"]
+    # Inspect's ModelUsage (the Responses API path) reports them at the top level.
+    inspect_usage = sc.effort_verdict({"accepted": True, "usage": {"reasoning_tokens": 700}}, {"accepted": True, "usage": {"reasoning_tokens": 90}})
+    assert inspect_usage["status"] == sc.PASS
 
 
-def test_effort_from_probe_needs_every_probed_role_and_the_new_effort_block():
-    good = {"verdict": sc.result(sc.PASS, {})}
-    assert sc.effort_from_probe({"agent": {"model": "m", "effort": good}, "kg": {"model": "m", "effort": good}})["status"] == sc.PASS
+def _path(effort_status: str = sc.PASS, accepted: bool = True, snapshot: str = "s1") -> dict:
+    call = {"accepted": accepted, "served_model": snapshot} | ({} if accepted else {"error": "BadRequestError: nope"})
+    return {"api": "responses", "as_configured": call, "structured_output": call, "effort": {"verdict": sc.result(effort_status, {})}, "snapshot": snapshot, "snapshots_seen": [snapshot]}
+
+
+def test_effort_from_probe_checks_every_role_and_path_of_the_call_path_probe():
+    roles = {r: {"model": "openai/gpt-6-luna", "paths": {"inspect": _path()}} for r in ("agent", "kg")} | {"build": {"model": "gpt-6-luna", "paths": {"build": _path()}}}
+    probe = {"version": sc.PROBE_VERSION, "roles": roles, "snapshots": {"gpt-6-luna": {"snapshot": "s1", "snapshots_seen": ["s1"]}}}
+    assert sc.effort_from_probe(probe)["status"] == sc.PASS
     old_probe = sc.effort_from_probe({"agent": {"model": "m", "plain": {}}})
     assert old_probe["status"] == sc.FAIL and "re-run readiness/probe_openai.py" in old_probe["reason"]
-    bad = sc.effort_from_probe({"agent": {"model": "m", "effort": good}, "build": {"model": "m", "effort": {"verdict": sc.result(sc.FAIL, {})}}})
-    assert bad["status"] == sc.FAIL and "['build']" in bad["reason"]
+    skipped = probe | {"roles": roles | {"judge": {"model": "openai/gpt-4o-mini", "paths": {"inspect": _path(sc.SKIP)}}}}
+    assert sc.effort_from_probe(skipped)["status"] == sc.PASS, "a role with no effort setting is skipped, not failed"
+    bad = sc.effort_from_probe(probe | {"roles": roles | {"build": {"model": "gpt-6-luna", "paths": {"build": _path(sc.FAIL)}}}})
+    assert bad["status"] == sc.FAIL and "build/build: effort not honoured" in bad["reason"]
+    rejected = sc.effort_from_probe(probe | {"roles": roles | {"kg": {"model": "m", "paths": {"inspect": _path(accepted=False)}}}})
+    assert "kg/inspect: as configured call rejected (BadRequestError: nope)" in rejected["reason"]
+    missing = sc.effort_from_probe(probe | {"roles": {k: v for k, v in roles.items() if k != "kg"}})
+    assert missing["status"] == sc.FAIL and "did not cover ['kg']" in missing["reason"]
+    moved = sc.effort_from_probe(probe | {"snapshots": {"gpt-6-luna": {"snapshot": None, "snapshots_seen": ["s1", "s2"]}}})
+    assert moved["status"] == sc.FAIL and "more than one snapshot" in moved["reason"]
     assert sc.effort_from_probe({"models_available": []})["status"] == sc.FAIL
 
 

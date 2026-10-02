@@ -30,4 +30,12 @@ Every result in this project must be traceable to the exact code and data below.
 
 ## Models and prices
 
-To be filled in by readiness items E3/E5: model IDs per role, honoured parameters, and the price table with source URL and date.
+- **Probe (E3, E4):** `readiness/probe_openai.py --profile <profile>` writes `cache/openai_probe.json`. For each role it records the call path the run uses: Inspect's Responses API for GPT-6 agent/kg/judge calls, `BuildLlm` (chat completions) for build calls. Per path it records whether the role's configuration and strict JSON are accepted, whether reasoning effort is honoured, and which snapshot served each alias.
+- **Prices (E5):** `config/model_costs.yaml`, with the date the prices were checked. Record the pricing page URL here when E5 is confirmed.
+- **Snapshots:** after reviewing the probe, `uv run python readiness/probe_openai.py --pin` writes the table below. From then on, live preflight (`ape.snapshots`, called by `ape.models.preflight`) refuses a run when the latest probe resolves a pinned alias to a different snapshot. Re-pinning after a freeze is a logged deviation.
+
+### Model snapshots
+
+<!-- model-snapshots:begin -->
+_No snapshots pinned yet (needs a working key, O-1)._
+<!-- model-snapshots:end -->
