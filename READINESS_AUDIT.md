@@ -50,20 +50,30 @@
 **Needs you:**
 1. **O-1:** a project key with staged hard limits (≈ $300 for probe + smoke + gate, raised per study later).
 2. **O-3:** names for the APG owner, skeptic and analyst.
-3. **H5:** the spot-check. Its file is stale: it predates the exception-style knob and covers F7-100 and F3-20 instead of the gate cells. I regenerate it first (S), then you review it (30–45 min).
-4. **D-017:** if Luna fails the build-quality check, the Sol fallback (+$957) does not fit without cuts.
+3. **H5:** review `readiness/spotcheck.md`, part A (30–45 min). It has been regenerated on the gate cells.
+4. **D-017:** if Luna fails the build-quality check, the Sol fallback (+$957) does not fit without cuts. Build-dev now measures this; see `build-dev/build_quality.json`.
+5. **Backup destination:** set `APE_BACKUP_DIR` to a disk or synced folder outside the repo before the first live run.
 
-**Engineering** (each S):
-- **Probe on the agent's real path.** Inspect sends GPT-6 calls through the **Responses API**, but the probe tests effort through chat completions. "Effort honoured" is therefore never checked where it matters.
-- **Program-wide spend ledger and guard.** Today the guard counts one run id. The OpenAI hard limit is the only stop across runs and studies.
-- **Crash visibility.** `runner_index.json` is written only after `eval_set` returns, so a killed run's spend is invisible to the guard.
-- **Per-sample token limit,** so one runaway sample cannot burn the budget.
-- **Embedding cache size.** Vectors are stored as JSON text (~30 KB per 1,536-d vector), an estimated 5–13 GB at full scale. Storing float32 blobs cuts that by about 5×.
-- **D-017 measurement.** `id_coverage` for F7-1000 is never aggregated, but the builder decision needs it.
-- **Pin model snapshots** at E3 and record them, with the price-table date, in PROVENANCE.
-- **Back up `runs/` and `cache/`.** They are git-ignored and stored nowhere else.
+**Engineering: done (2026-10-02, hardening).** All verified offline; the live checks are noted.
 
-**PC1 plan:** before the anchor runs, write down what happens if PC1 fails. For example: one pre-registered retry with gpt-4o-mini if available, otherwise report PC1 as "not reproducible at this setup" and let the user decide on proceeding. This turns a hard stop into a decision.
+| Item | What changed | Live check |
+|---|---|---|
+| Probe on the real path | `probe_openai.py` tests effort high vs low through Inspect's own provider (Responses API for GPT-6) and through the build client, per role, with each role's real configuration. Tested against a local fake OpenAI server, so the real SDK and provider code run. | Each role's `paths.inspect.api` is `responses` and its effort verdict passes |
+| Model snapshot pins | The probe records each alias's served snapshot. `--pin` writes them to PROVENANCE.md. Live preflight refuses when a pinned alias now resolves to a different snapshot. | The snapshot is a dated ID, not the alias echoed back |
+| Program-wide spend guard | A spend registry (`cache/spend/registry.jsonl`) lists every live log dir and ledger. The guard sums all of them per sample, once each, including flushed samples of killed runs; it no longer counts one run id. Failed attempts' logs are kept so their spend is counted. `python -m ape.budget spend` prints it. | `ape.budget spend` after the smoke shows the smoke's spend |
+| Crash visibility | `runner_index.json` is written before `eval_set` starts and updated after. | — |
+| Per-sample runaway guard | Inspect's `cost_limit`: 20× the cell's projected per-sample cost, at least $0.50 ($2 when unprojected). It is fixed per log dir so resume still pairs. Hits are flagged and count in PC5. | — |
+| Error tolerance | `fail_on_error` per task: 2% from 150 samples up, otherwise a count of ≥ 3, so small tasks are not killed by one error. | — |
+| Embedding cache | Float32 BLOBs: 6 KB per 1,536-d vector, was 34 KB. Old caches migrate in place, safely across processes. Live calls request base64. | — |
+| D-017 measurement | `ape.build_quality`: authoring and LightRAG ID coverage per world and gate cell, with the verdict and recommendation. It is in build-dev's manifest and fills the pre-registration's builder item. | The verdict on the real F7-1000 dev worlds |
+| H5 spot-check | Regenerated on the gate cells: part A is 20 F7 + 20 F3 tasks; part B covers F1, F2 and F8. It fixed an F3 text defect ("a credit code code"). A test fails if the sheet goes stale. | Your review |
+| Backups | `python -m ape.backup`: incremental, consistent SQLite snapshots, never deletes. Runs after every live phase when `APE_BACKUP_DIR` is set. | — |
+| Freeze integrity | The freeze also hashes `uv.lock` and the analysis code. | — |
+
+**PC1 failure procedure (GATE_PREREG §7):**
+1. Diagnose the anchor logs. A harness defect is fixed and the anchor re-run, as a logged deviation.
+2. If no defect explains the miss, the analyst may freeze with `--accept-pc1-failure "<diagnosis>"`. The diagnosis is recorded in `freeze.json` and PROVENANCE.md, and the report carries the caveat that LightRAG's setup is not validated by the anchor.
+3. Otherwise the gate stops.
 
 ## 4. Main study
 
@@ -139,7 +149,7 @@
 
 ## 7. Engineering plan (in order)
 
-1. **Gate hardening** (§3; all S, ~1 day). Then: probe → smoke → gate pilot.
+1. ~~**Gate hardening**~~ done (§3). Next: probe → review → `--pin` → smoke → gate.
 2. **Per-study seeds, test lock and runner** (S + M). This prevents reusing the gate's test worlds.
 3. **Multi-agent arms** S9, M1/M1s, M1k/M2, M7 and the S8 frontier, with their tuning grids (L). Study G's topology block reuses them.
 4. **Study G harness:** the CM arms through Inspect's compaction, todo and memory tools, S-CM*, the `cm` role, session checkpointing, error tolerance by count (M–L).
