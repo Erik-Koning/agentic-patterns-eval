@@ -115,3 +115,20 @@ All of them are fixable before the freeze, mostly at S–M effort.
 | **R5: smoke additions** | L12; a real-extraction check on one F7-1000 world, within the smoke cap | S | the first live gate run |
 
 R1–R4 touch separate areas and can run in parallel, like the hardening round. Each fix gets a regression test made from its repro.
+
+## 7. Status (2026-10-02): all batches fixed and merged
+
+| Batch | Merge | Outcome |
+|---|---|---|
+| R1 statistics | `bdb34a2` | **Interval:** world-clustered t-interval (Satterthwaite df) replaces the percentile bootstrap. Type I at the margin: 2.3–2.8% per scenario; 1.88% for the whole procedure. **Modes:** Holm across delivery modes at 0.020. **Extension:** 0.005 on disjoint worlds (`analyze_gate --extension-of`). **Pilot σ:** moment-matched with intervals; it no longer recommends 16 worlds when they are underpowered. **PC2/PC3:** fail only on evidence of a violation; false fails at ties are now 0.2% and 0/1000. **Other:** paired-world count; PC4 descriptive. **Cost:** power at Δ = 0 is 0.84 (16 worlds), 0.885 with the extension. D-023. |
+| R2 agent loop | `a96234b` | **Per-step knowledge** now goes into the last tool result, so reasoning carries over. **`search_kb`:** no silent 16 KiB cut; failures and empty or huge queries become tool errors. **Fixes:** F3 labels, nudge per text-only streak, F8 report validation and nudge, logs survive limits, safe answer normalisation, consistent first answer wins. 33 robustness tests. |
+| R3 builds and provenance | `7a82693` | **Authoring:** per-chunk retry, repair and cache; a world fails only above a 2% lost-chunk share. **Bad output:** degraded builds are flagged and no longer cached. **Provenance:** delivered-text rule for every arm; the r8 case drops from 130 claimed facts to 21. **IDs:** normalised. **Counters:** classify and keyword fallbacks counted. **Freshness:** checks on every graph and index. Embedding retries raised to 6. |
+| R4 orchestration | `53ca8cd` | **Calibration:** non-convergence no longer aborts the pilot. **Freeze:** requires a current pilot and unchanged code since the freeze commit; the anchor is locked after the freeze. **Seeds:** a per-run 100-seed test block. **S7:** follows APG*'s delivery schedule (D-024). **Other:** operational env excluded from fingerprints; the resume budget counts remaining work only. |
+| R5 smoke | `8384f06` | **New checks:** `f8_session` (N = 5, CM0 and O-state, with a probe), `extract_f7_1000` (real builder on one hard world), `perstep_reasoning` (live confirmation of the R2 fix). Retrieval is measured with the new provenance. Projected live smoke: **$2.85**; run it with `--max-usd 4`. |
+
+**Known limits after the fixes** (documented, not defects):
+- **PC2 and PC3 have low power to detect real violations:** at F5 and diagnostic sample sizes, an 8 pp violation is caught 26% and 42% of the time. They work as guards against gross misconfiguration, not as sensitive tests.
+- **A 4-world pilot cannot bound σ_g tightly,** so its world-count recommendation is often "analyst decides".
+- **Power at 12 worlds per cell is 0.68.** The D-017 Sol fallback path would leave the gate underpowered unless worlds are added.
+- **Provenance is strict on paraphrase.** An author that rewords a fact's distinctive words gets no evidence credit. The rule applies equally to every arm, and evidence recall is a diagnostic, not the primary outcome.
+- **Analysis gaps:** the new classify and keyword counters, and the matched-budget `not_converged` flag, are recorded but not yet shown in the decision report.
