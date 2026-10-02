@@ -69,10 +69,27 @@ $5,000 in run_gate's guard and in `python -m ape.budget spend`.
 
 The orchestrator check runs run_gate's gate profile (run_plan.yaml), not the --agent/--kg/--build overrides.
 
-Isolation. Worlds, indices and cache live in cache/smoke/; the orchestrator's run in cache/smoke/runs/
-(smoke-live, or smoke-dry; re-runs resume it). Nothing is written to config/, PROVENANCE.md or runs/.
-Eval logs go to a fresh cache/smoke/logs/<timestamp>/. Writes cache/smoke/report.json and report.md; exits
-non-zero when a check fails.
+Isolation. Dry and live smokes never share state: a dry run uses cache/smoke/dry/, a live run cache/smoke/live/
+(`smoke_dir`), each with its own worlds, indices, cache, logs (a fresh logs/<timestamp>/ per invocation), the
+orchestrator's run (runs/smoke-dry or runs/smoke-live; re-runs resume it) and report.json / report.md (which
+record the mode). A live run never reads or resumes anything a dry run made; it warns, and never deletes, if it
+finds the older flat layout directly under cache/smoke/. Nothing is written to config/, PROVENANCE.md or runs/.
+Exits non-zero when a check fails.
+
+Live record and the gate. A live run also updates cache/smoke/live/checks.json: every check's latest live result
+(status, finish time, commit, profile, model overrides, the probe's snapshots), so a check re-run alone with
+--only replaces its own entry. run_gate's live preflight (`ape.run_gate.check_live_smoke`) refuses a live gate run
+unless the latest live report passed (warn allowed) on the gate profile and every check here has a passing
+result no older than 7 days, at HEAD or an ancestor of it, on PROVENANCE.md's pinned snapshots; or the run
+passes --skip-smoke-check "<reason>".
+
+Cost model check. After a live run, its own Inspect logs go through `ape.budget.calibrate` into
+cache/smoke/live/calibration_measured.yaml (never config/), and report.md's "Cost model check" compares the
+measured output tokens per call (reasoning included) per role and effort, calls per sample per cell, and build
+calls per system with the priors, then re-projects the whole program both ways (measured cells, and the priors
+adjusted by the measured per-call figures). It warns when either exceeds $5,000 or puts the gate over its $700
+allocation, and prints the command that promotes the measurements into config/budget_calibration_measured.yaml.
+A dry run shows the section as "not measured". Live runs also print storage warnings (APE_BACKUP_DIR, free disk).
 """
 
 import argparse
@@ -91,7 +108,10 @@ import smoke_checks as sc  # noqa: E402
 from ape import build_quality as bq  # noqa: E402  (D-017 coverage: shared with run_gate's build-dev check)
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "cache" / "smoke"
+SMOKE_ROOT = ROOT / "cache" / "smoke"  # dry state in dry/, live state in live/ (`smoke_dir`); never shared
+RECORD_NAME = "checks.json"  # live only: every check's latest live result, read by run_gate's preflight
+# The flat layout before dry and live were separated (2026-10-02): a live run ignores it and says so.
+LEGACY_ENTRIES = ("worlds", "indices", "cache", "logs", "runs", "report.json", "report.md")
 PROBE_PATH = ROOT / "cache" / "openai_probe.json"  # readiness/probe_openai.py's report (effort, burst's TPM header)
 SPEC_THRESHOLD = bq.THRESHOLD  # D-017
 F7_TASKS = 20  # the F7-100 world's tasks: enough for the retrieval rates; runs take the first n (Inspect `limit`)
@@ -121,10 +141,22 @@ STEPS: dict[str, tuple[tuple[str, ...], str]] = {
 SHARED_WORLD_STEPS = {"L2", "D017", "H4", "L4_L5", "APG", "pull", "recovery", "burst", "retrieval"}
 
 
+def smoke_dir(dry: bool) -> Path:
+    """Where a dry or a live smoke keeps everything: worlds, indices, cache, logs, the orchestrator's runs and the
+    report. Separate, so a live smoke never reads or resumes anything a dry run (fake embeddings, mock models) made."""
+    return SMOKE_ROOT / ("dry" if dry else "live")
+
+
+def legacy_layout() -> list[str]:
+    """Entries of the pre-split flat layout directly under cache/smoke/ (left by older dry runs)."""
+    return [name for name in LEGACY_ENTRIES if (SMOKE_ROOT / name).exists()]
+
+
 def _isolate(dry: bool) -> None:
-    os.environ["APE_WORLDS"] = str(OUT / "worlds")
-    os.environ["APE_INDICES"] = str(OUT / "indices")
-    os.environ["APE_CACHE"] = str(OUT / "cache")
+    out = smoke_dir(dry)
+    os.environ["APE_WORLDS"] = str(out / "worlds")
+    os.environ["APE_INDICES"] = str(out / "indices")
+    os.environ["APE_CACHE"] = str(out / "cache")
     # Smoke spend is the program's spend too: live log dirs and ledgers register in the program spend registry
     # (ape.spend) under this label, so run_gate's guard and `python -m ape.budget spend` count them. The
     # --max-usd cap stays this invocation's own. --dry (mock agent) registers nothing in the real registry.
@@ -326,17 +358,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         os.environ["APE_EMBEDDING_MODEL"] = args.embed
     os.environ.setdefault("APE_EMBEDDING_MODEL", embedding_model(profile))
     build_model, build_effort = build_settings(profile)
+    out = smoke_dir(args.dry)
+    t_start = time.time()
     report: dict = {
         "dry": args.dry,
+        "mode": "dry" if args.dry else "live",
+        "dir": str(out),
         "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "started_utc": _utc_now(),
+        "git": rg.git_state(),
         "models": {"profile": profile.name, "roles": profile.summary(), "overrides": {k: v for k, v in vars(args).items() if k in ("agent", "kg", "build", "embed")}, "build": [build_model, build_effort]},
+        "snapshots": _probe_snapshots() if not args.dry else {},
         "max_usd": args.max_usd,
         "steps": steps,
         "checks": {},
+        "warnings": [],
     }
+    if not args.dry:
+        from ape.models import storage_warnings
+
+        if legacy := legacy_layout():
+            report["warnings"].append(
+                f"{SMOKE_ROOT} still holds the old flat smoke layout ({', '.join(legacy)}), from dry runs before dry and live "
+                f"were separated; the live smoke ignores it and never deletes it: remove it yourself when convenient"
+            )
+        report["warnings"] += storage_warnings()
+        for w in report["warnings"]:
+            print(f"WARNING: {w}", flush=True)
 
     def orchestrator_run(budget_usd: float | None = None):
-        return rg.GateRun("smoke-dry" if args.dry else "smoke-live", offline=args.dry, smoke=True, runs_root=OUT / "runs", budget_usd=budget_usd)
+        return rg.GateRun("smoke-dry" if args.dry else "smoke-live", offline=args.dry, smoke=True, runs_root=out / "runs", budget_usd=budget_usd)
 
     # 1. Projection: refuse to start a run the cap cannot cover.
     try:
@@ -360,7 +411,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         roles = role_models(profile, ("kg",), model=args.kg)
     spend = Spend(args.dry)
     cfg = Config()
-    log_root = OUT / "logs" / time.strftime("%Y%m%dT%H%M%S")
+    log_root = out / "logs" / time.strftime("%Y%m%dT%H%M%S")
     provenance0, config0 = _sha(ROOT / "PROVENANCE.md"), _tree_hash(ROOT / "config")
 
     # 3. Worlds: F7-100 (relational, descriptive) with F7_TASKS tasks; F3-60 (H4) and F3-5 (recovery) with 2 each.
@@ -379,7 +430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return logs
 
     def record(name: str, res: dict, t0: float, spent0: float, logs: Sequence = ()) -> None:
-        res |= {"spend_usd": round(spend.total() - spent0, 6), "seconds": round(time.time() - t0, 1), "logs": [str(getattr(lg, "location", lg)) for lg in logs]}
+        res |= {"spend_usd": round(spend.total() - spent0, 6), "seconds": round(time.time() - t0, 1), "finished_utc": _utc_now(), "logs": [str(getattr(lg, "location", lg)) for lg in logs]}
         report["checks"][name] = res
         print(f"[{name}] {res['status'].upper()}{': ' + res['reason'] if res.get('reason') else ''}", flush=True)
 
@@ -403,11 +454,130 @@ def main(argv: Sequence[str] | None = None) -> int:
         status = 2
     report["spend_usd"] = round(spend.total(), 6)
     report["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    report["finished_utc"] = _utc_now()
     failed = [n for n, r in report["checks"].items() if r["status"] == sc.FAIL]
     report["status"] = "stopped" if report.get("stopped") else (sc.FAIL if failed else sc.WARN if any(r["status"] == sc.WARN for r in report["checks"].values()) else sc.PASS)
+    # 4. Live: the cost model against what the smoke measured (indicative; never written to config/), and the
+    #    record of every check's latest live result that run_gate's preflight reads.
+    if args.dry:
+        report["cost_model_check"] = {"status": "not measured", "reason": "dry run: mock models report no real usage"}
+    else:
+        orchestrated = "orchestrator" in report["checks"]
+        try:
+            report["cost_model_check"] = cost_model_check(out, log_root, orchestrator_run() if orchestrated else None, t_start, profile)
+        except Exception as e:  # noqa: BLE001  (the check is informational: a failure here must not lose the report)
+            report["cost_model_check"] = {"status": sc.WARN, "reason": f"cost-model check failed: {type(e).__name__}: {e}"}
+        record_path = out / RECORD_NAME
+        previous = json.loads(record_path.read_text()) if record_path.is_file() else None
+        record_path.write_text(json.dumps(sc.update_live_record(previous, report, list(STEPS)), indent=1, default=str))
     write_report(report)
-    print(json.dumps({"status": report["status"], "failed": failed, "spend_usd": report["spend_usd"], "report": str(OUT / "report.md")}, indent=1))
+    print(json.dumps({"status": report["status"], "failed": failed, "spend_usd": report["spend_usd"], "report": str(out / "report.md")}, indent=1))
     return status or (1 if failed else 0)
+
+
+def _utc_now() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _probe_snapshots() -> dict[str, str | None]:
+    """alias -> the snapshot the readiness probe saw serve it (cache/openai_probe.json); {} without a probe."""
+    if not PROBE_PATH.is_file():
+        return {}
+    from ape.snapshots import probe_snapshots
+
+    try:
+        return probe_snapshots(json.loads(PROBE_PATH.read_text()))
+    except (ValueError, KeyError, TypeError):
+        return {}
+
+
+def _reasoning_by_role(log_files: Sequence[Path]) -> dict[str, tuple[float, float]]:
+    """role -> (reasoning tokens, output tokens) over the logs' samples: `role_usage` per role, and `model_usage`
+    minus the roles for the agent."""
+    from inspect_ai.log import read_eval_log
+
+    acc: dict[str, list[float]] = {}
+    for f in log_files:
+        for s in read_eval_log(str(f)).samples or []:
+            roles = dict(s.role_usage or {})
+            for role, u in roles.items():
+                a = acc.setdefault(role, [0.0, 0.0])
+                a[0] += float(u.reasoning_tokens or 0)
+                a[1] += float(u.output_tokens or 0)
+            tot = [sum(float(getattr(u, k) or 0) for u in (s.model_usage or {}).values()) for k in ("reasoning_tokens", "output_tokens")]
+            a = acc.setdefault("agent", [0.0, 0.0])
+            a[0] += tot[0] - sum(float(u.reasoning_tokens or 0) for u in roles.values())
+            a[1] += tot[1] - sum(float(u.output_tokens or 0) for u in roles.values())
+    return {k: (v[0], v[1]) for k, v in acc.items()}
+
+
+def _ledger_rows(root: Path, since: float) -> list[dict]:
+    """Every build/embedding ledger entry under `root` (the smoke's cache and its orchestrator run's work dir) written
+    from `since` on, as dicts."""
+    from dataclasses import asdict
+
+    from ape.llm.ledger import Ledger
+
+    rows = []
+    for path in sorted(root.rglob("ledger.jsonl")):
+        rows += [asdict(e) for e in Ledger(path).read() if e.ts >= since]
+    return rows
+
+
+def cost_model_check(out: Path, log_root: Path, run, since: float, profile) -> dict:
+    """What a live smoke measured against the cost model's priors, and the program re-projected with it.
+
+    - Inspect logs (this invocation's checks, plus the orchestrator run's when it ran) go through
+      `ape.budget.calibrate` into `<out>/calibration_measured.yaml`; config/ is never written. The exact command to
+      promote them into config/budget_calibration_measured.yaml is returned (and printed in report.md).
+    - Output tokens per call (reasoning included) per role and effort, and calls per sample per measured cell,
+      against the priors; build calls per system from the ledgers.
+    - Two re-projections of the whole plan, conservative, against the current one: `measured_cells` (the
+      measured entries applied where (arm, model, effort, cell, delivery) match a plan cell) and
+      `adjusted_priors` (the priors with the measured per-call figures in place everywhere). WARN when either
+      exceeds the program budget or puts the gate over its allocation.
+    """
+    from ape.budget import calibrate, estimate, load_assumptions, load_measured, load_plan
+
+    logs = sorted(log_root.rglob("*.eval")) if log_root.is_dir() else []
+    if run is not None and run.dir.is_dir():
+        logs += sorted(run.dir.rglob("*.eval"))
+    out.mkdir(parents=True, exist_ok=True)
+    measured_path = out / "calibration_measured.yaml"
+    entries = calibrate(logs, measured_path, merge=False)["entries"] if logs else []
+    (out / "calibration_logs.txt").write_text("".join(f"{p}\n" for p in logs))
+    A, plan = load_assumptions(), load_plan()
+    role_efforts = {r: s.reasoning_effort for r, s in profile.roles.items()}
+    outputs = sc.output_vs_prior(sc.measured_per_call(entries, role_efforts), A, _reasoning_by_role(logs) if logs else None)
+    builds = sc.build_per_call(_ledger_rows(out, since), A)
+    config_measured = load_measured()
+
+    def totals(est) -> dict[str, float]:
+        return {"total": round(est.total("conservative"), 2), "gate": round(est.total("conservative", study="gate"), 2)}
+
+    projections = {
+        "baseline": totals(estimate(plan, A, measured=config_measured)),
+        "measured_cells": totals(estimate(plan, A, measured=[*config_measured, *entries])),
+        "adjusted_priors": totals(estimate(plan, sc.adjusted_assumptions(A, outputs, builds), measured=config_measured)),
+    }
+    verdict = sc.cost_verdict(projections, float(plan.budget["total_usd"]), float((plan.budget.get("allocations") or {}).get("gate", float("inf"))))
+    rel = lambda p: os.path.relpath(p, ROOT)  # noqa: E731
+    return {
+        "status": verdict["status"],
+        "reasons": verdict["reasons"],
+        "logs": len(logs),
+        "entries": len(entries),
+        "measured_file": str(measured_path),
+        "output_per_call": outputs,
+        "calls_per_sample": sc.calls_vs_prior(entries, A),
+        "builds": builds,
+        "projections": projections,
+        "note": "indicative: a smoke makes few calls per cell; the gate pilot's calibration is the one to adopt",
+        "promote_command": f"uv run python -m ape.budget calibrate $(cat {rel(out / 'calibration_logs.txt')}) --out config/budget_calibration_measured.yaml",
+        "promote_note": "merges with the entries already there; build priors (budget_assumptions.yaml build_calls) are edited by hand",
+    }
 
 
 # --- the checks ------------------------------------------------------------------------------------
@@ -928,15 +1098,43 @@ def _brief(measured: dict) -> str:
     return ", ".join(parts)[:300].replace("|", "/")
 
 
+def _cost_lines(c: dict) -> list[str]:
+    """report.md's "Cost model check" section."""
+    lines = ["", "## Cost model check", ""]
+    if c.get("status") == "not measured" or "projections" not in c:
+        return lines + [f"Not measured: {c.get('reason')}."]
+    lines += [f"Status: **{c['status']}**" + (f" ({'; '.join(c['reasons'])})" if c.get("reasons") else "") + f". {c['note'].capitalize()}.", ""]
+    p = c["projections"]
+    lines += ["| Projection (conservative) | Program | Gate |", "|---|---|---|"]
+    lines += [f"| {name} | ${v['total']:,.0f} | ${v['gate']:,.0f} |" for name, v in p.items()]
+    if c.get("output_per_call"):
+        lines += ["", "| Role | Effort | Calls | Output/call | Prior | Ratio | Reasoning share | Input/call |", "|---|---|---|---|---|---|---|---|"]
+        for r in c["output_per_call"]:
+            lines.append(f"| {r['role']} | {r['effort'] or 'default'} | {r['calls']:g} | {r['output_per_call']:g} | {r['prior_output_per_call'] if r['prior_output_per_call'] is not None else '–'} | {r['ratio'] if r['ratio'] is not None else '–'} | {r['reasoning_share'] if r['reasoning_share'] is not None else '–'} | {r['input_per_call']:g} |")
+    if c.get("calls_per_sample"):
+        lines += ["", "| Arm | Cell | Delivery | Samples | Calls/sample | Prior | Ratio | Input/call |", "|---|---|---|---|---|---|---|---|"]
+        for r in c["calls_per_sample"]:
+            lines.append(f"| {r['arm']} | {r['cell']} | {r['delivery']} | {r['samples']} | {r['calls_per_sample']:g} | {r['prior_calls_per_sample'] if r['prior_calls_per_sample'] is not None else '–'} | {r['ratio'] if r['ratio'] is not None else '–'} | {r['input_per_call']:g} |")
+    if c.get("builds"):
+        lines += ["", "| Build system | Calls | Input/call (prior) | Output/call (prior) | Reasoning/call | Calls/chunk (prior) |", "|---|---|---|---|---|---|"]
+        for k, b in c["builds"].items():
+            pr = b["prior"]
+            lines.append(f"| {k} | {b['calls']} | {b['input_per_call']:g} ({pr.get('input')}) | {b['output_per_call']:g} ({pr.get('output')}) | {b['reasoning_per_call']:g} | {b['calls_per_chunk']} ({pr.get('calls_per_chunk')}) |")
+    lines += ["", f"Measured entries: `{c['measured_file']}` (not in config/). To adopt them ({c['promote_note']}):", "", f"    {c['promote_command']}"]
+    return lines
+
+
 def write_report(report: dict) -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "report.json").write_text(json.dumps(report, indent=1, default=str))
+    out = smoke_dir(report["dry"])
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "report.json").write_text(json.dumps(report, indent=1, default=str))
     lines = [
         f"# Smoke report ({'DRY: mock models, fake embeddings' if report['dry'] else 'live'})",
         "",
         f"- Status: **{report['status']}**{' (' + report['stopped'] + ')' if report.get('stopped') else ''}",
         f"- Profile: {report['models']['profile']}; spend ${report.get('spend_usd', 0):.4f} of --max-usd {report['max_usd']} (projected ${report.get('projection_usd', {}).get('total', 0):.3f})",
-        f"- {report['started']} to {report.get('finished')}",
+        f"- {report['started']} to {report.get('finished')}; commit `{(report.get('git') or {}).get('commit')}`{' (dirty)' if (report.get('git') or {}).get('dirty') else ''}",
+        *[f"- WARNING: {w}" for w in report.get("warnings") or []],
         "",
         "| Check | Status | Measured | Spend | Projected | Reason |",
         "|---|---|---|---|---|---|",
@@ -947,8 +1145,12 @@ def write_report(report: dict) -> None:
     if burst := report["checks"].get("burst"):
         m = burst["measured"]
         lines += ["", f"Recommended max_connections: **{m.get('recommended_max_connections')}** ({m.get('recommendation')}).", f"Model-call time (s): {m.get('model_call_time_s')}; sample time (s): {m.get('sample_total_time_s')}."]
-    lines += ["", "Logs and full values: `cache/smoke/report.json`."]
-    (OUT / "report.md").write_text("\n".join(lines) + "\n")
+    if "cost_model_check" in report:
+        lines += _cost_lines(report["cost_model_check"])
+    if not report["dry"]:
+        lines += ["", f"Every check's latest live result: `{out / RECORD_NAME}` (run_gate's live preflight requires all of them to pass)."]
+    lines += ["", f"Logs and full values: `{out / 'report.json'}`."]
+    (out / "report.md").write_text("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

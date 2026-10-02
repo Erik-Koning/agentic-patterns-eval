@@ -168,7 +168,8 @@ def test_live_preflight_needs_the_key_and_the_probe_and_picks_the_anchor_profile
     monkeypatch.setenv("APE_CACHE", str(tmp / "cache"))  # the spend check reads this ledger, not the real one
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     probe = tmp / "openai_probe.json"
-    run = GateRun("live", runs_root=tmp / "runs", env_path=tmp / "no.env", probe_path=probe)
+    # The live-smoke requirement has its own tests (tests/test_prerun.py); here it is skipped, with a reason.
+    run = GateRun("live", runs_root=tmp / "runs", env_path=tmp / "no.env", probe_path=probe, skip_smoke_check="test: the key and probe checks alone")
 
     with pytest.raises(PreflightError) as e:
         run_phases(run, "preflight")

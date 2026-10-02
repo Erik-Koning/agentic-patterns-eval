@@ -225,18 +225,18 @@ def test_step_selection_adds_what_a_check_needs_and_refuses_skipping_it():
 def test_projections_price_every_model_check_and_refuse_a_cap_they_exceed(clean_env, monkeypatch):
     proj = smoke.projections(["effort", "H4", "burst", "retrieval"], "gate", dry=True)
     assert proj["effort"] == proj["retrieval"] == 0.0 and proj["H4"] > 0 and proj["burst"] > proj["H4"]
-    monkeypatch.setattr(smoke, "OUT", clean_env / "smoke")
+    monkeypatch.setattr(smoke, "SMOKE_ROOT", clean_env / "smoke")
     with pytest.raises(SystemExit, match="exceeds --max-usd 0.001"):
         smoke.main(["--dry", "--only", "H4", "--max-usd", "0.001"])
 
 
 def test_a_run_stops_before_the_check_the_cap_cannot_cover_and_still_writes_its_report(clean_env, monkeypatch):
-    monkeypatch.setattr(smoke, "OUT", clean_env / "smoke")
+    monkeypatch.setattr(smoke, "SMOKE_ROOT", clean_env / "smoke")
     monkeypatch.setattr(smoke.Spend, "total", lambda self: 2.99)
     code = smoke.main(["--dry", "--only", "H4", "--max-usd", "3"])
-    report = json.loads((clean_env / "smoke" / "report.json").read_text())
+    report = json.loads((clean_env / "smoke" / "dry" / "report.json").read_text())
     assert code == 2 and report["status"] == "stopped" and "stopping before H4" in report["stopped"] and report["checks"] == {}
-    assert (clean_env / "smoke" / "report.md").is_file()
+    assert (clean_env / "smoke" / "dry" / "report.md").is_file()
 
 
 # ---------- run_gate SMOKE_SCALE ----------
@@ -298,10 +298,15 @@ def test_the_d017_check_has_no_coverage_code_of_its_own():
 def test_the_dry_smoke_passes_every_check_end_to_end(clean_env, monkeypatch):
     """`readiness/smoke.py --dry` from scratch (~20 s): every check, the orchestrator chain at SMOKE_SCALE included,
     passes offline; nothing outside its scratch area changes."""
-    monkeypatch.setattr(smoke, "OUT", clean_env / "smoke")
+    monkeypatch.setattr(smoke, "SMOKE_ROOT", clean_env / "smoke")
     provenance, config = (ROOT / "PROVENANCE.md").read_bytes(), smoke._tree_hash(ROOT / "config")
     assert smoke.main(["--dry"]) == 0
-    report = json.loads((clean_env / "smoke" / "report.json").read_text())
+    # M1: everything a dry run makes is under cache/smoke/dry/; nothing live, no live record.
+    assert sorted(p.name for p in (clean_env / "smoke").iterdir()) == ["dry"]
+    report = json.loads((clean_env / "smoke" / "dry" / "report.json").read_text())
+    assert report["mode"] == "dry" and report["dir"] == str(clean_env / "smoke" / "dry")
+    assert not (clean_env / "smoke" / "dry" / smoke.RECORD_NAME).exists()
+    assert report["cost_model_check"]["status"] == "not measured"
     assert report["status"] == sc.PASS and list(report["checks"]) == list(smoke.STEPS)
     assert {n: r["status"] for n, r in report["checks"].items()} == dict.fromkeys(smoke.STEPS, sc.PASS)
     assert report["spend_usd"] == 0.0 and 0 < report["projection_usd"]["total"] <= smoke.DEFAULT_MAX_USD
@@ -450,6 +455,132 @@ def test_retrieval_credits_apg_nodes_by_their_delivered_text_not_their_source_ch
 def test_lightrag_retrieval_recall_is_reported_never_judged():
     res = sc.retrieval_verdict([0.9, 1.0], [True, True], graph="authored", dry=False, lightrag_recall=[0.1, 0.2], lightrag_note="extract index")
     assert res["status"] == sc.PASS and res["measured"]["lightrag_recall_query_keywords"] == pytest.approx(0.15)
+
+
+def test_dry_and_live_smoke_state_never_share_a_directory(clean_env, monkeypatch):
+    import os
+
+    monkeypatch.setattr(smoke, "SMOKE_ROOT", clean_env / "smoke")
+    assert smoke.smoke_dir(True) == clean_env / "smoke" / "dry" and smoke.smoke_dir(False) == clean_env / "smoke" / "live"
+    for dry, mode in ((True, "dry"), (False, "live")):
+        smoke._isolate(dry)
+        assert {os.environ[k] for k in ("APE_WORLDS", "APE_INDICES", "APE_CACHE")} == {str(clean_env / "smoke" / mode / x) for x in ("worlds", "indices", "cache")}
+    assert os.environ.get("APE_EMBEDDINGS") == "fake"  # set by the dry _isolate above; a live run starts from a clean env
+    # The old flat layout is found, never deleted.
+    assert smoke.legacy_layout() == []
+    (clean_env / "smoke" / "worlds").mkdir(parents=True)
+    (clean_env / "smoke" / "report.json").write_text("{}")
+    assert smoke.legacy_layout() == ["worlds", "report.json"]
+    assert (clean_env / "smoke" / "worlds").is_dir()
+
+
+def _cost_entries() -> list[dict]:
+    """`ape.budget.calibrate` entries: S3s on F7-10 (agent at high effort, kg at the profile's low) and an F8 session."""
+    return [
+        {"arm": "S3s", "model": "openai/gpt-6-luna", "effort": "high", "cell": "F7-10", "delivery": "push", "samples": 2,
+         "roles": {"agent": {"model": "openai/gpt-6-luna", "calls_per_sample": 3.0, "input_per_call": 4000.0, "output_per_call": 3000.0, "cached_fraction": 0.0},
+                   "kg": {"model": "openai/gpt-6-luna", "calls_per_sample": 1.0, "input_per_call": 700.0, "output_per_call": 500.0, "cached_fraction": 0.0}}},
+        {"arm": "CM0", "model": "openai/gpt-6-luna", "effort": "high", "cell": "F8-5", "delivery": "push", "samples": 1,
+         "roles": {"agent": {"model": "openai/gpt-6-luna", "calls_per_sample": 12.0, "input_per_call": 6000.0, "output_per_call": 1000.0, "cached_fraction": 0.0}}},
+    ]  # fmt: skip
+
+
+def test_the_cost_model_check_compares_measurements_with_the_priors():
+    from ape.budget import load_assumptions
+
+    A = load_assumptions()
+    measured = sc.measured_per_call(_cost_entries(), {"agent": "high", "kg": "low"})
+    # agent at high: (2 x 3 calls x 3000 + 1 x 12 calls x 1000) / 18 calls = 1666.7 tokens per call
+    assert measured["agent@high"] == {"role": "agent", "effort": "high", "model": "openai/gpt-6-luna", "calls": 18.0, "input_per_call": 5333.3, "output_per_call": 1666.7}
+    assert measured["kg@low"]["calls"] == 2.0 and measured["kg@low"]["output_per_call"] == 500.0
+    rows = {r["role"]: r for r in sc.output_vs_prior(measured, A, {"agent": (900.0, 1800.0)})}
+    assert rows["agent"]["prior_output_per_call"] == A["output_tokens_per_call"]["high"] == 1500
+    assert rows["agent"]["ratio"] == round(1666.7 / 1500, 3) and rows["agent"]["reasoning_share"] == 0.5
+    assert rows["kg"]["prior_output_per_call"] == 350.0 and rows["kg"]["ratio"] == round(500 / 350, 3)
+    calls = {r["cell"]: r for r in sc.calls_vs_prior(_cost_entries(), A)}
+    assert calls["F7-10"]["prior_calls_per_sample"] == A["calls_per_sample"]["F7"]["push"] == 4 and calls["F7-10"]["ratio"] == 0.75
+    assert calls["F8-5"]["prior_calls_per_sample"] == 5 * A["study_g"]["calls_per_item"] and calls["F8-5"]["calls_per_sample"] == 12.0
+    # Build calls from the ledger: finished calls only (a cancelled one carries a status), per system.
+    ledger = [
+        {"role": "build", "context": {"world": "F7-100-rel-desc-dev-s1000", "system": "apg-author"}, "input_tokens": 800, "output_tokens": 2000, "reasoning_tokens": 1500},
+        {"role": "build", "context": {"world": "F7-100-rel-desc-dev-s1000", "system": "apg-author"}, "input_tokens": 600, "output_tokens": 1000, "reasoning_tokens": 500},
+        {"role": "build", "context": {"world": "F7-100-rel-desc-dev-s1000", "system": "apg-author", "status": "cancelled"}, "input_tokens": 700, "output_tokens": 0},
+        {"role": "embeddings", "context": {"world": "F7-100-rel-desc-dev-s1000", "system": "chunks"}, "input_tokens": 50, "output_tokens": 0},
+    ]
+    builds = sc.build_per_call(ledger, A)
+    assert set(builds) == {"apg_author"}
+    b = builds["apg_author"]
+    assert (b["calls"], b["input_per_call"], b["output_per_call"], b["reasoning_per_call"]) == (2, 700.0, 1500.0, 1000.0)
+    assert b["calls_per_chunk"] == round(2 / A["chunks_per_world"]["F7-100"], 3) and b["prior"]["output"] == A["build_calls"]["apg_author"]["output"]
+    # The adjusted priors carry the measurements; nothing else moves.
+    adj = sc.adjusted_assumptions(A, list(rows.values()), builds)
+    assert adj["output_tokens_per_call"]["high"] == 1666.7 and adj["output_tokens_per_call"]["low"] == A["output_tokens_per_call"]["low"]
+    assert all(v["output"] == 500.0 for v in adj["kg_calls"].values()) and adj["build_calls"]["apg_author"]["output"] == 1500.0
+    assert A["output_tokens_per_call"]["high"] == 1500, "the priors themselves are untouched"
+    # WARN only when a re-projection breaks the program budget or the gate's allocation.
+    ok = sc.cost_verdict({"baseline": {"total": 4743, "gate": 201}, "adjusted_priors": {"total": 4900, "gate": 260}}, 5000, 700)
+    assert ok == {"status": sc.PASS, "reasons": []}
+    bad = sc.cost_verdict({"baseline": {"total": 4743, "gate": 201}, "measured_cells": {"total": 5200, "gate": 760}}, 5000, 700)
+    assert bad["status"] == sc.WARN and bad["reasons"] == ["measured_cells: program $5,200 > $5,000", "measured_cells: gate $760 > its $700 allocation"]
+
+
+def test_the_cost_model_check_runs_on_a_crafted_log_and_ledger_and_never_writes_config(clean_env):
+    """`cost_model_check` end to end: a real Inspect log whose mock agent reports usage, plus a ledger, re-projected."""
+    import asyncio
+    import os
+    import time
+
+    from inspect_ai import eval as inspect_eval
+    from inspect_ai.model import GenerateConfig, ModelOutput, ModelUsage, get_model
+
+    from ape.build import build
+    from ape.llm.ledger import Ledger, LedgerEntry
+    from ape.llm.mock_agent import mock_agent
+    from ape.models import load_profile
+    from ape.tasks.gate import gate
+
+    for k, v in {"APE_WORLDS": "worlds", "APE_CACHE": "cache", "APE_INDICES": "indices"}.items():
+        os.environ[k] = str(clean_env / v)
+    os.environ["APE_EMBEDDINGS"] = "fake"
+    asyncio.run(build("dev", "F7", ["10"], n_worlds=1, n_tasks=2, relational=True, embed=True))
+
+    def heavy(messages, tools, tool_choice, config) -> ModelOutput:  # every agent call: 4,000 output tokens
+        out = mock_agent(messages, tools, tool_choice, config)
+        out.usage = ModelUsage(input_tokens=3000, output_tokens=4000, total_tokens=7000, reasoning_tokens=3000)
+        return out
+
+    out, log_root = clean_env / "live", clean_env / "live" / "logs" / "now"
+    since = time.time() - 1
+    inspect_eval(gate(family="F7", level="10", split="dev", arm="S1"), model=get_model("mockllm/model", config=GenerateConfig(reasoning_effort="high"), custom_outputs=heavy), log_dir=str(log_root / "S1"), display="none")
+    Ledger(out / "cache" / "ledger.jsonl").append(LedgerEntry(role="build", model="gpt-6-luna", kind="chat", input_tokens=900, output_tokens=3000, reasoning_tokens=2500, context={"world": "F7-10-rel-desc-dev-s1000", "system": "lightrag"}))
+    config = smoke._tree_hash(ROOT / "config")
+    res = smoke.cost_model_check(out, log_root, None, since, load_profile("gate"))
+    assert smoke._tree_hash(ROOT / "config") == config, "config/ is never written"
+    assert (out / "calibration_measured.yaml").is_file() and res["entries"] == 1 and res["logs"] == 1
+    agent = next(r for r in res["output_per_call"] if r["role"] == "agent")
+    assert agent["effort"] == "high" and agent["output_per_call"] == 4000.0 and agent["prior_output_per_call"] == 1500 and agent["reasoning_share"] == 0.75
+    assert res["builds"]["lightrag_extract"]["output_per_call"] == 3000.0 and res["builds"]["lightrag_extract"]["reasoning_per_call"] == 2500.0
+    p = res["projections"]
+    # The mock model matches no plan cell, so measured_cells is the baseline; the adjusted priors (4,000 output tokens
+    # per high-effort call, 3,000 per extraction call) put the program far over $5,000: a WARN.
+    assert p["measured_cells"] == p["baseline"] and p["adjusted_priors"]["total"] > 5000 > p["baseline"]["total"]
+    assert res["status"] == sc.WARN and any(r.startswith("adjusted_priors: program $") for r in res["reasons"])
+    assert res["promote_command"].startswith("uv run python -m ape.budget calibrate $(cat ") and res["promote_command"].endswith("--out config/budget_calibration_measured.yaml")
+    assert (out / "calibration_logs.txt").read_text().strip().endswith(".eval")
+    lines = "\n".join(smoke._cost_lines(res))
+    assert "## Cost model check" in lines and "| agent | high |" in lines and "| lightrag_extract |" in lines
+
+
+def test_the_live_record_keeps_each_checks_latest_result():
+    report1 = {"git": {"commit": "a" * 40, "dirty": False}, "models": {"profile": "gate", "overrides": {"agent": None}}, "snapshots": {"gpt-6-luna": "s1"}, "started_utc": "t1", "finished_utc": "t1",
+               "checks": {"L2": {"status": "pass", "finished_utc": "t1"}, "orchestrator": {"status": "fail", "reason": "boom", "finished_utc": "t1"}}}  # fmt: skip
+    rec = sc.update_live_record(None, report1, ["L2", "orchestrator"])
+    assert rec["required"] == ["L2", "orchestrator"] and rec["checks"]["orchestrator"]["status"] == "fail"
+    assert rec["checks"]["L2"] == {"status": "pass", "reason": None, "finished_utc": "t1", "git_commit": "a" * 40, "git_dirty": False, "profile": "gate", "overrides": {}, "snapshots": {"gpt-6-luna": "s1"}, "report_started_utc": "t1"}
+    report2 = report1 | {"git": {"commit": "b" * 40, "dirty": False}, "started_utc": "t2", "finished_utc": "t2", "checks": {"orchestrator": {"status": "pass", "finished_utc": "t2"}}}
+    rec = sc.update_live_record(rec, report2, ["L2", "orchestrator"])
+    assert rec["checks"]["orchestrator"]["status"] == "pass" and rec["checks"]["orchestrator"]["git_commit"] == "b" * 40
+    assert rec["checks"]["L2"]["git_commit"] == "a" * 40, "a check not re-run keeps its earlier result"
 
 
 def test_the_new_checks_are_priced_and_build_their_own_worlds(clean_env):

@@ -4,6 +4,15 @@
 # tie_pp of the best go to the lower cost.
 # Budget knobs are per arm (APE_S3S_BUDGET, APE_APG_BUDGET, APE_LGR_BUDGET; see ape.config), so one
 # system's candidates never move another system's budget.
+#
+# Sign-off (GATE_PREREG §5, O-3). Each system's owner reviews its candidates below, then names themselves in
+# `owners` and sets `signed_off` to true. The skeptic owns LightRAG and S3s and must not be on the APG side
+# (the same person as owners.APG is refused). A live `run_gate tune` refuses until every system has an owner and
+# a sign-off: PC6 counts every configuration ever tried for a system, archived tuning logs included, against
+# budget_per_system, so a candidate replaced after a live tune still counts. Offline and smoke runs ignore this.
+# These keys are not candidates; the freeze hashes this whole file.
+owners: {APG: TODO, LightRAG: TODO, S3s: TODO}
+signed_off: {APG: false, LightRAG: false, S3s: false}
 budget_per_system: 8
 tie_pp: 1.0
 dev_cells: [F7-10, F7-1000, F3-5, F3-60]

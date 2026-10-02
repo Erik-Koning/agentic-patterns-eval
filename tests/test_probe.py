@@ -324,7 +324,7 @@ def test_run_gate_live_preflight_refuses_a_moved_snapshot(provenance, tmp_path, 
     report["models_available"] = ["gpt-6-luna", "gpt-6-sol", "text-embedding-3-small"]
     probe.write_text(json.dumps(report))
     probe_mod.pin(probe, provenance)
-    run = GateRun("live-pins", runs_root=tmp_path / "runs", env_path=tmp_path / "no.env", probe_path=probe, provenance_path=provenance)
+    run = GateRun("live-pins", runs_root=tmp_path / "runs", env_path=tmp_path / "no.env", probe_path=probe, provenance_path=provenance, skip_smoke_check="test: the snapshot check alone")
     assert run_phases(run, "preflight") == {"preflight": "done"}
 
     report["snapshots"]["gpt-6-luna"] = {"snapshot": "s2", "snapshots_seen": ["s2"], "roles": ["agent (inspect)"]}

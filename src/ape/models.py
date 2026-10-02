@@ -197,6 +197,47 @@ class PreflightError(RuntimeError):
     """A run would spend money it cannot account for, or cannot start; the message lists every problem."""
 
 
+BACKUP_ENV = "APE_BACKUP_DIR"  # ape.backup's destination (kept here so preflight needs no import of the backup module)
+MIN_FREE_GB = 20.0  # live runs grow cache/, indices/ and runs/ by GBs (READINESS_AUDIT §8), and the backup with them
+
+
+def _existing(path: Path) -> Path:
+    """`path`, or its nearest existing ancestor (a backup destination may not exist until the first backup)."""
+    path = path.resolve()
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return path
+
+
+def storage_warnings(root: Path = ROOT, min_free_gb: float = MIN_FREE_GB, disk_usage: Any = None) -> list[str]:
+    """Warnings, never refusals, for a live run's storage: APE_BACKUP_DIR unset, inside the repo or not writable
+    (results exist only on this disk otherwise), and under `min_free_gb` free at the repo or at the backup."""
+    import shutil
+
+    usage = disk_usage or shutil.disk_usage
+    out: list[str] = []
+
+    def low(where: str, path: Path) -> None:
+        free_gb = usage(str(_existing(path))).free / 1e9
+        if free_gb < min_free_gb:
+            out.append(f"{where} has {free_gb:.1f} GB free (< {min_free_gb:g} GB): a live run's logs, caches, indices and backups grow by GBs")
+
+    low(f"the disk holding the repo ({root})", root)
+    raw = os.environ.get(BACKUP_ENV, "").strip()
+    if not raw:
+        out.append(f"{BACKUP_ENV} is not set: live results (runs/, cache/, indices/) exist only on this disk; set it to a disk or synced folder outside the repo (ape.backup copies there after every live phase)")
+        return out
+    dest = Path(raw).expanduser()
+    resolved, repo = dest.resolve(), root.resolve()
+    if resolved == repo or repo in resolved.parents:
+        out.append(f"{BACKUP_ENV}={dest} is inside the repo: a backup there shares the repo's disk and fate; use a location outside it")
+    target = _existing(dest)
+    if not os.access(target, os.W_OK):
+        out.append(f"{BACKUP_ENV}={dest} is not writable ({target}): backups after each live phase will fail")
+    low(f"the backup destination ({dest})", dest)
+    return out
+
+
 def load_costs(path: Path = COSTS_PATH) -> dict[str, dict]:
     """The price table as Inspect reads it: {"provider/model": {input, output, input_cache_write, input_cache_read}},
     USD per 1M tokens. The ledger's view of the same file (bare model names) is `ape.analysis.cost.load_prices`."""

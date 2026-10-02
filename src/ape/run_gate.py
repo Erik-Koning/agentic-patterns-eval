@@ -6,12 +6,16 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
 
     preflight   FX-2 preflight (prices, and live: OPENAI_API_KEY) for the gate and anchor profiles; live:
                 cache/openai_probe.json lists every model the profiles call; the installed apg-core is the
-                pinned commit recorded in PROVENANCE.md; a dirty git tree is a warning.
-    build-dev   dev worlds (see `dev_world_specs`) and their artifacts through `ape.artifacts`: chunk
+                pinned commit recorded in PROVENANCE.md; a dirty git tree is a warning. A live run (not offline,
+                not smoke) also needs a fresh passing live smoke (`check_live_smoke`: readiness/smoke.py's record
+                in cache/smoke/live/) unless `--skip-smoke-check "<reason>"`, and gets storage warnings
+                (`ape.models.storage_warnings`: APE_BACKUP_DIR, free disk).
+    build-dev  dev worlds (see `dev_world_specs`) and their artifacts through `ape.artifacts`: chunk
                 embeddings, the authored APG graph, the LightRAG index (extract; offline: oracle); then
                 D-017's build-quality check (`ape.build_quality`) -> build-dev/build_quality.json.
     tune      `ape.tuning.tune` for APG, LightRAG and S3s on the grid's dev cells -> tune/selected.yaml
-                and <config>/selected.yaml.
+                and <config>/selected.yaml. Live, it refuses until config/tuning_grid.yaml names every system's
+                owner and each owner has signed off its candidates (`tuning_signoff_problems`).
     anchor      PC1: the GraphRAG-Bench index, hybrid and naive runs, `pc1_from_logs` -> anchor/pc1.json.
     pilot       the pilot worlds (`gate.build.pilot`, split "pilot") and their artifacts; `gate.pilot` arms but
                 S7 and `gate.pilot.pull`, with every selection's knobs; S7 targets (APG*'s median realized
@@ -195,7 +199,7 @@ import yaml
 from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, program_remaining, projected_cost, remaining, require_affordable
 from .build_quality import worlds_per_cell_note
 from .config import ROOT, Config, embedding_cache
-from .models import PreflightError, Profile, load_profile, preflight
+from .models import PreflightError, Profile, load_profile, preflight, storage_warnings
 from .runner import INDEX_NAME
 from .spend import LABEL_ENV, REGISTRY_ENV
 from .worlds.generate import SEED_BLOCK, SPLIT_SEED_BASE, TEST_SEED_BASE_ENV, TEST_SPLIT_ENV, require_test_split_unlocked
@@ -223,7 +227,14 @@ OFFLINE_SCALE = {
 # Live smoke scale (FIX_PLAN FX-8): OFFLINE_SCALE's sizes on the cheapest gate cells only. Plan cells of other
 # world cells are dropped (an anchor index keeps its corpus); see `_smoke_cell` for the projection.
 SMOKE_SCALE = {**OFFLINE_SCALE, "cells": ("F7-10", "F3-5")}
-SMOKE_RUNS = ROOT / "cache" / "smoke" / "runs"
+# readiness/smoke.py keeps dry and live state apart: cache/smoke/dry/ and cache/smoke/live/ (worlds, indices, cache,
+# logs, the orchestrator's runs, report.json; live also checks.json, the latest result of every check).
+SMOKE_ROOT = ROOT / "cache" / "smoke"
+SMOKE_RUNS = SMOKE_ROOT / "live" / "runs"
+SMOKE_DRY_RUNS = SMOKE_ROOT / "dry" / "runs"
+# A live gate run needs a passing live smoke no older than this (`check_live_smoke`; --smoke-max-age-days).
+SMOKE_MAX_AGE_DAYS = 7.0
+SMOKE_OK = ("pass", "warn")  # smoke statuses that count as passing (a warn-level check is a finding, not a breakage)
 # Dev world groups and their run_plan.yaml build cells. The plan is the one source of counts, so the
 # projection and the build cover the same worlds. World i of every group has seed 1000+i, so the id_only
 # and messy worlds are paired renderings of gate worlds.
@@ -311,6 +322,9 @@ class GateRun:
     anchor_data_dir: Path | None = None  # GraphRAG-Bench data; default <cache>/graphragbench (smoke: the repo's cache/)
     accept_pc1_failure: str | None = None  # freeze only: the analyst's recorded reason for freezing despite a failed PC1 (GATE_PREREG §7)
     test_seed_base: int | None = None  # freeze only: the test-seed block to freeze (default 3000, else the next unused block)
+    smoke_dir: Path = SMOKE_ROOT / "live"  # live preflight: the live smoke's report.json and checks.json (`check_live_smoke`)
+    smoke_max_age_days: float = SMOKE_MAX_AGE_DAYS
+    skip_smoke_check: str | None = None  # live preflight: the recorded reason for running without a fresh live smoke
 
     def __post_init__(self) -> None:
         if not _RUN_ID.match(self.run_id):
@@ -888,7 +902,115 @@ def _preflight_params(run: GateRun) -> dict:
 
         env["api_key_present"] = _api_key_present(run.env_path)
         env["probe_sha256"] = _sha256(run.probe_path)
+        if not run.smoke:  # a new live smoke re-runs preflight (the skip reason is recorded, not fingerprinted)
+            env["smoke_report_sha256"] = _sha256(run.smoke_dir / "report.json")
+            env["smoke_record_sha256"] = _sha256(run.smoke_dir / "checks.json")
     return {"scale": scale(run), "environment": env, "env_knobs": _env_knobs()}
+
+
+def _git_is_ancestor(commit: str) -> bool | None:
+    """Whether `commit` is HEAD or an ancestor of it; None when git cannot tell (no git, unknown commit)."""
+    try:
+        r = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {0: True, 1: False}.get(r.returncode)
+
+
+def _smoke_time(entry: dict) -> datetime | None:
+    """When a smoke report or check finished: `finished_utc` (ISO, with zone), else the older local `finished`."""
+    for key, local in (("finished_utc", False), ("finished", True)):
+        raw = entry.get(key)
+        if not raw:
+            continue
+        try:
+            t = datetime.fromisoformat(str(raw))
+        except ValueError:
+            continue
+        return (t.astimezone() if local and t.tzinfo is None else t).astimezone(UTC)
+    return None
+
+
+def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> tuple[list[str], dict]:
+    """Problems that stop a live gate run for want of a fresh passing live smoke (readiness/smoke.py), and what was
+    checked. Two files in `run.smoke_dir` (cache/smoke/live/):
+
+    - report.json, the latest live invocation: live (never a dry run), status pass or warn (not fail, not
+      stopped by its spend cap), and run on this gate profile.
+    - checks.json, every check's latest live result across invocations (a check re-run alone with --only
+      replaces its own entry): each check smoke.py lists as required has a pass or warn result, run on this
+      profile without model overrides, at a commit that is HEAD or an ancestor of it, at most
+      `run.smoke_max_age_days` old, and, where
+      PROVENANCE.md pins snapshots, served by the pinned snapshot of every alias this profile calls.
+    """
+    from . import snapshots as snaps
+
+    now = now or datetime.now(UTC)
+    report_path, record_path = run.smoke_dir / "report.json", run.smoke_dir / "checks.json"
+    info: dict[str, Any] = {"report": _show(report_path), "record": _show(record_path), "max_age_days": run.smoke_max_age_days}
+    how = f"run `uv run python readiness/smoke.py --max-usd 4`, or pass --skip-smoke-check \"<reason>\""
+    if not report_path.is_file() or not record_path.is_file():
+        missing = report_path if not report_path.is_file() else record_path
+        return [f"no live smoke record ({_show(missing)} missing): a live gate run needs a passing live smoke first; {how}"], info
+    try:
+        report, record = json.loads(report_path.read_text()), json.loads(record_path.read_text())
+    except (OSError, ValueError) as e:
+        return [f"the live smoke record in {_show(run.smoke_dir)} is unreadable ({e}); {how}"], info
+    problems: list[str] = []
+    mode = report.get("mode") or ("dry" if report.get("dry") else "live")
+    if report.get("dry") or mode != "live":
+        problems.append(f"{_show(report_path)} is a dry run's report (mode {mode!r}), not a live smoke; {how}")
+    status = report.get("status")
+    info["latest_status"] = status
+    if status not in SMOKE_OK:
+        detail = f": {report['stopped']}" if report.get("stopped") else (f" (failed: {', '.join(n for n, r in (report.get('checks') or {}).items() if r.get('status') == 'fail')})" if status == "fail" else "")
+        problems.append(f"the latest live smoke's status is {status!r}{detail}; it must pass (warn-level checks allowed): re-run it ({how})")
+    profile = (report.get("models") or {}).get("profile")
+    if profile != gp.name:
+        problems.append(f"the latest live smoke ran profile {profile!r}, not the gate's {gp.name!r}; {how}")
+    pins = snaps.read_pins(run.provenance_path) if run.provenance_path.is_file() else {}
+    fallback = os.environ.get("APE_BUILD_FALLBACK") == "1"
+    called = {snaps.alias(s.model) for r, s in gp.roles.items() if not s.model.startswith("mockllm/") and (r != "build_fallback" or fallback)}
+    pinned = {a: pins[a] for a in sorted(called & set(pins))}
+    info["pinned"] = pinned
+    checks = record.get("checks") or {}
+    required = list(record.get("required") or [])
+    info["required"] = required
+    ancestors: dict[str, bool | None] = {}
+    rows = {}
+    for name in required:
+        entry = checks.get(name)
+        if entry is None:
+            problems.append(f"smoke check {name!r} has no live result; run it (`readiness/smoke.py --only {name}`)")
+            continue
+        when = _smoke_time(entry)
+        age = (now - when).total_seconds() / 86400 if when else None
+        commit = entry.get("git_commit")
+        if commit and commit not in ancestors:
+            ancestors[commit] = _git_is_ancestor(commit)
+        rows[name] = {"status": entry.get("status"), "age_days": None if age is None else round(age, 2), "git_commit": commit}
+        if entry.get("status") not in SMOKE_OK:
+            problems.append(f"smoke check {name!r}: latest live result is {entry.get('status')!r}; it must pass (warn allowed)")
+        if entry.get("profile") != gp.name:
+            problems.append(f"smoke check {name!r} ran profile {entry.get('profile')!r}, not {gp.name!r}")
+        if entry.get("overrides"):
+            problems.append(f"smoke check {name!r} ran with model overrides {entry['overrides']}: re-run it on the profile's own models")
+        if age is None:
+            problems.append(f"smoke check {name!r} has no finish time")
+        elif age > run.smoke_max_age_days:
+            problems.append(f"smoke check {name!r} is {age:.1f} days old (limit {run.smoke_max_age_days:g}; --smoke-max-age-days); re-run it")
+        if not commit:
+            problems.append(f"smoke check {name!r} records no commit")
+        elif ancestors[commit] is False:
+            problems.append(f"smoke check {name!r} ran at commit {commit[:12]}, which is not HEAD or an ancestor of it: the code it smoked is not the code that would run")
+        elif ancestors[commit] is None:
+            problems.append(f"smoke check {name!r}: cannot tell whether its commit {commit[:12]} is an ancestor of HEAD (git unavailable or unknown commit)")
+        seen = entry.get("snapshots") or {}
+        for a, snap in pinned.items():
+            if seen.get(a) != snap:
+                problems.append(f"smoke check {name!r} ran on snapshot {seen.get(a)!r} of {a}, but PROVENANCE.md pins {snap!r}: re-run the smoke on the pinned models")
+    info["checks"] = rows
+    return list(dict.fromkeys(problems)), info
 
 
 def _preflight(run: GateRun, record: dict) -> None:
@@ -938,6 +1060,22 @@ def _preflight(run: GateRun, record: dict) -> None:
     # 4. A dirty tree is a warning: results must trace to a commit.
     if record["git"].get("dirty"):
         record["warnings"].append("the git tree is dirty: commit before a live run so results trace to a commit")
+    # 5. Live runs (not smoke runs): a fresh passing live smoke on this code and these models, unless skipped with
+    #    a recorded reason; and storage warnings (backup destination, free disk).
+    if not run.offline and not run.smoke:
+        if run.skip_smoke_check is not None:
+            reason = run.skip_smoke_check.strip()
+            if not reason:
+                problems.append("--skip-smoke-check needs a reason: why this live run may go without a fresh passing live smoke")
+            checks["smoke"] = {"skipped": reason}
+            record["smoke_check"] = {"skipped": reason}
+            record["warnings"].append(f"the live smoke check was skipped: {reason!r}")
+        else:
+            smoke_problems, smoke_info = check_live_smoke(run, gp)
+            checks["smoke"] = "ok" if not smoke_problems else "failed (see errors)"
+            record["smoke_check"] = smoke_info | {"problems": smoke_problems}
+            problems += smoke_problems
+        record["warnings"] += storage_warnings()
     record["checks"] = checks
     if problems:
         raise PreflightError("preflight failed:\n" + "\n".join(f"  - {x}" for x in dict.fromkeys(problems)))
@@ -1103,6 +1241,53 @@ def tuning_grid(run: GateRun) -> dict:
             cands.append(c)
         systems[name] = {**sdef, "candidates": cands}
     return {**grid, "systems": systems, "dev_cells": [c for c in grid["dev_cells"] if smoke_keeps(run, c)]}
+
+
+SKEPTIC_SYSTEMS = ("LightRAG", "S3s")  # owned by the skeptic, who is not on the APG side (GATE_PREREG §5, O-3)
+
+
+def _unset(owner: Any) -> bool:
+    return owner is None or not str(owner).strip() or str(owner).strip().upper() in ("TODO", "TBD", "NONE")
+
+
+def tuning_signoff_problems(grid: dict) -> list[str]:
+    """Why config/tuning_grid.yaml is not ready for a live tune: every tuned system needs a named owner in `owners`
+    and `signed_off: true`, and the skeptic's systems (LightRAG, S3s) must not be owned by the APG owner."""
+    owners, signed = grid.get("owners") or {}, grid.get("signed_off") or {}
+    problems = []
+    for system, _ in TUNED_SYSTEMS:
+        if _unset(owners.get(system)):
+            problems.append(f"owners.{system} is not set")
+        if signed.get(system) is not True:
+            problems.append(f"signed_off.{system} is not true")
+    apg = owners.get("APG")
+    if not _unset(apg):
+        for system in SKEPTIC_SYSTEMS:
+            if not _unset(owners.get(system)) and str(owners[system]).strip().casefold() == str(apg).strip().casefold():
+                problems.append(f"owners.{system} is the APG owner ({apg}): the skeptic owns {' and '.join(SKEPTIC_SYSTEMS)} and is not on the APG side")
+    return problems
+
+
+def _refuse_tune(run: GateRun) -> str | None:
+    """Frozen runs never re-tune; a live tune also needs the grid's owners and their sign-off (offline and smoke runs
+    tune their tiny grids without it)."""
+    if reason := _refuse_if_frozen("tune")(run):
+        return reason
+    if run.tiny:
+        return None
+    from .tuning import load_grid
+
+    path = run.config("tuning_grid.yaml")
+    grid = load_grid(path)
+    if problems := tuning_signoff_problems(grid):
+        return (
+            f"tune: {_show(path)} is not signed off for a live tune: {'; '.join(problems)}. Each system's owner declares "
+            f"its candidates, then sets signed_off.<system>: true (GATE_PREREG §5; O-3: the skeptic owns "
+            f"{' and '.join(SKEPTIC_SYSTEMS)} and is not on the APG side). Sign off before tuning: PC6 counts every "
+            f"configuration ever tried for a system, archived tuning logs included, against budget_per_system "
+            f"({grid.get('budget_per_system')}), so a candidate replaced after a live tune still counts against that budget"
+        )
+    return None
 
 
 def _tune_params(run: GateRun) -> dict:
@@ -2364,7 +2549,7 @@ PHASE_DEFS: dict[str, Phase] = {
         profile=gate_profile,
         requires=("preflight", "build-dev"),
         upstream=("build-dev",),
-        refuse=_refuse_if_frozen("tune"),
+        refuse=_refuse_tune,
     ),
     "anchor": Phase(
         "anchor",
@@ -2596,16 +2781,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--test-seed-base", type=int, metavar="SEED",
         help=f"freeze only: the first test seed (a block of {SEED_BLOCK}); default {FIRST_TEST_SEED_BASE}, or the next block no other frozen run used",
     )  # fmt: skip
+    ap.add_argument(
+        "--skip-smoke-check", metavar="REASON",
+        help="live runs: run without a fresh passing live smoke (readiness/smoke.py), recording why in the preflight manifest",
+    )  # fmt: skip
+    ap.add_argument("--smoke-max-age-days", type=float, default=SMOKE_MAX_AGE_DAYS, metavar="DAYS", help=f"live preflight: the oldest live smoke result accepted (default {SMOKE_MAX_AGE_DAYS:g})")
     a = ap.parse_args(argv)
+    if a.skip_smoke_check is not None and (a.offline or a.smoke):
+        ap.error("--skip-smoke-check applies to live gate runs (offline and smoke runs never check the live smoke)")
     if a.accept_pc1_failure and a.phase not in ("freeze", "all"):
         ap.error("--accept-pc1-failure applies to the freeze phase")
     if a.test_seed_base is not None and a.phase not in ("freeze", "all"):
         ap.error("--test-seed-base applies to the freeze phase (build-test and test use the frozen base)")
-    a.runs_dir = a.runs_dir or (SMOKE_RUNS if a.smoke else ROOT / "runs")
+    a.runs_dir = a.runs_dir or ((SMOKE_DRY_RUNS if a.offline else SMOKE_RUNS) if a.smoke else ROOT / "runs")
     try:
         run = GateRun(
             a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd,
             accept_pc1_failure=a.accept_pc1_failure, test_seed_base=a.test_seed_base,
+            skip_smoke_check=a.skip_smoke_check, smoke_max_age_days=a.smoke_max_age_days,
         )  # fmt: skip
         statuses = run_phases(run, a.phase)
     except (PhaseError, PreflightError, BudgetError) as e:
