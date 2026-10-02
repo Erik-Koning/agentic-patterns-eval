@@ -31,15 +31,18 @@ def workspace_name(world_id: str) -> str:
     return world_id.replace("-", "_").replace(".", "_")
 
 
-def embedding_func(emb: EmbeddingCache, dim: int) -> EmbeddingFunc:
+def embedding_func(emb: EmbeddingCache, dim: int, context: dict | None = None) -> EmbeddingFunc:
+    """LightRAG's embedding function over our cache. `context` attributes the ledger entries (build time: the world
+    and system); without it the per-compile `EMBED_CONTEXT` the agent loop sets applies (query time)."""
+
     async def embed(texts: list[str], **_kwargs) -> np.ndarray:
-        return np.array(await emb.embed(list(texts)), dtype=np.float32)
+        return np.array(await emb.embed(list(texts), context=context), dtype=np.float32)
 
     return EmbeddingFunc(embedding_dim=dim, max_token_size=8192, func=embed)
 
 
-async def embedding_dim(emb: EmbeddingCache) -> int:
-    return len((await emb.embed(["dimension probe"]))[0])
+async def embedding_dim(emb: EmbeddingCache, context: dict | None = None) -> int:
+    return len((await emb.embed(["dimension probe"], context=context))[0])
 
 
 def build_concurrency_kwargs() -> dict[str, int]:
@@ -65,14 +68,14 @@ def _open_lock() -> asyncio.Lock:
     return lock
 
 
-async def open_rag(working_dir: Path, world_id: str, llm_func, emb: EmbeddingCache, query_time: bool) -> LightRAG:
+async def open_rag(working_dir: Path, world_id: str, llm_func, emb: EmbeddingCache, query_time: bool, embed_context: dict | None = None) -> LightRAG:
     """Query time disables the LLM response cache so every compile pays for its keyword call
     (APG's classify is never cached either); build time keeps the extraction cache.
 
     Build time also raises LightRAG's concurrency (`build_concurrency_kwargs`); query time keeps
-    LightRAG's defaults."""
+    LightRAG's defaults. `embed_context` attributes build-time embedding calls in the ledger."""
     working_dir.mkdir(parents=True, exist_ok=True)
-    func = embedding_func(emb, await embedding_dim(emb))
+    func = embedding_func(emb, await embedding_dim(emb, embed_context), embed_context)
     async with _open_lock():  # see _open_locks
         rag = LightRAG(
             working_dir=str(working_dir),

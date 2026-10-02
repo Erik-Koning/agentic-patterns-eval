@@ -3,6 +3,16 @@
 Inspect meters calls made inside a sample; build-time calls happen offline, so
 they are appended here and priced later from the same price table. Every ledger file
 registers itself in the program-wide spend registry (`ape.spend`) on its first append.
+
+What is metered (RELIABILITY_REVIEW K7):
+- every completed build chat call, retries and unusable replies included, from the API's usage
+  (`ape.llm.build_client`); every completed embedding request (`ape.llm.embeddings`), attributed to its world
+  and system at build time and to its arm, sample and epoch at query time;
+- a build chat call cancelled in flight or timed out client-side, which the server may still bill: recorded with
+  its estimated input tokens, no output tokens and `context["status"]` ("cancelled" or "timeout").
+
+Not metered: the output of a call we stopped waiting for (unknowable), embedding requests cancelled in flight (a
+few hundred input tokens at most), and calls that fail with an API error (not billed).
 """
 
 import json

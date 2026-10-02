@@ -13,7 +13,6 @@ from ape.apg.arm import ApgArm, embed_graph
 from ape.apg.oracle import build_oracle
 from ape.build import build
 from ape.kb.baselines import RandomUnits
-from ape.kb.provenance import ChunkIndex
 from ape.llm.embeddings import EMBED_CONTEXT, EmbeddingCache
 from ape.llm.fake import FakeEmbeddingsClient
 from ape.llm.ledger import Ledger
@@ -92,7 +91,7 @@ def test_kg_role_is_required(tmp_path):
     emb = EmbeddingCache(tmp_path / "e.sqlite", "fake", client=FakeEmbeddingsClient())
     doc = asyncio.run(embed_graph(build_oracle(w, 2000), emb, {}))
     with pytest.raises(Exception, match="kg"):
-        ApgArm("S5o", True, doc, emb, ChunkIndex(chunk_world(w)), 2000)
+        ApgArm("S5o", True, doc, emb, w, 2000)
 
 
 def test_embedding_ledger_entries_are_attributed(tmp_path):

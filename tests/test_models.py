@@ -133,7 +133,9 @@ def test_apg_authoring_uses_the_profile_build_settings(tmp_path, monkeypatch):
 
 
 def test_lightrag_extraction_uses_the_profile_build_settings(offline_env, monkeypatch):
-    client = FakeOpenAI(PROMPTS["DEFAULT_COMPLETION_DELIMITER"])
+    # One record per chunk: an extraction with no entity at all is a degraded build (`ape.lgr.build`) and fails.
+    d = PROMPTS["DEFAULT_TUPLE_DELIMITER"]
+    client = FakeOpenAI(f"entity{d}Refund policy{d}policy{d}A company rule.\n{PROMPTS['DEFAULT_COMPLETION_DELIMITER']}")
     monkeypatch.setattr(BuildLlm, "_client_", lambda self: client)
     (wid,) = asyncio.run(build("dev", "F7", ["10"], n_worlds=1, n_tasks=1, relational=True, embed=True))
     manifest = asyncio.run(build_index(World.load(Config().world_path(wid)), "extract", Config()))
