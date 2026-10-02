@@ -187,13 +187,19 @@ def test_failure_taxonomy_labels(sessions):
     # resurrected, dropped and hallucinated, on one session
     w = sessions[(24, 1000)]
     answers, report = solve_session(w)
-    events = _events(w, answers, skip=(5,))
-    events.append({"item": 9, "tool": "submit_decision", "args": {"case_id": w.tasks[1].tags["case_id"], "action": "deny", "approver": "none", "deadline_days": 1, "document": "none"}})
-    events.append({"item": 10, "tool": "submit_decision", "args": {"case_id": "C-000000", "action": "deny", "approver": "none", "deadline_days": 1, "document": "none"}})
+    events = _events(w, answers, skip=(5, 12, 13))
+    deny = {"action": "deny", "approver": "none", "deadline_days": 1, "document": "none"}
+    events.append({"item": 12, "tool": "submit_decision", "args": {"case_id": w.tasks[1].tags["case_id"], **deny}})
+    events.append({"item": 13, "tool": "submit_decision", "args": {"case_id": "C-000000", **deny}, "rejected": True})
+    # The same incidents in the window of an item that still succeeded are not failure labels (L10).
+    events.append({"item": 9, "tool": "submit_decision", "args": {"case_id": w.tasks[1].tags["case_id"], **deny}})
+    events.append({"item": 10, "tool": "submit_decision", "args": {"case_id": "C-000000", **deny}, "rejected": True})
     bad_report = {**report, "open_followups": [*report["open_followups"], "C-999999"]}
     tax = taxonomy(w, events, bad_report, probes=[{"answer": {"memos_in_force": ["M-99"]}}])
     assert tax["per_item"][5] == ["dropped_item"]
-    assert "resurrected_done_item" in tax["per_item"][9] and "hallucinated_state" in tax["per_item"][10]
+    assert "resurrected_done_item" in tax["per_item"][12] and "hallucinated_state" in tax["per_item"][13]
+    assert 9 not in tax["per_item"] and 10 not in tax["per_item"]
+    assert tax["incidents_on_success"] == {9: ["resurrected_done_item"], 10: ["hallucinated_state"]}
     assert tax["report_hallucinated"] == ["C-999999"] and tax["probe_hallucinated"] == ["M-99"]
     # overflow: every case from the overflow on
     tax = taxonomy(w, _events(w, answers), report, overflow_at=20)
@@ -282,7 +288,7 @@ def test_mock_session_runs_end_to_end(session_env, arm):
     assert [p["k"] for p in s.store["f8_probes"]] == [5, 10]
     assert not any("state check" in m.text for m in s.messages)
     assert s.store["f8_report"] is not None and s.store["f8_overflow_at"] is None
-    assert set(s.scores["f8_session_score"].value) == {"item_success", "dependency_success", "report_exact", "session_success", "probe_f1", "overflow"}
+    assert set(s.scores["f8_session_score"].value) == {"item_success", "dependency_success", "report_exact", "session_success", "probe_f1", "probe_coverage", "overflow"}
     if arm == "O-state":
         assert max(v["view_tokens"] for v in s.store["f8_views"]) < 8000  # the view never accumulates the history
 
@@ -294,7 +300,7 @@ def test_a_perfect_agent_scores_one(session_env, arm):
     world = load_world("F8-12-dev-s1000")
     s = _run(session_env, arm, get_model("mockllm/model", custom_outputs=perfect_agent(world)))
     v = s.scores["f8_session_score"].value
-    assert v == {"item_success": 1.0, "dependency_success": 1.0, "report_exact": 1.0, "session_success": 1.0, "probe_f1": 1.0, "overflow": 0.0}
+    assert v == {"item_success": 1.0, "dependency_success": 1.0, "report_exact": 1.0, "session_success": 1.0, "probe_f1": 1.0, "probe_coverage": 1.0, "overflow": 0.0}
 
 
 def test_cm0_overflows_past_the_window(session_env):

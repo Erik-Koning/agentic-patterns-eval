@@ -3,13 +3,21 @@
 Every call is recorded as an event `{item, tool, args}`, where `item` is the queue position being worked on
 when the call was made (0 before the first case, N + 1 during the report). Scoring reads only these events, so
 it never depends on how a context-management arm shaped the view.
+
+Real-model robustness:
+- Case IDs are normalized (case and surrounding space) before they are recorded; an ID that is not in the
+  shift's queue is recorded with `rejected: True` (the taxonomy still sees it) and comes back to the model as
+  a tool error instead of an acknowledgement.
+- The report is accepted only in the report phase (after the last case) and only in its exact shape:
+  {"dispositions": {case_id: str}, "pending_recheck": [str], "open_followups": [str]}. Anything else is a
+  tool error the model can correct; the scorer never sees an ill-formed report.
 """
 
 import json
 from collections.abc import Callable
 from typing import Any
 
-from inspect_ai.tool import ToolDef, ToolParam, ToolParams
+from inspect_ai.tool import ToolDef, ToolError, ToolParam, ToolParams
 
 from . import gen_f8
 from .gen_f7 import APPROVERS, DOCUMENTS
@@ -29,8 +37,8 @@ class SessionRecorder:
         self.report: dict | None = None
         self.report_error: str | None = None
 
-    def record(self, tool: str, args: dict) -> None:
-        self.events.append({"item": self.item, "tool": tool, "args": dict(args)})
+    def record(self, tool: str, args: dict, rejected: bool = False) -> None:
+        self.events.append({"item": self.item, "tool": tool, "args": dict(args), **({"rejected": True} if rejected else {})})
 
     def answered(self, task: TaskItem) -> bool:
         """Whether the current case got its answer call in its own window."""
@@ -43,8 +51,46 @@ def _tool(name: str, description: str, params: dict[str, ToolParam], fn: Callabl
     return ToolDef(fn, name=name, description=description, parameters=ToolParams(properties=params, required=list(params)))
 
 
+def norm_case_id(case_id: Any) -> str:
+    """A case ID as recorded and compared: case and surrounding space ignored ("c-123456 " -> "C-123456")."""
+    return str(case_id).strip().upper()
+
+
+REPORT_KEYS = ("dispositions", "pending_recheck", "open_followups")
+
+
+def report_problem(parsed: Any) -> str | None:
+    """Why a parsed report is not in the required shape, or None when it is."""
+    if not isinstance(parsed, dict):
+        return "the report must be a JSON object"
+    if missing := [k for k in REPORT_KEYS if k not in parsed]:
+        return f"missing key(s) {missing}"
+    if extra := [k for k in parsed if k not in REPORT_KEYS]:
+        return f"unexpected key(s) {extra}; use exactly {list(REPORT_KEYS)}"
+    disp = parsed["dispositions"]
+    if not isinstance(disp, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in disp.items()):
+        return "dispositions must map each case ID (a string) to approve, deny, escalate or resolved (a string)"
+    for key in ("pending_recheck", "open_followups"):
+        v = parsed[key]
+        if not isinstance(v, list) or not all(isinstance(i, str) for i in v):
+            return f"{key} must be a list of case IDs (strings), e.g. [\"C-123456\"]"
+    return None
+
+
 def build_session_tools(world: World, rec: SessionRecorder) -> dict[str, ToolDef]:
     s = lambda d, **kw: ToolParam(type="string", description=d, **kw)  # noqa: E731
+    queue = set(gen_f8.session(world)["queue"])
+    n_cases = len(world.tasks)
+
+    def case(tool: str, case_id: Any, args: dict) -> str:
+        """Record an answer call under the normalized case ID; an ID outside the queue is recorded as rejected and
+        raised as a tool error."""
+        cid = norm_case_id(case_id)
+        known = cid in queue
+        rec.record(tool, {"case_id": cid, **args}, rejected=not known)
+        if not known:
+            raise ToolError(f"Unknown case ID {str(case_id)!r}: it is not in this shift's queue. Use the case ID from the case message, e.g. C-123456.")
+        return cid
 
     async def lookup_customer(customer_id: str) -> str:
         rec.record("lookup_customer", {"customer_id": customer_id})
@@ -55,22 +101,27 @@ def build_session_tools(world: World, rec: SessionRecorder) -> dict[str, ToolDef
         return gen_f8.order_file(world, order_id)
 
     async def submit_decision(case_id: str, action: str, approver: str, deadline_days: int, document: str) -> str:
-        rec.record("submit_decision", {"case_id": case_id, "action": action, "approver": approver, "deadline_days": deadline_days, "document": document})
-        return f"Decision recorded for {case_id}."
+        cid = case("submit_decision", case_id, {"action": action, "approver": approver, "deadline_days": deadline_days, "document": document})
+        return f"Decision recorded for {cid}."
 
     async def finish(case_id: str) -> str:
-        rec.record("finish", {"case_id": case_id})
-        return f"Ticket {case_id} closed."
+        cid = case("finish", case_id, {})
+        return f"Ticket {cid} closed."
 
     async def submit_shift_report(report: str) -> str:
         rec.record("submit_shift_report", {"report": report})
+        if rec.item <= n_cases:
+            rec.report_error = "submitted before the end of the shift"
+            raise ToolError("The shift is not over: submit the end-of-shift report when you are asked for it, after the last case.")
         try:
             parsed = json.loads(report)
-            if not isinstance(parsed, dict):
-                raise TypeError("the report must be a JSON object")
         except (TypeError, ValueError) as e:
-            rec.report_error = str(e)
-            return f"Invalid report ({e}); send the JSON object again."
+            parsed, problem = None, f"not valid JSON ({e})"
+        else:
+            problem = report_problem(parsed)
+        if problem:
+            rec.report_error = problem
+            raise ToolError(f"Invalid report: {problem}. Send the JSON object again as a string.")
         rec.report, rec.report_error = parsed, None
         return "Report recorded. The shift is over."
 

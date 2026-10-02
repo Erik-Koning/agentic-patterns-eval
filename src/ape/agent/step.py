@@ -27,13 +27,14 @@ def step_query(task_prompt: str, messages: list[ChatMessage]) -> str:
 
 def exposed_tools(all_tools: dict[str, ToolDef], ctx: ContextResult, policy: str, always_on: list[str]) -> list[ToolDef]:
     """TE-all binds every tool. TE-retrieved binds always-on tools plus the arm's own
-    tool scope when it has one (APG allowlists), else the tools named in the delivered context."""
+    tool scope when it has one (APG allowlists), else the tools named in the delivered context. The name match
+    ignores case: LightRAG's extraction title-cases entity names, so a tool can arrive as "Wrong_Item_Credit"."""
     if policy == "all":
         names = list(all_tools)
     elif ctx.tools is not None:
         names = [*always_on, *ctx.tools]
     elif policy == "retrieved":
-        names = [*always_on, *(n for n in all_tools if re.search(rf"\b{re.escape(n)}\b", ctx.text))]
+        names = [*always_on, *(n for n in all_tools if re.search(rf"\b{re.escape(n)}\b", ctx.text, flags=re.IGNORECASE))]
     else:
         raise ValueError(policy)
     return [all_tools[n] for n in dict.fromkeys(names) if n in all_tools]

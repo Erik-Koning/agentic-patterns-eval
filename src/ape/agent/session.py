@@ -11,7 +11,9 @@ set and one turn cap per case; only the view differs:
 
 Each case arrives as a user message; the loop moves on once the case's answer call is made (submit_decision or
 finish with its case ID), after one nudge, or at `max_turns_per_item`. After the last case it asks for the
-end-of-shift report.
+end-of-shift report, with one nudge if the model answers that request in text. The history is built in
+`state.messages` itself and the store is written in a `finally`, so a session cut short by a sample limit keeps
+its records.
 
 **Forked state probes** (§5.3): after each checkpoint case k <= N, the probe question goes to the policy's
 current view (what the model would see next) in a side call with role `probe` and a strict JSON schema. The
@@ -45,6 +47,7 @@ PROBE_PROMPT = (
     "(completed), the case IDs still pending (pending), the memo IDs in force now (memos_in_force), the case IDs "
     "waiting for a follow-up (open_followups) and the case IDs you escalated this shift (escalated)."
 )
+REPORT_NUDGE = "Submit the end-of-shift report now: call submit_shift_report with the report as a JSON object string."
 PROBE_SCHEMA = JSONSchema.model_validate(
     {
         "type": "object",
@@ -134,7 +137,10 @@ def f8_session_agent(arm: str = "CM0", window: int = gen_f8.WINDOW, max_turns_pe
         rec = SessionRecorder(world)
         tools = list(build_session_tools(world, rec).values())
         system = ChatMessageSystem(content=gen_f8.system_prompt(world))
-        history: list[ChatMessage] = [system, ChatMessageUser(content=gen_f8.start_message(world))]
+        # The full history lives in state.messages itself, so Inspect's message limit applies to its appends and a
+        # session cut short logs exactly what ran.
+        state.messages = [system, ChatMessageUser(content=gen_f8.start_message(world))]
+        history: list[ChatMessage] = state.messages
         policy = view_policy(arm, world, system)
         model = get_model()
         probe_model = get_model(role=PROBE_ROLE, default=model)
@@ -174,58 +180,66 @@ def f8_session_agent(arm: str = "CM0", window: int = gen_f8.WINDOW, max_turns_pe
             })
 
         try:
-            for task in world.tasks:
-                pos, cid = task.tags["position"], task.tags["case_id"]
-                rec.item = pos
+            try:
+                for task in world.tasks:
+                    pos, cid = task.tags["position"], task.tags["case_id"]
+                    rec.item = pos
+                    start = len(history)
+                    history.append(ChatMessageUser(content=task.prompt))
+                    first = decision = None
+                    generations, nudged = 0, False
+                    for _ in range(max_turns_per_item):
+                        vt, acted = await call(start, pos - 1, pos)
+                        generations += 1
+                        first = vt if first is None else first
+                        if rec.answered(task):
+                            decision = vt
+                            break
+                        if not acted:
+                            if nudged:
+                                break
+                            tool = "finish" if task.tags["kind"] == "ticket" else "submit_decision"
+                            history.append(ChatMessageUser(content=f"Complete case {cid} with the tools, then call {tool} with case_id {cid}."))
+                            nudged = True
+                    items.append({
+                        "position": pos,
+                        "case_id": cid,
+                        "kind": task.tags["kind"],
+                        "dependency": task.tags["dependency"],
+                        "dependency_kinds": task.tags["dependency_kinds"],
+                        "generations": generations,
+                        "view_tokens_first": first,
+                        "view_tokens_decision": decision,
+                        "answered": decision is not None,
+                        "success": item_success(world, task, rec.events),
+                    })
+                    if pos in checkpoints:
+                        await probe(pos)
+                rec.item = n + 1
                 start = len(history)
-                history.append(ChatMessageUser(content=task.prompt))
-                first = decision = None
-                generations, nudged = 0, False
+                history.append(ChatMessageUser(content=gen_f8.REPORT_REQUEST))
+                nudged = False
                 for _ in range(max_turns_per_item):
-                    vt, acted = await call(start, pos - 1, pos)
-                    generations += 1
-                    first = vt if first is None else first
-                    if rec.answered(task):
-                        decision = vt
+                    _, acted = await call(start, n, n + 1)
+                    if rec.report is not None:
                         break
                     if not acted:
+                        # One nudge, as for cases: a report written as text (or a refusal) gets one more chance.
                         if nudged:
                             break
-                        tool = "finish" if task.tags["kind"] == "ticket" else "submit_decision"
-                        history.append(ChatMessageUser(content=f"Complete case {cid} with the tools, then call {tool} with case_id {cid}."))
+                        history.append(ChatMessageUser(content=REPORT_NUDGE))
                         nudged = True
-                items.append({
-                    "position": pos,
-                    "case_id": cid,
-                    "kind": task.tags["kind"],
-                    "dependency": task.tags["dependency"],
-                    "dependency_kinds": task.tags["dependency_kinds"],
-                    "generations": generations,
-                    "view_tokens_first": first,
-                    "view_tokens_decision": decision,
-                    "answered": decision is not None,
-                    "success": item_success(world, task, rec.events),
-                })
-                if pos in checkpoints:
-                    await probe(pos)
-            rec.item = n + 1
-            start = len(history)
-            history.append(ChatMessageUser(content=gen_f8.REPORT_REQUEST))
-            for _ in range(max_turns_per_item):
-                _, acted = await call(start, n, n + 1)
-                if rec.report is not None or not acted:
-                    break
-        except _Overflow as e:
-            overflow_at = e.args[0]
-
-        store().set(ITEMS, items)
-        store().set(VIEWS, views)
-        store().set(PROBES, probes)
-        store().set(EVENTS, rec.events)
-        store().set(REPORT, rec.report)
-        store().set(OVERFLOW, overflow_at)
-        store().set("arm", {"name": arm, "window": window, "max_turns_per_item": max_turns_per_item, "checkpoints": list(checkpoints)})
-        state.messages = history
+            except _Overflow as e:
+                overflow_at = e.args[0]
+        finally:
+            # Written even when a sample limit cuts the session short, so its items and events are scored.
+            store().set(ITEMS, items)
+            store().set(VIEWS, views)
+            store().set(PROBES, probes)
+            store().set(EVENTS, rec.events)
+            store().set(REPORT, rec.report)
+            store().set(OVERFLOW, overflow_at)
+            store().set("arm", {"name": arm, "window": window, "max_turns_per_item": max_turns_per_item, "checkpoints": list(checkpoints)})
         return state
 
     return solve

@@ -14,13 +14,9 @@ from inspect_ai.solver import TaskState
 from ..agent.arms import load_world
 from ..worlds.env_tools import ANSWER, CALLS
 from ..worlds.spec import TaskItem, World
-from .success import norm_id, norm_ratings
+from .success import norm_f5, norm_id, norm_ratings
 
 F7_FIELDS = ("action", "approver", "deadline_days", "document")
-
-
-def _norm(s) -> str:
-    return " ".join("".join(c.lower() if c.isalnum() else " " for c in str(s)).split())
 
 
 def f7_fields(answer: dict | None, gold: dict) -> dict[str, float]:
@@ -64,17 +60,21 @@ def f7_error(world: World, task: TaskItem, answer: dict | None) -> str:
 
 
 def f3_calls(calls: list[dict], gold: dict) -> dict[str, float]:
-    key = lambda c: json.dumps(c, sort_keys=True)  # noqa: E731
-    made, want = [key(c) for c in calls], [key(c) for c in gold["calls"]]
+    made, want = [_call_key(c) for c in calls], [_call_key(c) for c in gold["calls"]]
     hit = sum(min(made.count(k), want.count(k)) for k in set(want))
     p = hit / len(made) if made else 0.0
     r = hit / len(want) if want else 1.0
     return {"call_precision": p, "call_recall": r, "call_f1": (2 * p * r / (p + r)) if p + r else 0.0}
 
 
+def _call_key(c: dict) -> str:
+    """One call as compared: key order never matters (recorded calls are {tool, args}, golds {args, tool})."""
+    return json.dumps(c, sort_keys=True)
+
+
 def f3_error(task: TaskItem, calls: list[dict]) -> str:
     want = task.gold["calls"]
-    if sorted(map(json.dumps, calls)) == sorted(map(json.dumps, want)):
+    if sorted(map(_call_key, calls)) == sorted(map(_call_key, want)):
         return "correct"
     if not calls:
         return "no_calls"
@@ -92,15 +92,15 @@ def f3_error(task: TaskItem, calls: list[dict]) -> str:
 def f5_error(world: World, task: TaskItem, answer: dict | None) -> str:
     if answer is None:
         return "no_answer"
-    got = _norm(answer.get("answer", ""))
-    if got == _norm(task.gold["answer"]):
+    got = norm_f5(answer.get("answer", ""))
+    if got == norm_f5(task.gold["answer"]):
         return "correct"
     date = dt.date.fromisoformat(task.tags["date"])
     relation = "manager" if task.level == "1hop" else "office"
     timeline = [e for e in world.events if e.relation == relation and (e.subject == task.tags["team"] or task.level == "2hop")]
-    if any(_norm(e.value) == got for e in timeline if dt.date.fromisoformat(e.date) != date):
+    if any(norm_f5(e.value) == got for e in timeline if dt.date.fromisoformat(e.date) != date):
         return "stale_or_wrong_time"
-    known = {_norm(e.value) for e in world.events}
+    known = {norm_f5(e.value) for e in world.events}
     return "wrong_entity" if got in known else "other"
 
 
@@ -132,11 +132,21 @@ def f1_error(task: TaskItem, answer: dict | None) -> str:
     return "extra_items" if extra else "other"
 
 
-def f2_prefix(answer: dict | None, gold: dict) -> int:
+def f2_chain(answer: dict | None, start: str | None = None) -> list[str]:
+    """The submitted F2 chain as compared: IDs normalized, and a leading start supplier dropped. The tool
+    excludes the original supplier, but the prompt asks for "every supplier along the way", so a model may
+    include it; both readings score the same."""
+    raw = (answer or {}).get("chain")
+    chain = [norm_id(c) for c in raw] if isinstance(raw, list) else []
+    if start is not None and chain and chain[0] == norm_id(start):
+        chain = chain[1:]
+    return chain
+
+
+def f2_prefix(answer: dict | None, gold: dict, start: str | None = None) -> int:
     """F2: how many leading hops of the submitted chain match the gold chain."""
-    chain = [norm_id(c) for c in (answer or {}).get("chain") or []] if isinstance((answer or {}).get("chain"), list) else []
     n = 0
-    for got, want in zip(chain, gold["chain"]):
+    for got, want in zip(f2_chain(answer, start), gold["chain"]):
         if got != norm_id(want):
             break
         n += 1
@@ -148,7 +158,8 @@ def f2_error(task: TaskItem, answer: dict | None) -> str:
         return "no_answer"
     if not isinstance(answer.get("chain"), list):
         return "malformed_answer"
-    k, prefix, chain = len(task.gold["chain"]), f2_prefix(answer, task.gold), answer["chain"]
+    start = task.tags.get("start")
+    k, prefix, chain = len(task.gold["chain"]), f2_prefix(answer, task.gold, start), f2_chain(answer, start)
     final_ok = norm_id(answer.get("final", "")) == norm_id(task.gold["final"])
     if final_ok:
         return "correct" if prefix == k and len(chain) == k else "correct_final_wrong_path"
@@ -179,7 +190,7 @@ def error_analysis():
             c = f1_items(answer, task.gold)
             credit, meta = c["item_f1"], {"error": f1_error(task, answer), **c}
         elif task.family == "F2":
-            k, prefix = len(task.gold["chain"]), f2_prefix(answer, task.gold)
+            k, prefix = len(task.gold["chain"]), f2_prefix(answer, task.gold, task.tags.get("start"))
             credit, meta = prefix / k, {"error": f2_error(task, answer), "prefix": prefix, "hops": k}
         else:
             label = f5_error(world, task, answer)
