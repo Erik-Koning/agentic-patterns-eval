@@ -258,18 +258,141 @@ def l5_verdict(ctx_tokens: Sequence[int], cap: int, band: tuple[float, float] = 
 # --- Real-embedding retrieval ----------------------------------------------------------------------
 
 
-def retrieval_verdict(s3s_recall: Sequence[float], apg_in_shortlist: Sequence[bool], *, graph: str, dry: bool, threshold: float = RECALL_WARN) -> dict:
+def retrieval_verdict(
+    s3s_recall: Sequence[float],
+    apg_in_shortlist: Sequence[bool],
+    *,
+    graph: str,
+    dry: bool,
+    threshold: float = RECALL_WARN,
+    lightrag_recall: Sequence[float] | None = None,
+    lightrag_note: str | None = None,
+) -> dict:
     """S3s evidence recall at its budget and the share of tasks whose gold APG node is in the embedding shortlist,
-    with no LLM. Live: warn below `threshold`. Dry (fake embeddings): reported, not judged."""
+    with no LLM; facts are credited by the delivered-text rule (`ape.kb.provenance`), as the arms do. Live: warn
+    below `threshold`. Dry (fake embeddings): reported, not judged. `lightrag_recall` (LightRAG's context with the
+    query as its keywords, no kg call) is reported, never judged: the live arm extracts keywords first."""
     recall = statistics.fmean(s3s_recall) if s3s_recall else None
     gold = sum(apg_in_shortlist) / len(apg_in_shortlist) if apg_in_shortlist else None
     measured = {"tasks": len(s3s_recall), "s3s_recall": recall, "apg_shortlist_gold_rate": gold, "apg_graph": graph}
+    measured["lightrag_recall_query_keywords"] = statistics.fmean(lightrag_recall) if lightrag_recall else None
+    if lightrag_note:
+        measured["lightrag_note"] = lightrag_note
     if recall is None or gold is None:
         return result(FAIL, measured, reason="no tasks to retrieve for")
     if dry:
         return result(PASS, measured, reason="dry: fake embeddings, reported only")
     low = [f"{name} {v:.2f}" for name, v in (("S3s recall", recall), ("APG shortlist gold rate", gold)) if v < threshold]
     return result(WARN if low else PASS, measured, reason=f"below {threshold}: " + ", ".join(low) if low else None)
+
+
+# --- F8 session live (RELIABILITY_REVIEW L12) ------------------------------------------------------
+
+
+def f8_session_verdict(arms: Mapping[str, Mapping], categories: Sequence[str]) -> dict:
+    """One short F8 session per session arm (CM0, O-state) through the real Study G task. Each arm's record:
+    {"log_status", "sample_error", "n_cases", "items", "views", "probes", "report_submitted", "report_nudged",
+    "probe_in_history", "reasoning_only_turns", "reasoning_only_unanswered"}.
+
+    Pass, per arm: the log succeeded with no sample error; every case has a per-item record carrying its view
+    tokens; the report was submitted or its nudge fired; at least one forked probe ran and returned schema-valid
+    JSON (every category a list of strings) without entering the history; every recorded view has tokens; and a
+    reasoning-only assistant turn (no text, no tool call), if the model produced one, was followed by a further
+    call rather than ending the session."""
+    if not arms:
+        return result(FAIL, {}, reason="no session arms ran")
+    reasons: list[str] = []
+    measured: dict[str, dict] = {}
+    for arm, r in arms.items():
+        items, probes, views = list(r.get("items") or []), list(r.get("probes") or []), list(r.get("views") or [])
+        bad_probes = [
+            p.get("k")
+            for p in probes
+            if p.get("error") or not isinstance(p.get("answer"), Mapping) or any(not isinstance(p["answer"].get(c), list) or not all(isinstance(x, str) for x in p["answer"][c]) for c in categories)
+        ]
+        no_view = [i.get("position") for i in items if not i.get("view_tokens_first")]
+        measured[arm] = {
+            "log_status": r.get("log_status"),
+            "cases": r.get("n_cases"),
+            "item_records": len(items),
+            "calls": len(views),
+            "view_tokens_max": max((v.get("view_tokens") or 0 for v in views), default=None),
+            "probes": len(probes),
+            "report_submitted": bool(r.get("report_submitted")),
+            "report_nudged": bool(r.get("report_nudged")),
+            "reasoning_only_turns": int(r.get("reasoning_only_turns") or 0),
+            "scores": dict(r.get("scores") or {}),
+        }
+        if r.get("log_status") != "success":
+            reasons.append(f"{arm}: log status {r.get('log_status')}")
+        if r.get("sample_error"):
+            reasons.append(f"{arm}: sample error {str(r['sample_error'])[:160]}")
+        if len(items) != int(r.get("n_cases") or 0):
+            reasons.append(f"{arm}: {len(items)} item record(s) for {r.get('n_cases')} case(s)")
+        if no_view:
+            reasons.append(f"{arm}: item(s) {no_view} without view tokens")
+        if not (r.get("report_submitted") or r.get("report_nudged")):
+            reasons.append(f"{arm}: no report submitted and no report nudge")
+        if not probes:
+            reasons.append(f"{arm}: no forked probe ran")
+        if bad_probes:
+            reasons.append(f"{arm}: probe(s) at k={bad_probes} not schema-valid JSON")
+        if r.get("probe_in_history"):
+            reasons.append(f"{arm}: the probe question entered the session history")
+        if not views or any(not v.get("view_tokens") for v in views):
+            reasons.append(f"{arm}: calls without view tokens")
+        if r.get("reasoning_only_unanswered"):
+            reasons.append(f"{arm}: a reasoning-only turn ended the session (no further call)")
+    return result(FAIL if reasons else PASS, {"arms": measured}, reason="; ".join(reasons) or None)
+
+
+# --- Real extraction on one F7-1000 world ----------------------------------------------------------
+
+
+def extraction_verdict(build_errors: Mapping[str, str], quality: Mapping, health_warnings: Sequence[str], threshold: float) -> dict:
+    """The real builder (APG authoring and LightRAG extraction) on one F7-1000 dev world. Fail when a build kind
+    failed outright (the world could not be built); warn when coverage is under D-017's threshold or the build
+    lost chunks (`ape.build_quality`): like D017 a finding (the Sol fallback needs approval), not a broken harness.
+    `quality`: {"apg_id_coverage", "lightrag_id_coverage", "verdict", ...}."""
+    measured = dict(quality) | {"threshold": threshold, "health_warnings": list(health_warnings)}
+    if build_errors:
+        return result(FAIL, measured, reason="build failed: " + "; ".join(f"{k}: {v}" for k, v in build_errors.items()))
+    low = [f"{name} {v:.3f}" for name, v in (("APG ID coverage", quality.get("apg_id_coverage")), ("LightRAG ID coverage", quality.get("lightrag_id_coverage"))) if v is not None and v < threshold]
+    missing = [name for name, key in (("APG ID coverage", "apg_id_coverage"), ("LightRAG ID coverage", "lightrag_id_coverage")) if quality.get(key) is None]
+    reasons = ([f"below {threshold}: " + ", ".join(low)] if low else []) + ([f"not measured: {', '.join(missing)}"] if missing else []) + list(health_warnings)
+    if reasons:
+        return result(WARN, measured, reason="; ".join(reasons) + (" (D-017: the Sol fallback builder needs approval)" if low else ""))
+    return result(PASS, measured)
+
+
+# --- Per-step reasoning carry-over (live confirmation of RELIABILITY_REVIEW L2) ---------------------
+
+
+def perstep_verdict(calls: Sequence[Mapping]) -> dict:
+    """The model inputs of a per-step arm's calls. Each call: {"sample", "turn", "after_tool_step",
+    "kb_in_last_tool", "user_after_assistant", "reasoning_items", "reasoning_after_last_user", "reasoning_tokens",
+    "error"}.
+
+    Pass (structural, the part that can be checked): at least one call followed a tool step, and every such call's
+    input ends with the tool result carrying the step's knowledge block, with no user message after the model's
+    last turn (so OpenAI keeps the earlier reasoning); no call errored. The carried reasoning items and reasoning
+    tokens are reported, not judged: whether the model uses them is not observable from the outside."""
+    after = [c for c in calls if c.get("after_tool_step")]
+    errors = [f"sample {c.get('sample')} turn {c.get('turn')}: {str(c['error'])[:120]}" for c in calls if c.get("error")]
+    broken = [f"sample {c.get('sample')} turn {c.get('turn')}" for c in after if not c.get("kb_in_last_tool") or c.get("user_after_assistant")]
+    carried = [c.get("reasoning_after_last_user") for c in after if c.get("reasoning_after_last_user") is not None]
+    measured = {
+        "calls": len(calls),
+        "calls_after_tool_step": len(after),
+        "structure_ok": len(after) - len(broken),
+        "reasoning_items_carried_per_call": carried,
+        "reasoning_tokens_per_call": [c.get("reasoning_tokens") for c in calls],
+        "note": "reasoning carry-over is reported only: the structure is what the harness controls",
+    }
+    reasons = errors + ([f"knowledge not in the last tool result, or a user message after the model's turn: {broken}"] if broken else [])
+    if not after:
+        reasons.append("no per-step call followed a tool step: the check was not exercised")
+    return result(FAIL if reasons else PASS, measured, reason="; ".join(reasons) or None)
 
 
 # --- Orchestrator wiring (run_gate at SMOKE_SCALE) -------------------------------------------------

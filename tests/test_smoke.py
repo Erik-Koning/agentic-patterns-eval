@@ -312,4 +312,149 @@ def test_the_dry_smoke_passes_every_check_end_to_end(clean_env, monkeypatch):
     d017 = report["checks"]["D017"]["measured"]
     assert d017["verdict"] == "builder_passes" and d017["offline"] is True and d017["world"]["decisive"]
     assert d017["world"]["cell"] == "F7-100" and d017["lightrag_id_coverage"] == d017["world"]["lightrag"]["coverage"] == 1.0
+    # R5: one F8 session per arm with a forked probe; the per-step structure on every call after a tool step; one
+    # F7-1000 world through the builder; retrieval credited by the delivered-text rule, LightRAG measured off L2.
+    f8 = report["checks"]["f8_session"]["measured"]["arms"]
+    assert set(f8) == {"CM0", "O-state"} and all(a["item_records"] == a["cases"] == smoke.F8["N"] and a["probes"] >= 1 for a in f8.values())
+    ps = report["checks"]["perstep_reasoning"]["measured"]
+    assert ps["calls_after_tool_step"] > 0 and ps["structure_ok"] == ps["calls_after_tool_step"]
+    ex = report["checks"]["extract_f7_1000"]["measured"]
+    assert ex["verdict"] == "builder_passes" and ex["offline"] is True and ex["chunks"] > 500 and ex["kinds"] == dict.fromkeys(("chunks", "apg", "lightrag"), "built")
+    rt = report["checks"]["retrieval"]["measured"]
+    assert "delivered-text" in rt["provenance"] and rt["lightrag_recall_query_keywords"] is not None
     assert (ROOT / "PROVENANCE.md").read_bytes() == provenance and smoke._tree_hash(ROOT / "config") == config
+
+
+# ---------- R5: F8 session, F7-1000 extraction, per-step reasoning, retrieval provenance ----------
+
+CATS = ("completed", "pending", "memos_in_force", "open_followups", "escalated")
+
+
+def _session(**over) -> dict:
+    good = {
+        "log_status": "success",
+        "sample_error": None,
+        "n_cases": 2,
+        "items": [{"position": 1, "view_tokens_first": 900}, {"position": 2, "view_tokens_first": 1400}],
+        "views": [{"item": 1, "view_tokens": 900}, {"item": 2, "view_tokens": 1400}],
+        "probes": [{"k": 2, "answer": dict.fromkeys(CATS, []) | {"completed": ["C-1"]}, "error": None}],
+        "report_submitted": True,
+        "report_nudged": False,
+        "probe_in_history": False,
+        "reasoning_only_turns": 0,
+        "reasoning_only_unanswered": False,
+    }
+    return good | over
+
+
+def test_f8_session_needs_records_report_valid_probes_kept_out_of_history():
+    assert sc.f8_session_verdict({"CM0": _session(), "O-state": _session()}, CATS)["status"] == sc.PASS
+    # A report nudge counts as the report phase working, even without a report.
+    assert sc.f8_session_verdict({"CM0": _session(report_submitted=False, report_nudged=True)}, CATS)["status"] == sc.PASS
+    cases = {
+        "sample error": _session(sample_error="TypeError: boom"),
+        "1 item record(s) for 2": _session(items=[{"position": 1, "view_tokens_first": 900}]),
+        "without view tokens": _session(items=[{"position": 1, "view_tokens_first": 900}, {"position": 2, "view_tokens_first": None}]),
+        "no report submitted": _session(report_submitted=False),
+        "no forked probe": _session(probes=[]),
+        "not schema-valid": _session(probes=[{"k": 2, "answer": {"completed": [1]} | dict.fromkeys(CATS[1:], []), "error": None}]),
+        "entered the session history": _session(probe_in_history=True),
+        "reasoning-only turn ended": _session(reasoning_only_turns=1, reasoning_only_unanswered=True),
+        "log status error": _session(log_status="error"),
+    }
+    for needle, rec in cases.items():
+        res = sc.f8_session_verdict({"CM0": _session(), "O-state": rec}, CATS)
+        assert res["status"] == sc.FAIL and needle in res["reason"] and res["reason"].startswith("O-state"), (needle, res["reason"])
+    # A probe missing a category is not schema-valid either.
+    missing = _session(probes=[{"k": 2, "answer": {"completed": []}, "error": None}])
+    assert sc.f8_session_verdict({"CM0": missing}, CATS)["status"] == sc.FAIL
+    assert sc.f8_session_verdict({}, CATS)["status"] == sc.FAIL
+
+
+def test_extraction_fails_only_on_a_broken_build_and_warns_on_low_coverage_or_lost_chunks():
+    good = {"apg_id_coverage": 0.98, "lightrag_id_coverage": 0.97, "verdict": "builder_passes"}
+    assert sc.extraction_verdict({}, good, [], 0.95)["status"] == sc.PASS
+    broken = sc.extraction_verdict({"apg": "BuildError: 30 lost chunks"}, good, [], 0.95)
+    assert broken["status"] == sc.FAIL and "apg: BuildError" in broken["reason"]
+    low = sc.extraction_verdict({}, good | {"apg_id_coverage": 0.80}, [], 0.95)
+    assert low["status"] == sc.WARN and "APG ID coverage 0.800" in low["reason"] and "Sol fallback" in low["reason"]
+    lost = sc.extraction_verdict({}, good, ["F7-1000-x: APG: 3 lost chunk(s)"], 0.95)
+    assert lost["status"] == sc.WARN and "lost chunk" in lost["reason"]
+    unmeasured = sc.extraction_verdict({}, good | {"lightrag_id_coverage": None}, [], 0.95)
+    assert unmeasured["status"] == sc.WARN and "not measured: LightRAG ID coverage" in unmeasured["reason"]
+
+
+def test_perstep_verdict_judges_the_structure_and_only_reports_reasoning():
+    ok = {"after_tool_step": True, "kb_in_last_tool": True, "user_after_assistant": False, "reasoning_after_last_user": 2, "reasoning_tokens": 40}
+    first = {"after_tool_step": False, "kb_in_last_tool": False, "user_after_assistant": False}
+    res = sc.perstep_verdict([first, ok, ok | {"reasoning_after_last_user": 0}])
+    assert res["status"] == sc.PASS and res["measured"]["reasoning_items_carried_per_call"] == [2, 0]
+    old = ok | {"kb_in_last_tool": False, "user_after_assistant": True, "turn": 1, "sample": "s"}
+    assert sc.perstep_verdict([first, old])["status"] == sc.FAIL
+    assert "not exercised" in sc.perstep_verdict([first])["reason"]
+    assert sc.perstep_verdict([first, ok | {"error": "400 bad request"}])["status"] == sc.FAIL
+
+
+def test_perstep_calls_tell_the_fixed_placement_from_the_one_that_drops_reasoning():
+    """The classifier on hand-built inputs: the knowledge on the last tool result keeps the model's reasoning after
+    the last user message (OpenAI carries it); a knowledge-only user message after the tool result does not."""
+    from types import SimpleNamespace
+
+    from inspect_ai.model import ChatMessageAssistant, ChatMessageSystem, ChatMessageTool, ChatMessageUser, ContentReasoning
+    from inspect_ai.tool import ToolCall
+
+    from ape.agent.kb_react import STEP_KB_HEADER
+
+    kb = f"{STEP_KB_HEADER}\nPolicy P-1: refunds need a receipt."
+    turn = ChatMessageAssistant(content=[ContentReasoning(reasoning="gAAAA-ENCRYPTED", redacted=True)], tool_calls=[ToolCall(id="c1", function="lookup_customer", arguments={"customer_id": "CU-1"})])
+    result = ChatMessageTool(content='{"tier": "gold"}', tool_call_id="c1", function="lookup_customer")
+    base = [ChatMessageSystem(content="sys"), ChatMessageUser(content="Case: refund for CU-1")]
+    fixed = [*base, turn, result.model_copy(update={"content": f"{result.content}\n\n{kb}"})]
+    old = [*base, turn, result, ChatMessageUser(content=kb)]
+
+    def sample(inputs):
+        def ev(msgs):
+            return SimpleNamespace(event="model", role=None, input=msgs, output=SimpleNamespace(usage=SimpleNamespace(reasoning_tokens=12)), error=None)
+
+        return SimpleNamespace(id="s1", events=[ev([*base, ChatMessageUser(content=kb)]), ev(inputs)])
+
+    first, new = smoke._perstep_calls(sample(fixed), STEP_KB_HEADER)
+    assert not first["after_tool_step"]
+    assert new["after_tool_step"] and new["kb_in_last_tool"] and not new["user_after_assistant"]
+    assert new["reasoning_items"] == 1 and new["reasoning_after_last_user"] == 1 and new["reasoning_tokens"] == 12
+    _, dropped = smoke._perstep_calls(sample(old), STEP_KB_HEADER)
+    assert dropped["after_tool_step"] and not dropped["kb_in_last_tool"] and dropped["user_after_assistant"]
+    assert dropped["reasoning_after_last_user"] == 0
+    assert sc.perstep_verdict([new])["status"] == sc.PASS and sc.perstep_verdict([dropped])["status"] == sc.FAIL
+
+
+def test_retrieval_credits_apg_nodes_by_their_delivered_text_not_their_source_chunks():
+    from ape.kb.provenance import fact_matcher
+    from ape.worlds.generate import make_world
+
+    world = make_world("F7", "10", "dev", 0, 2)
+    matcher = fact_matcher(world)
+    fact = next(f for f in world.facts.values() if f.kind == "policy")
+
+    def node(text, **props):
+        return {"prompt": {"slots": {"knowledge": text}}, "props": props}
+
+    assert fact.id in smoke.node_facts(matcher, node(fact.text))
+    # The old mapping credited every fact of a node's source chunks; the delivered-text rule credits none of them
+    # when the knowledge does not carry them.
+    assert smoke.node_facts(matcher, node("General guidance about customer service.", sourceChunkIds=["c-0", "c-1"])) == set()
+    # An oracle node without text keeps its spec fact IDs (as `ApgArm._facts_of`).
+    assert smoke.node_facts(matcher, node("", factIds=[fact.id])) == {fact.id}
+
+
+def test_lightrag_retrieval_recall_is_reported_never_judged():
+    res = sc.retrieval_verdict([0.9, 1.0], [True, True], graph="authored", dry=False, lightrag_recall=[0.1, 0.2], lightrag_note="extract index")
+    assert res["status"] == sc.PASS and res["measured"]["lightrag_recall_query_keywords"] == pytest.approx(0.15)
+
+
+def test_the_new_checks_are_priced_and_build_their_own_worlds(clean_env):
+    proj = smoke.projections(["perstep_reasoning", "f8_session", "extract_f7_1000"], "gate", dry=True)
+    assert all(v > 0 for v in proj.values()), proj
+    assert proj["extract_f7_1000"] > proj["f8_session"] > proj["perstep_reasoning"]  # one F7-1000 world's builds dominate
+    assert not {"perstep_reasoning", "f8_session", "extract_f7_1000"} & smoke.SHARED_WORLD_STEPS
+    assert smoke.select_steps(["f8_session"], None) == ["f8_session"]
