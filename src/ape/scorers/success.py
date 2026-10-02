@@ -16,6 +16,15 @@ def _norm(s: str) -> str:
     return " ".join("".join(c.lower() if c.isalnum() else " " for c in str(s)).split())
 
 
+def norm_id(s) -> str:
+    """A supplier ID as compared: case and surrounding space ignored (F1, F2)."""
+    return str(s).strip().upper()
+
+
+def norm_ratings(ratings) -> dict[str, str]:
+    return {norm_id(k): str(v).strip().lower() for k, v in (ratings or {}).items()} if isinstance(ratings, dict) else {}
+
+
 def is_success(task: TaskItem, answer: dict | None, calls: list[dict]) -> bool:
     if task.family == "F3":
         # End state: exactly the procedure's mutating calls, in any order, nothing else.
@@ -23,6 +32,11 @@ def is_success(task: TaskItem, answer: dict | None, calls: list[dict]) -> bool:
         return sorted(map(key, calls)) == sorted(map(key, task.gold["calls"]))
     if answer is None:
         return False
+    if task.family == "F1":
+        # Every supplier rated, every rating right, nothing else.
+        return norm_ratings(answer.get("ratings")) == norm_ratings(task.gold["ratings"])
+    if task.family == "F2":
+        return norm_id(answer.get("final", "")) == norm_id(task.gold["final"])
     if task.family == "F7":
         try:
             return {**answer, "deadline_days": int(answer["deadline_days"])} == task.gold

@@ -36,7 +36,7 @@ async def build(split: str, family: str, levels: list[str], n_worlds: int, n_tas
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", required=True, choices=["dev", "pilot", "test"])
-    ap.add_argument("--family", required=True, choices=["F7", "F3", "F5"])
+    ap.add_argument("--family", required=True, choices=["F7", "F3", "F5", "F1", "F2"])
     ap.add_argument("--levels", nargs="+", required=True)
     ap.add_argument("--worlds", type=int, default=3)
     ap.add_argument("--tasks", type=int, default=12)

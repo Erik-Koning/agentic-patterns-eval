@@ -59,6 +59,12 @@ def oracle_kg(world: World, chunks: list[Chunk]) -> dict:
         entities += [ent(t.name, "tool", t.fact_id) for t in world.tools]
         entities += [ent(p.id, "procedure", p.fact_id) for p in world.procedures]
         relationships += [rel(p.id, s["tool"], "calls", p.fact_id) for p in world.procedures for s in p.steps]
+    elif world.family in ("F1", "F2"):
+        entities += [ent(f"{r['segment']} rating rule", "rule", r["fact_id"]) for r in world.entities["rules"]]
+        entities += [ent("escalation protocol", "procedure", "f-ESC-protocol")]
+        entities += [ent(code, "escalation_code", f"f-{code}") for code in sorted(world.entities["routes"])]
+        entities += [ent(target, "supplier", f"f-{code}") for code, target in sorted(world.entities["routes"].items())]
+        relationships += [rel(code, target, "routes to,escalation", f"f-{code}") for code, target in sorted(world.entities["routes"].items())]
     else:
         for e in world.events:
             relationships.append(rel(e.value if e.relation == "manager" else e.subject, e.subject if e.relation == "manager" else e.value, e.relation, e.fact_id))

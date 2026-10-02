@@ -15,8 +15,8 @@
 output_tokens_per_call: {high: 1500, medium: 800, low: 400, default: 800}
 
 # Agent generations per sample, by cell (e.g. F1-32) or family (F7) and delivery mode. [given for F7/F3/F5/F8]
-# F1/F2 (main study; generators not built yet) are [assumed]: one call per lookup or hop, batched by
-# parallel tool calls, plus a final answer.
+# F1/F2 (main study, worlds/gen_registry.py) stay [assumed]: F1 batches its N lookups ~3 per call by parallel
+# tool calls; F2 needs one call per hop (each hop's key comes from the previous lookup), plus the answer call.
 calls_per_sample:
   F7: {push: 4, pull: 5}
   F3: {push: 5, pull: 5}
@@ -29,6 +29,11 @@ calls_per_sample:
 # Input per agent call = base + delivered context (+ pull factor) + history.
 base_input_per_call: 800          # system prompt, tool definitions, task [given]
 history_per_prior_call: 250       # each earlier turn's tool call + tool result left in the history [assumed]
+# Optional per-cell override of the line above, for cells whose tool results are bulky. F1/F2 supplier records are
+# ~400 tokens each and stay in the history; [measured offline 2026-10-01, readiness/measure_registry.py]. NOT YET
+# ENABLED: it adds ~$320 (Study F on Sol over F1-32) and takes the plan to $5,062, so it waits for a cut decision
+# (BUDGET.md). Uncomment to price it:
+# history_per_prior_call_by_cell: {F1-2: 288, F1-32: 1258, F2-2: 288, F2-10: 432}
 pull_context_factor: 1.5          # pull: search_kb results stay in the history, ~1.5 blocks in view on average [assumed]
 
 # Monolith (S1 and the MONO-delivery multi-agent arms) context = the whole corpus, per cell. [measured, F7/F3]
@@ -38,10 +43,12 @@ corpus_tokens:
   F7-1000: 90500     # [measured; descriptive exceptions add ~8% over id_only]
   F3-5: 900
   F3-60: 9500
-  F1-2: 2000        # [assumed] generators not built
-  F1-32: 2000
-  F2-2: 2000
-  F2-10: 2000
+  F1-2: 3337        # [measured 2026-10-01, readiness/measure_registry.py] one registry KB at every F1/F2 level
+  F1-8: 3337
+  F1-32: 3337
+  F2-2: 3337
+  F2-5: 3337
+  F2-10: 3337
 
 # TE-all (tool-exposure sensitivity): every tool bound, so tool definitions grow the base input. [assumed]
 tool_definitions_all: {F3-5: 500, F3-60: 6000}
@@ -97,10 +104,12 @@ chunks_per_world:                 # [measured offline]
   F3-60: 68
   F5-1hop: 8
   F5-2hop: 8
-  F1-2: 10          # [assumed] main-study families, not built yet
-  F1-32: 40
-  F2-2: 10
-  F2-10: 30
+  F1-2: 20          # [measured 2026-10-01] one registry KB at every F1/F2 level (readiness/measure_registry.py)
+  F1-8: 20
+  F1-32: 20
+  F2-2: 20
+  F2-5: 20
+  F2-10: 20
   anchor-medical: 200   # GraphRAG-Bench Medical, ~218K tokens chunked at 1200/100 (D-009)
 
 # --- GraphRAG-Bench anchor (PC1; one sample = one question in one mode) ------------------------------

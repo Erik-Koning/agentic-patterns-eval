@@ -28,6 +28,13 @@ def mock_agent(messages, tools, tool_choice, config) -> ModelOutput:
         return ModelOutput.for_tool_call(MODEL, "order_lookup", {"order_id": oid.group(0) if oid else "O-0"})
     if "finish" in names:
         return ModelOutput.for_tool_call(MODEL, "finish", {})
+    if "lookup_supplier" in names and "lookup_supplier" not in done:
+        sid = re.search(r"SUP-\d+", task_text)
+        return ModelOutput.for_tool_call(MODEL, "lookup_supplier", {"supplier_id": sid.group(0) if sid else "SUP-0"})
+    if "submit_ratings" in names:
+        return ModelOutput.for_tool_call(MODEL, "submit_ratings", {"ratings": dict.fromkeys(re.findall(r"SUP-\d+", task_text), "approved")})
+    if "submit_chain" in names:
+        return ModelOutput.for_tool_call(MODEL, "submit_chain", {"final_supplier": "SUP-0", "chain": []})
     if "submit_answer" in names:
         return ModelOutput.for_tool_call(MODEL, "submit_answer", {"answer": "unknown"})
     return ModelOutput.from_content(MODEL, json.dumps({"note": "no tools"}))

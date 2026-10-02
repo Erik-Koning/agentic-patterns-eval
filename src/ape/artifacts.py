@@ -218,7 +218,7 @@ def main(argv: Sequence[str] | None = None, fixed_kinds: tuple[str, ...] | None 
     """CLI. `fixed_kinds` serves `python -m ape.apg.author` and `python -m ape.lgr.build`, which build one kind."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     ap.add_argument("--split", required=True, choices=["dev", "pilot", "test"])
-    ap.add_argument("--family", required=True, choices=["F7", "F3", "F5"])
+    ap.add_argument("--family", required=True, choices=["F7", "F3", "F5", "F1", "F2"])
     ap.add_argument("--levels", nargs="+", help="only these levels (default: every world of the family)")
     if fixed_kinds is None:
         ap.add_argument("--kinds", required=True, help=f"comma-separated, from {','.join(KINDS)}")
