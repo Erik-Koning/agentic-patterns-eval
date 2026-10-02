@@ -4,12 +4,22 @@
     LGRo-q / LGRo-s   oracle custom-KG index (diagnostic)
 
 Each compile makes exactly one keyword-extraction call, through Inspect's "kg" model
-role so it is metered like APG's classify call. `aquery_data` supplies provenance;
+role so it is metered like APG's classify call. `aquery_data` supplies the delivered units;
 the native context string is then fetched with those keywords pre-filled, which
 skips a second extraction.
+
+Provenance (RELIABILITY_REVIEW K3): a compile's `fact_ids` are the facts its context text carries under the shared
+rule of `ape.kb.provenance`, not every fact of every chunk an entity or relation was extracted from (a generic
+entity can name dozens of source chunks while its description restates a few facts).
+
+Keyword failures: when the kg model's reply yields no keywords (unparseable, a refusal, empty lists), the compile
+falls back to the query itself as the low-level keyword, as before, and its meta says so (`keyword_fallback`,
+`keyword_error`); the units are then fetched with the fallback keywords, so they match the delivered text.
+
+Freshness (K6): an index is used only if its manifest records this world version, kind, embedding model and, for
+extract indices, the current build model and effort (`ape.lgr.build.build_key`).
 """
 
-import json
 import os
 
 from inspect_ai.model import ChatMessageSystem, ChatMessageUser, GenerateConfig, ResponseSchema, get_model
@@ -18,8 +28,7 @@ from lightrag import QueryParam
 
 from ..config import Config, embedding_cache
 from ..kb.context import ContextResult
-from ..kb.provenance import ChunkIndex
-from ..worlds.render import chunk_world
+from ..kb.provenance import FactMatcher, fact_matcher
 from ..worlds.spec import TaskItem, World
 from .common import SEP, index_dir, open_rag, read_manifest
 
@@ -71,12 +80,12 @@ def _paths(record: dict) -> list[str]:
 
 
 class LgrArm:
-    def __init__(self, name: str, per_step: bool, rag, chunk_index: ChunkIndex, params: dict, manifest: dict, kg_model: str = ""):
+    def __init__(self, name: str, per_step: bool, rag, matcher: FactMatcher, params: dict, manifest: dict, kg_model: str = ""):
         self.name = name
         self.kg_model = kg_model
         self.per_step = per_step
         self.rag = rag
-        self.chunk_index = chunk_index
+        self.matcher = matcher
         self.params = params
         self.manifest = manifest
 
@@ -85,22 +94,41 @@ class LgrArm:
         data, meta = result.get("data", {}), result.get("metadata", {})
         kw = meta.get("keywords", {})
         hl, ll = kw.get("high_level") or [], kw.get("low_level") or []
-        if not hl and not ll:
+        fallback = not hl and not ll
+        if fallback:
             ll = [query]  # empty keywords would trigger a second, unmetered-by-design extraction
+            # The units of the context actually delivered: keywords pre-filled, so no second kg call.
+            result = await self.rag.aquery_data(query, QueryParam(**self.params, hl_keywords=hl, ll_keywords=ll))
+            data = result.get("data", {})
         text = await self.rag.aquery(query, QueryParam(**self.params, only_need_context=True, hl_keywords=hl, ll_keywords=ll))
+        text = str(text or "")
         entities, relations, chunks = data.get("entities", []), data.get("relationships", []), data.get("chunks", [])
-        sources = [p for rec in (*entities, *relations, *chunks) for p in _paths(rec) if p in self.chunk_index.by_id]
         return ContextResult(
-            text=str(text or ""),
+            text=text,
             unit_ids=[e["entity_name"] for e in entities] + [f"{r['src_id']}->{r['tgt_id']}" for r in relations] + [c["chunk_id"] for c in chunks],
-            fact_ids=self.chunk_index.facts(list(dict.fromkeys(sources))),
+            fact_ids=self.matcher.delivered(text),
             tools=None,
             meta={
-                "lightrag": {"mode": self.params["mode"], "keywords": {"high": hl, "low": ll}, "counts": [len(entities), len(relations), len(chunks)]},
+                "lightrag": {
+                    "mode": self.params["mode"],
+                    "keywords": {"high": hl, "low": ll},
+                    "keyword_fallback": fallback,
+                    "keyword_error": "the kg model's reply yielded no keywords; the query itself was used" if fallback else None,
+                    "counts": [len(entities), len(relations), len(chunks)],
+                    "source_chunks": len({p for rec in (*entities, *relations, *chunks) for p in _paths(rec)}),
+                },
                 "index_hash": self.manifest.get("index_hash"),
                 "kg_model": self.kg_model,
             },
         )
+
+
+def manifest_problems(manifest: dict, world: World, kind: str, embedding_model: str) -> list[str]:
+    """Why an index's manifest does not match what this run would build (empty: it matches)."""
+    from .build import build_key
+
+    want = build_key(world, kind, embedding_model)
+    return [f"{k} is {manifest.get(k)!r}, expected {v!r}" for k, v in want.items() if manifest.get(k) != v]
 
 
 async def build_lgr_arm(arm: str, world: World, cfg: Config) -> LgrArm:
@@ -109,8 +137,11 @@ async def build_lgr_arm(arm: str, world: World, cfg: Config) -> LgrArm:
     if not (wd / "ape_manifest.json").exists():
         raise FileNotFoundError(f"{wd} missing: run `python -m ape.lgr.build --kind {kind}` first")
     manifest = read_manifest(wd)
-    if manifest["world_hash"] != world.content_hash():
+    if manifest.get("world_hash") != world.content_hash():
         raise RuntimeError(f"{wd} was built from a different world version")
+    emb = embedding_cache(cfg)
+    if problems := manifest_problems(manifest, world, kind, emb.model):
+        raise RuntimeError(f"{wd} does not match this run's build settings ({'; '.join(problems)}): rebuild it, or set APE_BUILD_FALLBACK / the profile as for the build")
     llm = kg_llm_func()
-    rag = await open_rag(wd, world.id, llm, embedding_cache(cfg), query_time=True)
-    return LgrArm(arm, per_step, rag, ChunkIndex(chunk_world(world)), query_params(cfg.lgr_budget_tokens), manifest, kg_model=llm.model_name)
+    rag = await open_rag(wd, world.id, llm, emb, query_time=True)
+    return LgrArm(arm, per_step, rag, fact_matcher(world), query_params(cfg.lgr_budget_tokens), manifest, kg_model=llm.model_name)

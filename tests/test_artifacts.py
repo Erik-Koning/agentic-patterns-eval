@@ -167,7 +167,7 @@ def test_authored_graph_records_world_author_and_embedding_model(offline_env):
     world, cfg = World.load(path), Config()
     asyncio.run(author_world(world, cfg, perfect_author, author_id=FAKE_AUTHOR_ID))
     meta = json.loads(graph_path(cfg, world.id, "authored").read_text())["meta"]
-    assert meta == {"worldHash": world.content_hash(), "author": FAKE_AUTHOR_ID, "embeddingModel": "fake-bow"}
+    assert meta == {"worldHash": world.content_hash(), "author": FAKE_AUTHOR_ID, "embeddingModel": "fake-bow", "embeddingDim": 256}
     assert authored_graph_current(world, cfg, FAKE_AUTHOR_ID)
     assert not authored_graph_current(world, cfg, "gpt-6-luna@high"), "another author means a rebuild"
 

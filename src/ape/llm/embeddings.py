@@ -154,7 +154,11 @@ class EmbeddingCache:
             if self._client is None:
                 from openai import AsyncOpenAI
 
-                self._client = AsyncOpenAI()
+                from .build_client import MAX_RETRIES
+
+                # The build client's retry policy (backoff, Retry-After): a rate-limited embedding call after an
+                # expensive authoring pass must not fail the world (RELIABILITY_REVIEW K7).
+                self._client = AsyncOpenAI(max_retries=MAX_RETRIES)
             # base64 is OpenAI's float32 wire format; asking for it explicitly returns the raw string, which is
             # stored as is (`to_blob`). A client that returns float lists instead is handled the same way.
             resp = await self._client.embeddings.create(model=self.model, input=batch, encoding_format="base64")

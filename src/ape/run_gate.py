@@ -983,6 +983,7 @@ def build_world_set(run: GateRun, record: dict, phase: str, split: str, specs: l
         results = build_artifacts([cfg.world_path(w["world_id"]) for w in worlds], KINDS, lightrag_kind, run.offline, on_result=lambda r: print(r.summary(), flush=True))
     for w, r in zip(worlds, results, strict=True):
         w["artifacts"], w["errors"] = r.kinds, r.errors
+    record_build_health(run, record, phase, [w for w in worlds if not w["errors"]], lightrag_kind)
     out = run.phase_dir(phase) / "worlds.json"
     _write_json(out, {"worlds_dir": _show(cfg.worlds_dir), "indices_dir": _show(cfg.indices_dir), "lightrag_kind": lightrag_kind, "fake_author": run.offline, "worlds": worlds})
     record["outputs"] |= {"worlds": _show(out), "worlds_dir": _show(cfg.worlds_dir), "indices_dir": _show(cfg.indices_dir)}
@@ -990,6 +991,29 @@ def build_world_set(run: GateRun, record: dict, phase: str, split: str, specs: l
     if failed := [r for r in results if r.status == "failed"]:
         raise PhaseError(f"{len(failed)} {split} world(s) failed to build (re-run to resume):\n" + "\n".join(r.summary() for r in failed))
     return worlds
+
+
+def record_build_health(run: GateRun, record: dict, phase: str, worlds: list[dict], lightrag_kind: str) -> None:
+    """Every build phase (dev, pilot, test): degradation signals of the worlds just built (`ape.build_quality.build_health`:
+    lost chunks, coverage under D-017's threshold) in `<phase>/build_health.json`, a summary in the manifest and a
+    warning per flagged world. Never fails the phase; D-017's builder verdict stays build-dev's (`record_build_quality`)."""
+    from .build_quality import build_health
+    from .worlds.spec import World
+
+    cfg = Config()
+    try:
+        health = build_health((World.load(cfg.world_path(w["world_id"])) for w in worlds), cfg, lightrag_kind, offline=run.offline)
+    except Exception as e:  # noqa: BLE001  (a health report must never fail a build)
+        record["warnings"].append(f"build health: could not be measured ({type(e).__name__}: {e})")
+        return
+    path = run.phase_dir(phase) / "build_health.json"
+    _write_json(path, health)
+    record["outputs"] |= {"build_health": _show(path)}
+    record["build_health"] = {"worlds_checked": health["worlds_checked"], "flagged_worlds": health["flagged_worlds"]}
+    shown = health["warnings"][:20]
+    record["warnings"] += [f"build health: {w}" for w in shown]
+    if len(health["warnings"]) > len(shown):
+        record["warnings"].append(f"build health: {len(health['warnings']) - len(shown)} more in {_show(path)}")
 
 
 def _build_dev(run: GateRun, record: dict) -> None:
@@ -1017,14 +1041,14 @@ def record_build_quality(run: GateRun, record: dict, worlds: list[dict]) -> dict
     The decisive cells are the gate's dev cells (`gate.build.dev`) even in a smoke run, so a smoke run, which
     builds only some of them, reports `incomplete` rather than a pass."""
     from .budget import fallback_build_delta
-    from .build_quality import assess
+    from .build_quality import assess, builder_roles
     from .worlds.spec import World
 
     cfg = Config()
     gp = gate_profile(run)
-    build = gp.role("build")
-    fallback = gp.roles.get("build_fallback")
-    builder = f"scripted perfect_author (offline stand-in for {_builder_label(build)})" if run.offline else _builder_label(build)
+    build, fallback, using_fallback = builder_roles(gp)  # the fallback builds under APE_BUILD_FALLBACK=1
+    label = _builder_label(build) + (" (the D-017 fallback, APE_BUILD_FALLBACK=1)" if using_fallback else "")
+    builder = f"scripted perfect_author (offline stand-in for {label})" if run.offline else label
     try:
         fallback_usd: float | None = fallback_build_delta(plan(run), **_cost_kwargs(run))
     except Exception as e:  # noqa: BLE001  (the check stands without the price; say why it is missing)

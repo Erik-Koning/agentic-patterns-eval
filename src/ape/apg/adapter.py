@@ -14,6 +14,10 @@ Connectors are passed per call; the global registry (`bind_connectors`) is never
 `fill=True` (matched-budget analyses only) adds further shortlisted nodes, in order of
 embedding similarity to the query, as secondary targets until the next one would exceed
 the budget. Default APG behaviour (`fill=False`) composes only what routing selected.
+
+The query vector must have the graph's dimension: apg_core's cosine zips vectors, so a
+mismatch (a graph embedded with another model) would route on truncated similarities
+without an error. `compile_context` raises instead (RELIABILITY_REVIEW K6).
 """
 
 import asyncio
@@ -47,7 +51,15 @@ class Compiled:
     truncated: list[dict]
     route: dict
     classify_error: str | None = None
+    classify_fallback: bool = False  # routing fell back because the classifier gave no usable match
+    classify_repaired: list[str] = field(default_factory=list)  # repairs applied to its output (`parse_classification`)
+    classify_unknown_ids: int = 0  # matches naming no node of the graph
     meta: dict = field(default_factory=dict)
+
+
+def _graph_dim(graph: Graph) -> int | None:
+    """The node vectors' dimension (mixed dimensions are refused when a graph is loaded, `ape.apg.arm`)."""
+    return next((len(n["embedding"]) for n in graph.dfs() if n.get("embedding")), None)
 
 
 async def compile_context(
@@ -61,16 +73,24 @@ async def compile_context(
     connectors: dict = {}
     if embeddings is not None:
         await embeddings.embed([query])  # the only network step; node vectors are precomputed
+        dim, q_dim = _graph_dim(graph), len(embeddings.lookup([query])[0])
+        if dim is not None and q_dim != dim:
+            raise ValueError(f"query vector is {q_dim}-d but the graph's node vectors are {dim}-d: the graph was embedded with another model")
         connectors["embeddings"] = CachedEmbeddingsConnector(embeddings)
 
     first = _RecordingLlm()
     routed = await asyncio.to_thread(route, query, graph, {**connectors, "llm": first})
     error = None
     outline_sha = None
+    repaired: list[str] = []
+    unknown = 0
+    usable = True
     if first.calls:
         call = first.calls[0]
         outline_sha = hashlib.sha256(call["outline"].encode()).hexdigest()
-        matches, error = await classify(kg_model, call["query"], call["outline"], call["multi"])
+        matches, error, repaired = await classify(kg_model, call["query"], call["outline"], call["multi"])
+        unknown = sum(not graph.has(m["nodeId"]) for m in matches)
+        usable = error is None and any(graph.has(m["nodeId"]) for m in matches)
         second = _RecordingLlm(replay=matches)
         routed = await asyncio.to_thread(route, query, graph, {**connectors, "llm": second})
         replay_sha = hashlib.sha256(second.calls[0]["outline"].encode()).hexdigest()
@@ -106,4 +126,7 @@ async def compile_context(
             "filled": filled,
         },
         classify_error=error,
+        classify_fallback=bool(first.calls) and bool(routed["fallbackUsed"]) and not usable,
+        classify_repaired=repaired,
+        classify_unknown_ids=unknown,
     )
