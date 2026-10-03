@@ -278,10 +278,10 @@ def test_unbuilt_arms_are_skipped_offline_recorded_and_refused_live(clean_env, m
     with pytest.raises(PhaseError, match=r"micro-pilot: its cells name arms that are not built yet: \['main.micro-pilot: M1'\]"):
         run_phases(live, "micro-pilot")
     assert not live.manifest_path("micro-pilot").exists()
-    # Study G: a session arm is built when it is a registered context policy (B8's CM arms; B9 adds the topology arms).
+    # Study G: a session arm is built when it is a registered context policy or session arm (B8's CM arms, B9's
+    # topology arms S1, M1 and M2): all of them now.
     g = StudyRun("study_g", "arms", offline=True, runs_root=clean_env / "runs")
-    expected = {f"{c.id}: {a}" for c in run_study.phase_cells(g, "test") for a in rg_arm_names(c) if not run_study.arm_built(a, c.kind)}
-    assert set(run_study.unbuilt_arms(g, "test")) == expected and not any(m.startswith("g.cm.") for m in expected)
+    assert all(run_study.unbuilt_arms(g, p) == [] for p in ("micro-pilot", "tune", "test")), "B8 and B9 built every Study G arm"
     monkeypatch.delitem(context_policy.POLICIES, "CM-sum")
     monkeypatch.setattr(session, "SESSION_ARMS", tuple(a for a in session.SESSION_ARMS if a != "CM-sum"))
     with pytest.raises(PhaseError, match=r"not built yet: \['g.pilot.luna: CM-sum'\]"):
@@ -298,12 +298,10 @@ def test_the_offline_runs_record_every_skipped_arm(offline):
         assert _manifest(run, phase)["skipped_arms"] == [], f"every main-study arm runs ({phase})"
     assert not _manifest(run, "preflight")["unbuilt_arms"]
     assert set(x["status"] for x in _manifest(run, "test")["cells"].values()) == {"done"}
-    gm = _manifest(g, "test")
-    expected = {(c.id, a) for c in run_study.phase_cells(g, "test") for a in rg_arm_names(c) if not run_study.arm_built(run_study._resolved(a, run_study.read_selected(g)), c.kind)}
-    assert {(s["cell"], s["declared"]) for s in gm["skipped_arms"]} == expected, "the session arms B9 has not registered yet, and nothing else"
-    for cell_id, cell in gm["cells"].items():
-        built = [a for c in run_study.phase_cells(g, "test") if c.id == cell_id for a in rg_arm_names(c) if (cell_id, a) not in expected]
-        assert cell["status"] == ("done" if built else "skipped"), cell_id
+    for phase in ("micro-pilot", "tune", "test"):
+        assert _manifest(g, phase)["skipped_arms"] == [], f"every Study G arm runs, B9's topology arms included ({phase})"
+    assert not _manifest(g, "preflight")["unbuilt_arms"]
+    assert {c: x["status"] for c, x in _manifest(g, "test")["cells"].items()} == {c.id: "done" for c in run_study.phase_cells(g, "test")}
 
 
 # --- End to end, offline -------------------------------------------------------------------------------
@@ -402,9 +400,16 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     sessions = [h for h in heads if h.eval.task.endswith("f8_session")]
     anchor = [h for h in heads if h.eval.task.endswith("main_study")]
     assert {(h.eval.task_args["level"], h.eval.task_args["variant"]) for h in sessions} == {("40", ""), ("10", ""), ("24", "o1750"), ("20", "o2250")}
-    # Every built context-management arm runs (B9's session S1/M1/M2 join the topology cells once registered).
+    # Every context-management arm runs, and B9's session topology arms (S1, M1, M2) in the g.topo cells.
     cm = {"CM0", "CM-prune", "CM-sum", "CM-todo", "CM-reset", "CM-native", "O-state", "S-CM*"}
-    assert cm <= {h.eval.task_args["arm"] for h in sessions} and all(h.eval.task_args["window"] == 32000 for h in sessions)
+    assert cm | {"S1", "M1", "M2"} == {h.eval.task_args["arm"] for h in sessions} and all(h.eval.task_args["window"] == 32000 for h in sessions)
+    topo = {h.eval.task_args["arm"] for h in sessions if h.eval.metadata["plan_cell"].startswith("g.topo.")}
+    assert {"S1", "M1", "M2"} <= topo
+    for f in sorted((run.dir / "test").rglob("*.eval")):
+        head = read_eval_log(str(f), header_only=True)
+        if head.eval.task.endswith("f8_session") and head.eval.task_args["arm"] in ("M1", "M2"):
+            log = read_eval_log(str(f))
+            assert log.status == "success" and not any(x.error for x in log.samples) and all("mas_agents" in x.store for x in log.samples), "B9's team records"
     plan = run_study.plan(run).study_g
     assert all((a := h.eval.task_args)["seed_base"] == 29000 and a["threshold"] == plan["threshold"] and a["plan_cell"] and a["group"] for h in sessions)
     sess = read_eval_log(str(next(f for f in sorted((run.dir / "test" / "g.cm.luna-high").rglob("*.eval")) if read_eval_log(str(f), header_only=True).eval.task_args["arm"] == "CM-native")))
@@ -780,8 +785,10 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
     _fake_current(run)
     monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: [])
 
-    # 1. The placeholder pre-registration (and no analysis module) blocks the live freeze; nothing is frozen.
-    with pytest.raises(PhaseError, match=r"(?s)unfilled item\(s\).*\[USER: main-study pre-registration.*analysis not implemented"):
+    # 1. The placeholder pre-registration (and no analysis module, nor the pilot's cap-hit gate) blocks the live
+    #    freeze; nothing is frozen.
+    monkeypatch.setattr(run_study, "analysis_available", lambda r: False)
+    with pytest.raises(PhaseError, match=r"(?s)unfilled item\(s\).*\[USER: main-study pre-registration.*analysis not implemented.*cap-hit gate \(D-039\) has not run"):
         run_phases(run, "freeze")
     assert read_freeze(run) is None and json.loads(run.manifest_path("freeze").read_text())["status"] == "failed"
 
@@ -790,11 +797,13 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
     start = run_gate.prereg_body_start(text)
     prereg.write_text(text[:start] + run_gate.PLACEHOLDER_ITEM.sub("filled", text[start:]))
     monkeypatch.setattr(run_study, "analysis_available", lambda r: True)
+    run_gate._write_json(run.cap_gate_path, {"multiple": 16, "base": 8, "max": 32, "threshold": 0.1, "rule": "rate", "passed": True, "over": {}, "rates": {"M7": {"F1-2": {"rate": 0.05}}}, "rounds": []})
     real = (ROOT / "PROVENANCE.md").read_bytes()
     assert run_phases(run, "freeze") == {"freeze": "done"}
     freeze = run_study.require_frozen(run)
     assert freeze["rehearsal"] is False and freeze["test_seeds"]["base"] == 13000 and freeze["kg"]["arm"] == "APG-q" and freeze["code_commit"]
-    assert {"PREREGISTRATION_MAIN.md", "config/tuning_grid_main.yaml", "config/token_caps.json", "config/s7_targets.json", "gate/selected.yaml", "gate/decision.json", "uv.lock"} <= set(freeze["files"])
+    assert {"PREREGISTRATION_MAIN.md", "config/tuning_grid_main.yaml", "config/token_caps.json", "config/cap_gate.json", "config/s7_targets.json", "gate/selected.yaml", "gate/decision.json", "uv.lock"} <= set(freeze["files"])
+    assert freeze["cap_multiple"] == 16 and freeze["token_caps"]["F1-2"] == 1600 and freeze["cap_gate"]["rates"] == {"M7": {"F1-2": {"rate": 0.05}}}, "D-039: the test's multiple"
     assert "<!-- ape:test-seeds study=main run=live-freeze base=13000 count=9 -->" in provenance.read_text() and (ROOT / "PROVENANCE.md").read_bytes() == real
     assert run_study.choose_test_seed_base(StudyRun("main", "next", **kw))[0] == 13100
     assert run_gate.choose_test_seed_base(GateRun("gate-next", runs_root=tmp / "runs", provenance_path=provenance))[0] == 3000, "the gate never counts main's block"

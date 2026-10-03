@@ -64,16 +64,18 @@ block (`seed_base`), so it reads only its run's worlds, though world files of ev
 Cells -> tasks. `agent` cells run `tasks.main.main_study` (F1, F2, F3, F7; Study G's capability anchor too, on its own
 worlds) with `plan_cell`, `group` and `seed_base`, and, in the main study, the cell's token cap as Inspect's
 `token_limit` (it bounds the whole sample, every agent). `session` cells run `tasks.study_g.f8_session` (level N,
-`variant` = `gen_f8.variant_tag(knobs)`, `limit_worlds` = sessions, the plan's window), passing `plan_cell`, `group`,
-`seed_base` and `skip_worlds` only when f8_session takes them (BUILD_PLAN B7 adds them), and APE_SESSION_CHECKPOINTS
-points at the run's session_checkpoints/ directory for B7's mid-session resume. A cell's `profile`, `effort` (the
-agent's) and `models` choose its models. A tuned arm (a selection key) runs as its selection, under every selection's
-knobs together; S7 runs in its own group (`s7`) under APE_S7_PER_STEP, mirroring the KG arm's schedule (D-024).
+`variant` = `gen_f8.variant_tag(knobs)`, `limit_worlds` = sessions, the plan's window and compaction threshold),
+with `plan_cell`, `group` and `seed_base`, and APE_SESSION_CHECKPOINTS points at the run's session_checkpoints/
+directory for B7's mid-session resume. A cell's `profile`, `effort` (the agent's) and `models` choose its models (the
+test manifest records all three per group). A tuned arm (a selection key) runs as its selection, under every
+selection's knobs together (or alone under its own when two selections set one knob differently, `env_group`); S7
+runs in its own group (`s7`) under APE_S7_PER_STEP, mirroring the KG arm's schedule (D-024). The test manifest records
+each group's final log files relative to the run directory (`run_relative`, `resolve_log`).
 
 Arms not built yet. Offline, a cell's arms without a solver (a multi-agent arm not in `agent.solvers.MULTI_AGENT_ARMS`,
-a session arm not in `agent.session.SESSION_ARMS`) are skipped and every manifest lists them (`skipped_arms`); grid
-systems likewise. Live, a phase whose cells name an unbuilt arm refuses to start. When a package registers an arm, it
-runs here unchanged.
+a session arm neither a context policy nor in `agent.session.SESSION_ARMS`) are skipped and every manifest lists them
+(`skipped_arms`); grid systems likewise. Live, a phase whose cells name an unbuilt arm refuses to start. When a package
+registers an arm, it runs here unchanged. Since B2, B8 and B9 every arm of both studies is built.
 
 The KG arm (S5, and the KG workers of M1k and M2; `agent.arms.kg_arm_name`). `--gate-run-id` names a frozen, analysed
 gate run: GO (any GO label) -> its APG*, NO_GO -> its LGR*, with that selection's knobs (the gate run's selected.yaml),
