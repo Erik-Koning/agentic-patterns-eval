@@ -109,7 +109,7 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | B9 | ✅ merged 83172ed | D-040 (incl. a B7 checkpoint fix) |
 | Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
 | B5 | 🔄 building (PREREGISTRATION_MAIN.md) | |
-| B11 | 🔄 G tuning grid + probe extension building; PREREGISTRATION_G.md after B9 | |
+| B11 | PREREGISTRATION_G.md ✅ merged d04e2d4 (D-042); G tuning grid + probe extension 🔄 building | |
 | B12 | ⏳ waiting on dependencies | |
 
 **Follow-ups found during the build** (must be done before any paid run):
