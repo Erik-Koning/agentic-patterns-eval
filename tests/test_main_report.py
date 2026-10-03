@@ -11,7 +11,7 @@ from main_synth import synthetic_frame
 
 from ape.analysis import main_descriptive as desc
 from ape.analysis import main_stats as ms
-from ape.analysis.main_hypotheses import HYPOTHESES, confirmatory, hypothesis_table, render_hypothesis_table
+from ape.analysis.main_hypotheses import HYPOTHESES, MECHANISM_CONTRASTS, confirmatory, hypothesis_table, render_hypothesis_table
 from ape.analysis.main_report import main_report, render_main, report_from_logs, write_report
 
 CONFIRMATORY = [m.id for h in confirmatory() for m in h.members]
@@ -147,9 +147,19 @@ def test_the_hypothesis_table_is_the_single_source_and_follows_d028():
     assert len(ids) == len(set(ids))
     status = {h.id: h.status for h in HYPOTHESES}
     assert status["M4"] == status["K4"] == "descriptive" and "K3" not in status, "D-028: M4 and K4 descriptive, K3 dropped"
+    assert status["T1"] == "descriptive" and "H6" not in status, "D-033: the tier clause (T1) is descriptive"
+    assert [h.id for h in confirmatory()] == ["M1", "M2", "M3", "M5", "K1", "K2", "K2-NI"]
     assert all(r["test"] in ("superiority", "less", "ni", "tost") for r in rows if r["status"] == "confirmatory")
-    assert all(r["margin"] == 0.03 for r in rows if r["test"] in ("ni", "tost"))
+    by = {r["member"]: r for r in rows}
+    assert by["M3.pooled"]["margin"] == by["M5.pooled"]["margin"] == 0.06 and by["K2-NI.pooled"]["margin"] == 0.05, "D-033 margins"
+    assert by["K2-NI.pooled"]["cells"] == ["F3-5", "F3-60", "F7-10", "F7-1000"] and by["K2-NI.pooled"]["cost_ratio"]["max_upper"] == 0.6
+    assert all(by[m]["mde"] == 0.15 for m in ("M1.F1-32", "M2.frontier", "K1.F7-1000", "K1.F3-60")), "D-033: planned MDE ~15 pp"
+    assert all(r["planned_power"] and "@@" not in r["planned_power"] for r in rows if r["status"] == "confirmatory")
+    assert not any("M2" in (r["arms"] or []) and "F1-32" in (r["cells"] or []) for r in rows), "D-034: no M2 arm on F1-32"
+    assert not any("M2" in (a, b) and "F1-32" in cells for _, a, b, cells in MECHANISM_CONTRASTS)
+    assert all("M2" not in pair for pair in desc.TIER_CONTRASTS["F1-32"])
     md = render_hypothesis_table()
     assert all(h.id in md for h in HYPOTHESES)
-    assert {line.count("|") for line in md.strip().splitlines()} == {10}, "no cell breaks the markdown table"
+    lines = md.strip().splitlines()
+    assert {line.count("|") for line in lines} == {lines[0].count("|")}, "no cell breaks the markdown table"
     json.dumps(rows, allow_nan=False)
