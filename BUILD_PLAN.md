@@ -108,11 +108,12 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | B3 | ✅ merged d2f12ab | D-041 |
 | B9 | ✅ merged 83172ed | D-040 (incl. a B7 checkpoint fix) |
 | Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
-| B5 | 🔄 building (PREREGISTRATION_MAIN.md) | |
+| B5 | ✅ merged 2d29cb4 | D-044 |
 | B11 | PREREGISTRATION_G.md ✅ merged d04e2d4 (D-042); G tuning grid + probe extension 🔄 building | |
 | B12 | ⏳ waiting on dependencies | |
 
 **Follow-ups found during the build** (must be done before any paid run):
+- **For B12:** a per-run cache nonce (brief §6.2: provider prefix caches must not carry across runs or arms sharing a monolith prefix) and a runaway wall-clock guard (brief §4.5); the runner writing the `cap multiple` and `pilot σ and power` pre-registration items.
 - **Pilot cap-hit gate (D-039):** M7 may outgrow the 8 × B0 token cap; the main runner doubles the cap multiple for all arms when any arm's pilot cap-hit rate exceeds 10% (with the B1 integration).
 - **Freeze scope:** the gate's freeze hashes all of `run_plan.yaml`, `models.yaml` and `model_costs.yaml`, so once the gate freezes, any later main/G plan edit would break it. Being changed to per-study resolved slices (with the B1 integration).
 - **`search_kb` limit handling:** a token limit tripped inside `search_kb` became a tool error (one extra model call). Being fixed with the B1 integration.

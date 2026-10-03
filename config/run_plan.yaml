@@ -26,7 +26,7 @@ budget:
   # right-sized plan's conservative projection plus headroom (gate 214, main 1,013, study_g 3,483 -> 4,710); were the
   # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells.
   allocations: {gate: 300, main: 1100, study_g: 3600}
-  contingency_usd: 280
+  contingency_usd: 270
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
   # ends with limit "cost" and counts as a cap hit (PC5). Only applied when every model of the run is priced.
@@ -125,9 +125,11 @@ studies:
         - {id: main.B.arms, arms: [S3s, S5, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
            n_tasks: 100, epochs: 3}
       study_c:
-        - {id: main.C.a, arms: [S1, S8k3, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 15, epochs: 2,
+        - {id: main.C.a, arms: [S1, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 15, epochs: 2,
            note: "+2 epochs on 15 tasks per MVS condition (brief: ~120 tasks)"}
-        - {id: main.C.b, arms: [S1, S5, S8k3, M1, M2], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 15, epochs: 2}
+        - {id: main.C.b, arms: [S1, S5, M1, M2], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 15, epochs: 2}
+        - {id: main.C.s8, arms: [S8k3], cells: [F1-2, F1-32, F2-2, F2-10, F3-5, F3-60, F7-10, F7-1000], n_tasks: 15, epochs: 5,
+           note: "D-044: the live S8k3 runs only in Study C, so it gets all 5 runs here (brief: Study C totals 5 per arm)"}
       study_f:
         - {id: main.F.luna, arms: [S5], cells: [F1-32], n_tasks: 100, epochs: 3,
            note: "Luna cells not already in Studies A/B (S1, M1 on F1-32 and all four on F7-1000 are reused); M2 dropped on F1 (D-034)"}
