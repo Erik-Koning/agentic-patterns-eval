@@ -101,10 +101,10 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | Seam | ✅ 4fbb68b, a85799f | `main_study` covers F1/F2/F3/F7; `agent/solvers.arm_solver` dispatch point; S5 = the gate's KG arm (`APE_KG_ARM`); `ape.build` takes seed_base and F8 knobs |
 | B1 + B6 | 🔄 building | |
 | B2 | 🔄 building | |
-| B4 | 🔄 building (statistics core; run-dir glue after B1) | D-029 method |
+| B4 | ✅ statistics core merged cc9dcb5; run-dir glue after B1 | D-029, D-031; power gaps P-1 |
 | B7 | ✅ merged efe6158 | D-030 |
 | B8 | 🔄 building | |
-| B10 | 🔄 building (statistics core; run-dir glue after B1) | D-029 method |
+| B10 | ✅ statistics core merged f413dd2; run-dir glue after B1 | D-029, D-032; power gaps P-2 |
 | B3, B5, B9, B11, B12 | ⏳ waiting on dependencies | |
 
 **Follow-ups found during the build** (must be done before any paid run):
