@@ -257,6 +257,36 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Rejected: a two-stage rule** (4 worlds, then 4 more only if not decisive). It saves about $3–6 expected, but optional stopping drops σ_g's interval coverage to 0.65–0.68 and gets close calls wrong 16–17% of the time.
 - **Cost:** +$8 conservative. Program total: $4,751 / $3,231 expected. D-017's Sol build path rises to +$1,074, because the extra pilot worlds use the same builder.
 
+**D-027 (2026-10-03, second statistics review; before any freeze).** Pilot corners, PC5 on evidence, Holm's worst case and stopping rule, and the extension's role fixed at the freeze.
+- **Pilot σ corners.** Power falls with σ_g but rises with σ_w: a world effect moves both arms alike. At 16 worlds, σ_g 0.3 gives 0.826 / 0.838 / 0.854 / 0.931 at σ_w 0 / 0.5 / 1.0 / 2.0. So the least favourable corner of the 80% intervals is usually σ_w low with σ_g high, and taking both upper ends as "conservative" overstated power by 2–6 pp. In the review's 200 pilots per scenario, the corrected rule changed 3.5–9% of decisions.
+  - **The rule:** "conservative" is the minimum power over the four σ_w × σ_g corners and "optimistic" the maximum (`ape.analysis.pilot.power_report`; `corners` in power.json). The flagged-upper-end rule is unchanged.
+  - **Verified** (200 simulated 8-world pilots per scenario; 600 power simulations per corner). The implementation's decisions equal the corner rule in every pilot.
+    - At σ_g 0.8 (true power ≈ 0.4): "insufficient" 81% (σ_w 0.5) and 70% (σ_w 1.0), "suffices" never.
+    - At σ_g 0.3 (true power ≈ 0.85): "suffices" 6% and 6.5%, "insufficient" 9% and 6.5%, "ambiguous" otherwise.
+  - **pilot.json** "pilot σ_w, σ_g and power" now carries the 80% intervals, any not-informative flags and the least-favourable-corner powers.
+- **PC5 fails only on evidence.** The point rule failed 50% of gates at a true error rate of 1.5% and 26% at a true cap-hit rate of 8.5%: a finished, paid gate became PRECONDITION_FAIL on noise, the problem D-023 fixed for PC2 and PC3.
+  - **The rule:** an arm and mode fails when the one-sided 97.5% Clopper–Pearson lower bound of its error rate exceeds 2%, or of its cap-hit rate exceeds 10% (`gate_stats.harness_rates`). A point estimate at or over a limit is a warning, shown as a caveat on the verdict. The pilot reports the same rates as an early warning (`pilot.json` `harness`).
+  - **Re-simulated** (300 gates each, 10 gated groups):
+
+    | True rates | Fails | Warns |
+    |---|---|---|
+    | 1.0% errors | 0% | 0.7% |
+    | 1.5% errors | 0% | 58% |
+    | 2.0% errors (at the limit) | 19% | 100% |
+    | 8.5% cap hits | 0% | 25% |
+    | 10% cap hits (at the limit) | 17% | 100% |
+    | 4% errors in one arm and mode | 95% | — |
+    | 15% cap hits in one arm and mode | 100% | — |
+
+  - Samples are treated as independent. Errors that cluster by world would make the bound slightly high, so a failure stays strong evidence.
+- **Holm's worst case** is one mode at the margin and the other clearly non-inferior. Holm then gives the marginal mode the full 0.020: stage-1 false claims 2.08–2.12% (20,000 gates, SE 0.10 pp), 2.17–2.33% overall with the extension, and 2.4% at 12 worlds. That is within the procedure's total 0.025, so no α change. GATE_PREREG §3 and §8 state it.
+- **Holm's stopping rule.** When Holm stops at the first mode, the other mode is "not tested": it is classified and shown at the stopping level (α/2), never as GO. Before, it was shown at α with an interval that could exclude −5 pp while being labelled INCONCLUSIVE (review edge case 10).
+  - A mode with a cell under 4 paired worlds leaves the family, so the other mode is tested alone at the full α. That is one test, so the familywise error is still controlled; GATE_PREREG §2 documents it.
+- **The extension's role is fixed at the freeze.** Before, its α depended only on the analyst passing `--extension-of` to analyze_gate, and a second extension of the same stage 1 was accepted (two 0.005 spends).
+  - `run_gate freeze --extension-of <run>` (or `--fix-cycle-of <run>`) records `role: {kind, of}` in freeze.json, outside the freeze fingerprint, like `--accept-pc1-failure`. analyze_gate derives the stage and α from that record; its `--extension-of` is only a consistency check.
+  - The freeze refuses unless the named run is a frozen, analysed primary run with verdict INCONCLUSIVE (extension) or NO_GO (fix cycle). It also refuses a second extension or fix cycle of the same run, found by scanning runs/*/freeze.json.
+- **Smaller.** Rows with NaN success now raise a counted `NaNOutcomeWarning` instead of being dropped silently. `load_results` never produces them.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

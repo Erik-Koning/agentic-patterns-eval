@@ -1160,3 +1160,36 @@ def test_a_smoke_runs_freeze_is_refused_before_its_budget_guard(clean_env):
     with pytest.raises(PhaseError, match="is a smoke run"):
         run_phases(run, "freeze")
     assert read_manifest(run, "freeze") is None, "refused before any record"
+
+
+def test_a_runs_role_is_checked_at_its_freeze_and_one_extension_is_allowed(clean_env):
+    """Batch W (D-027): an extension or fix cycle is declared at the freeze (recorded in freeze.json, where
+    analyze_gate reads its α); it must name a frozen, analysed primary run with the right verdict, and only one
+    extension (or fix cycle) per run may freeze."""
+    root = clean_env / "runs"
+
+    def frozen(rid: str, label: str | None, role: dict | None = None) -> None:
+        (root / rid / "report").mkdir(parents=True)
+        (root / rid / "freeze.json").write_text(json.dumps({"run_id": rid, "offline": False} | ({"role": role} if role else {})))
+        if label:
+            (root / rid / "report" / "decision.json").write_text(json.dumps({"verdict": {"label": label}}))
+
+    def problems(rid: str, kind: str, of: str) -> list[str]:
+        run = GateRun(rid, runs_root=root, **({"extension_of": of} if kind == "extension" else {"fix_cycle_of": of}))
+        return run_gate.role_problems(run, run_gate.run_role(run))
+
+    frozen("g1", "INCONCLUSIVE")
+    frozen("g2", "GO")
+    frozen("g3", "NO_GO")
+    assert run_gate.run_role(GateRun("e1", runs_root=root, extension_of="g1")) == {"kind": "extension", "of": "g1"}
+    assert problems("e1", "extension", "g1") == []
+    assert any("only after INCONCLUSIVE" in p for p in problems("e2", "extension", "g2"))
+    assert any("freeze.json missing" in p for p in problems("e3", "extension", "nope"))
+    assert problems("f1", "fix_cycle", "g3") == []
+    # Once e1 is frozen as g1's extension, a second extension of g1 is refused, and so is an extension of e1.
+    frozen("e1", "INCONCLUSIVE", {"kind": "extension", "of": "g1"})
+    assert any("'e1' is already the extension of 'g1'" in p for p in problems("e4", "extension", "g1"))
+    assert any("is itself an extension" in p for p in problems("e5", "extension", "e1"))
+    with pytest.raises(PhaseError, match="not both"):
+        run_gate.run_role(GateRun("x", runs_root=root, extension_of="g1", fix_cycle_of="g3"))
+    assert run_gate.frozen_role({"run_id": "old"}) == {"kind": "primary", "of": None}, "a freeze from before roles is primary"

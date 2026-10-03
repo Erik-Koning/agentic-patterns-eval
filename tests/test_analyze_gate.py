@@ -224,6 +224,36 @@ def test_pc5_error_and_cap_hit_rates_in_the_verdicts_cells():
     assert not ag.pc5(flail)["pass"]
 
 
+def test_pc5_fails_only_on_evidence_and_warns_on_a_point_estimate_over_the_limit():
+    """Batch W (D-027): at a true harness-error rate under 2% the old point rule failed PC5 about half the time, so a
+    finished, paid gate became PRECONDITION_FAIL on noise. PC5 now fails only when a one-sided 97.5% Clopper–Pearson
+    lower bound exceeds the limit; a point estimate over the limit is a warning (a verdict caveat)."""
+    from ape.analysis.gate_stats import rate_lower_bound
+
+    assert rate_lower_bound(0, 500) == 0.0 and rate_lower_bound(5, 0) == 0.0
+    assert 0.0099 < rate_lower_bound(30, 1000) < 0.0215  # 3.0% observed: lower bound about 2.0%
+    df = rows({"push": 0.0, "pull": 0.0})
+    apg_push = df.index[(df["label"] == "APG*") & (df["delivery"] == "push") & (df["plan_cell"] == ag.F7_CELL)]
+    n = len(apg_push)
+    # Over the limit in point estimate, not on evidence: passes, with a warning.
+    near = df.copy()
+    near.loc[apg_push[: max(1, round(n * 0.025))], "error"] = True
+    p = ag.pc5(near)
+    row = next(r for r in p["details"]["rates"] if r["arm"] == "APG* (push)" and r["plan_cell"] == ag.F7_CELL)
+    assert row["error_rate"] >= ag.MAX_ERROR_RATE and row["error_lower"] <= ag.MAX_ERROR_RATE
+    assert p["pass"] and p["reason"] is None and any("APG* (push)" in w and "not yet evidence" in w for w in p["details"]["warnings"])
+    # Well over: fails, naming the lower bound.
+    far = df.copy()
+    far.loc[apg_push[: round(n * 0.08)], "error"] = True
+    q = ag.pc5(far)
+    assert not q["pass"] and "lower bounds" in q["reason"]
+    # The placebo's cap hits never warn or fail.
+    s7 = df.index[df["label"] == "S7"]
+    flail = df.copy()
+    flail.loc[s7[: int(len(s7) * 0.5)], "cap_hit"] = True
+    assert ag.pc5(flail)["details"]["warnings"] == []
+
+
 def test_inconclusive_still_reports_the_secondary_conditions_and_dropped_tasks():
     """RELIABILITY_REVIEW S9: the F7-1000 floor and the S7 test are computed whatever the verdict, and unpaired tasks
     left out of the paired analysis are counted per cell."""
@@ -260,20 +290,29 @@ def _fake_run(tmp_path, name, worlds, label=None):
     return SimpleNamespace(dir=d)
 
 
+def _freeze_as(run, kind="primary", of=None):
+    (run.dir / ag.FREEZE_FILE).write_text(json.dumps({"run_id": run.dir.name, "role": {"kind": kind, "of": of}}))
+
+
 def test_extension_context_needs_an_inconclusive_stage1_and_fresh_worlds(tmp_path):
-    """S6: the one extension (§8) reads both runs' test worlds from their manifests, never from seed arithmetic."""
+    """S6: the one extension (§8) reads both runs' test worlds from their manifests, never from seed arithmetic.
+    D-027: whether a run is the extension comes from its frozen role, not from a command-line flag."""
     s1 = _fake_run(tmp_path, "s1", ["F7-10-test-s3000", "F7-10-test-s3001"], "INCONCLUSIVE")
     s2 = _fake_run(tmp_path, "s2", ["F7-10-test-s3100", "F7-10-test-s3101"])
-    assert ag.extension_context(s2) is None  # not an extension until marked
-    (s2.dir / ag.EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": "s1", "stage1_dir": str(s1.dir)}))
+    assert ag.extension_context(s2) is None  # no freeze record: a primary run
+    _freeze_as(s2)
+    assert ag.extension_context(s2) is None  # frozen as the primary run
+    _freeze_as(s2, "extension", "s1")
     ok = ag.extension_context(s2)
     assert ok["problems"] == [] and ok["alpha"] == 0.005 and ok["total_alpha"] == 0.025 and ok["stage1_worlds"] == 2
     reused = _fake_run(tmp_path, "s3", ["F7-10-test-s3001", "F7-10-test-s3200"])
-    (reused.dir / ag.EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": "s1", "stage1_dir": str(s1.dir)}))
-    assert any("reuses 1 stage-1 test world" in p for p in ag.extension_context(reused)["problems"])
+    _freeze_as(reused, "extension", "s1")
+    probs = ag.extension_context(reused)["problems"]
+    assert any("reuses 1 stage-1 test world" in p for p in probs)
+    assert any("'s2' is also frozen as the extension of 's1'" in p for p in probs), "a second extension of s1 is refused"
     go = _fake_run(tmp_path, "go", ["F7-10-test-s3000"], "GO")
     after_go = _fake_run(tmp_path, "s4", ["F7-10-test-s3300"])
-    (after_go.dir / ag.EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": "go", "stage1_dir": str(go.dir)}))
+    _freeze_as(after_go, "extension", "go")
     assert any("not INCONCLUSIVE" in p for p in ag.extension_context(after_go)["problems"])
 
 

@@ -163,6 +163,23 @@ def test_two_sided_recommendation_suffices_insufficient_and_ambiguous():
     assert r["decision"] == "ambiguous" and "not estimable" in r["recommendation"]
 
 
+def test_conservative_and_optimistic_power_are_the_worst_and_best_sigma_corners():
+    """Batch W (D-027): power falls with σ_g but rises with σ_w, so taking both upper ends as "conservative"
+    overstated power by 2-6 pp. Conservative and optimistic are now the min and max over the four interval corners."""
+    from ape.analysis.pilot import power_report
+
+    r = power_report(_vc(ci_w=(0.2, 1.4), ci_g=(0.3, 0.8)), (12, 16), 16, 12, 3, 600)
+    corners = r["corners"]
+    assert len(corners) == 4
+    for n in (12, 16):
+        assert r["scenarios"]["conservative"]["power"][n] == min(c["power"][n] for c in corners.values())
+        assert r["scenarios"]["optimistic"]["power"][n] == max(c["power"][n] for c in corners.values())
+    # The worst corner is (σ_w low, σ_g high), below the old "both upper ends" scenario.
+    assert r["scenarios"]["conservative"]["corner"] == "sigma_w low, sigma_g high"
+    assert r["scenarios"]["conservative"]["power"][16] < corners["sigma_w high, sigma_g high"]["power"][16]
+    assert r["scenarios"]["optimistic"]["corner"] == "sigma_w high, sigma_g low"
+
+
 def test_sigma_estimation_uses_every_world_it_is_given():
     """D-026: the pilot pools the main pilot's 4 worlds and the σ cell's 4 more per cell."""
     from ape.analysis.pilot import variance_components

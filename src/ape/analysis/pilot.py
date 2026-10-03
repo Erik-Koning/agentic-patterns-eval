@@ -245,11 +245,15 @@ def power_report(vc: dict, sizes: tuple[int, ...], planned: int, tasks_per_world
     """Power of an unqualified GO at each candidate size under four σ scenarios, and the two-sided recommendation.
 
     - `pilot`: the pilot's point estimates (the priors where not estimable);
-    - `conservative`: the upper ends of the pilot's 80% σ intervals (the priors where not estimable);
-    - `optimistic`: the lower ends of those intervals (the priors where not estimable);
+    - `conservative`: the lowest power over the four corners of the pilot's 80% σ_w × σ_g intervals (the priors
+      where not estimable). Power falls with σ_g but *rises* with σ_w (a world effect moves both arms alike), so the
+      worst corner is usually (σ_w low, σ_g high); taking both upper ends overstated power by 2-6 pp (D-027);
+    - `optimistic`: the highest power over the same four corners;
     - `prior`: power_sim's priors, for reference.
+    `corners` holds every corner's powers; `conservative` and `optimistic` name the corner that attains them at the
+    planned size.
 
-    `decision` at the planned size (D-026):
+    `decision` at the planned size (D-026, D-027):
     - `suffices`: the conservative power reaches `target` and both upper ends are informative;
     - `insufficient`: even the optimistic power misses `target`;
     - `ambiguous`: otherwise, and whenever σ is not estimable.
@@ -260,17 +264,32 @@ def power_report(vc: dict, sizes: tuple[int, ...], planned: int, tasks_per_world
     est_w, est_g, ci = vc.get("sigma_w"), vc.get("sigma_g"), vc.get("ci80") or {}
     informative = vc.get("ci80_upper_informative") or {}
     priors = (PRIOR_SIGMA_W, PRIOR_SIGMA_G)
-    scenarios = {
-        "pilot": (PRIOR_SIGMA_W if est_w is None else est_w, PRIOR_SIGMA_G if est_g is None else est_g),
-        "conservative": (ci["sigma_w"][1], ci["sigma_g"][1]) if ci else priors,
-        "optimistic": (ci["sigma_w"][0], ci["sigma_g"][0]) if ci else priors,
-        "prior": priors,
-    }
     sizes = tuple(sorted(set(sizes) | {planned}))
     p_base = _cell_bases(vc)
+    memo: dict[tuple[float, float], dict[int, float]] = {}
+
+    def scenario(sw: float, sg: float) -> dict:
+        key = (float(sw), float(sg))
+        if key not in memo:  # coinciding corners (a degenerate interval) are simulated once
+            memo[key] = {n: ni_power(n, tasks_per_world, epochs, p_base, key[0], key[1], n_sims) for n in sizes}
+        return {"sigma_w": key[0], "sigma_g": key[1], "power": memo[key]}
+
+    corners = (
+        {f"sigma_w {wl}, sigma_g {gl}": scenario(ci["sigma_w"][wi], ci["sigma_g"][gi]) for wi, wl in ((0, "low"), (1, "high")) for gi, gl in ((0, "low"), (1, "high"))}
+        if ci
+        else {"prior": scenario(*priors)}
+    )
+
+    def extreme(pick) -> dict:
+        """The corner-wise min (conservative) or max (optimistic) power at every size, named by its corner at `planned`."""
+        name = pick(corners, key=lambda k: corners[k]["power"][planned])
+        return {"sigma_w": corners[name]["sigma_w"], "sigma_g": corners[name]["sigma_g"], "corner": name, "power": {n: pick(c["power"][n] for c in corners.values()) for n in sizes}}
+
     powers = {
-        name: {"sigma_w": sw, "sigma_g": sg, "power": {n: ni_power(n, tasks_per_world, epochs, p_base, sw, sg, n_sims) for n in sizes}}
-        for name, (sw, sg) in scenarios.items()
+        "pilot": scenario(PRIOR_SIGMA_W if est_w is None else est_w, PRIOR_SIGMA_G if est_g is None else est_g),
+        "conservative": extreme(min),
+        "optimistic": extreme(max),
+        "prior": scenario(*priors),
     }
     cons, opt, point = (powers[k]["power"] for k in ("conservative", "optimistic", "pilot"))
     upper_ok = bool(ci) and all(informative.get(k, True) for k in ("sigma_w", "sigma_g"))
@@ -284,13 +303,16 @@ def power_report(vc: dict, sizes: tuple[int, ...], planned: int, tasks_per_world
     elif opt[planned] < target:
         decision = "insufficient"
         note = (
-            f"insufficient: even at the lower ends of the pilot's 80% σ intervals the planned {planned} worlds per cell reach only power "
+            f"insufficient: even at the most favourable corner of the pilot's 80% σ intervals the planned {planned} worlds per cell reach only power "
             f"{opt[planned]:.2f} < {target} (point estimate {point[planned]:.2f}). Add test worlds within budget, or rethink"
-            + (": " + "; ".join(f"{n} worlds give {point[n]:.2f} at the point estimate and {cons[n]:.2f} at the upper ends" for n in larger) if larger else "")
+            + (": " + "; ".join(f"{n} worlds give {point[n]:.2f} at the point estimate and {cons[n]:.2f} at the least favourable corner" for n in larger) if larger else "")
         )
     elif upper_ok and cons[planned] >= target:
         decision = "suffices"
-        note = f"suffices: the planned {planned} worlds per cell reach power {cons[planned]:.2f} >= {target} at the upper ends of the pilot's 80% σ intervals"
+        note = (
+            f"suffices: the planned {planned} worlds per cell reach power {cons[planned]:.2f} >= {target} at the least favourable corner "
+            f"of the pilot's 80% σ intervals ({powers['conservative']['corner']})"
+        )
         if smaller := [n for n in sizes if n < planned and cons[n] >= target]:
             note += f"; {min(smaller)} would also reach it"
     else:
@@ -299,7 +321,7 @@ def power_report(vc: dict, sizes: tuple[int, ...], planned: int, tasks_per_world
         why = (
             f"the upper end of {' and '.join(flagged)} is not informative (the worlds varied less than the model predicts at σ = 0)"
             if flagged
-            else f"power {opt[planned]:.2f} at the lower ends and {cons[planned]:.2f} at the upper ends of the 80% σ intervals"
+            else f"power {cons[planned]:.2f} at the least and {opt[planned]:.2f} at the most favourable corner of the 80% σ intervals"
         )
         note = f"ambiguous: {why}; point estimate {point[planned]:.2f}. Proceed with the planned {planned} worlds per cell and rely on the pre-registered extension"
     return {
@@ -313,6 +335,7 @@ def power_report(vc: dict, sizes: tuple[int, ...], planned: int, tasks_per_world
         "sigma_ci80": ci or None,
         "sigma_ci80_upper_informative": informative or None,
         "scenarios": powers,
+        "corners": corners,
         "planned_worlds_per_cell": planned,
         "decision": decision,
         "recommended_worlds_per_cell": None if decision == "insufficient" else planned,
