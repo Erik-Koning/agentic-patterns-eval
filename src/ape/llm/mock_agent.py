@@ -48,10 +48,17 @@ def mock_classifier(messages, tools, tool_choice, config) -> ModelOutput:
     return ModelOutput.from_content(MODEL, json.dumps({"matches": [{"nodeId": first, "confidence": 0.9, "reason": "mock"}]}))
 
 
+def _keyword_query(prompt: str) -> str:
+    """The user query inside LightRAG's keyword-extraction prompt: 1.5.7 writes `User Query: ...` under
+    `---Real Data---` (older releases put it after `---Query---`)."""
+    m = re.search(r"User Query:\s*(.*?)\s*(?:---Output---|\Z)", prompt, re.S)
+    return m.group(1) if m else prompt.split("---Query---")[-1]
+
+
 def mock_kg(messages, tools, tool_choice, config) -> ModelOutput:
-    """Scripted "kg" model serving both APG classify and LightRAG keyword extraction."""
+    """Scripted "kg" model serving both APG classify and LightRAG keyword extraction (keywords: words of the query)."""
     if config.response_schema is not None and config.response_schema.name == "keywords":
-        user = next((m.text for m in messages if m.role == "user"), "")
-        words = [w for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", user.split("---Query---")[-1])][:6]
+        user = "\n".join(m.text for m in messages if m.role in ("system", "user"))
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", _keyword_query(user))][:6]
         return ModelOutput.from_content(MODEL, json.dumps({"high_level_keywords": words[:2], "low_level_keywords": words[2:]}))
     return mock_classifier(messages, tools, tool_choice, config)

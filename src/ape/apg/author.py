@@ -259,15 +259,22 @@ def assemble(world: World, chunks: list[Chunk], units_per_chunk: list[list[dict]
     return doc, report
 
 
+def author_prompt_version() -> str:
+    """Hash of the authoring prompt and unit schema: recorded in authored graphs' meta, so a prompt revision on dev
+    (GATE_PREREG §5 allows it) marks graphs authored with the old prompt stale."""
+    payload = json.dumps({"system": AUTHOR_SYSTEM, "schema": UNIT_SCHEMA}, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
 def build_meta(world: World, author_id: str | None, embedding_model: str) -> dict:
     """What an authored graph was built from; stored in the graph's open `meta` mapping."""
     return graph_meta(world, author_id, embedding_model)
 
 
 def authored_graph_current(world: World, cfg: Config, author_id: str | None) -> bool:
-    """True when the authored graph and its report exist and were built from this world version by
-    this author with the current embedding model. A crash before the report is written, a changed
-    world or a different author all mean a rebuild."""
+    """True when the authored graph and its report exist and were built from this world version and chunks, by this
+    author with this authoring prompt, with the current embedding model. A crash before the report is written, a
+    changed world, chunker or prompt, or a different author all mean a rebuild."""
     path = graph_path(cfg, world.id, "authored")
     try:
         meta = json.loads(path.read_text()).get("meta") or {}
@@ -276,7 +283,7 @@ def authored_graph_current(world: World, cfg: Config, author_id: str | None) -> 
         return False
     want = build_meta(world, author_id, embedding_cache(cfg).model)
     in_report = {"worldHash": report.get("world_hash"), "author": report.get("author"), "embeddingModel": report.get("embedding_model")}
-    return all(meta.get(k) == v and in_report[k] == v for k, v in want.items())
+    return all(meta.get(k) == v for k, v in want.items()) and all(in_report[k] == want[k] for k in in_report)
 
 
 CHUNK_ERRORS = (BuildResponseError, UnitShapeError)  # a chunk's own failure; anything else is fatal

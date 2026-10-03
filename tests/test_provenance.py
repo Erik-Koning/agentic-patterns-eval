@@ -32,7 +32,7 @@ from ape.llm.build_client import BuildLlm
 from ape.llm.embeddings import EmbeddingCache
 from ape.llm.fake import FakeEmbeddingsClient, perfect_author
 from ape.worlds.generate import make_world
-from ape.worlds.render import chunk_world
+from ape.worlds.render import chunk_world, chunks_hash
 
 WORLDS = [
     ("F7", "100", {}),
@@ -155,28 +155,52 @@ def test_a_generic_lightrag_entity_no_longer_claims_every_fact(offline_env, monk
     assert ctx.meta["lightrag"]["source_chunks"] >= len(chunks) // 2
 
 
-def test_lightrag_keyword_fallback_is_recorded_and_its_units_match_the_text(offline_env):
+def test_lightrag_keyword_failures_and_empty_retrievals_mirror_stock_lightrag(offline_env):
+    """RELIABILITY_REVIEW 2 (report-gaps note): the adapter does what stock LightRAG 1.5.7 does (`operate.kg_query`) and
+    makes no retrieval attempt LightRAG would not.
+    - no keywords, short query: LightRAG uses the query as the low-level keyword (a recorded fallback);
+    - no keywords, query of 50+ characters: no context (a recorded keyword error, no fallback);
+    - keywords that retrieve nothing: no context, an empty retrieval, not a keyword failure;
+    - naive mode extracts no keywords: never a keyword fallback or error."""
     w = _saved("F7", "10")
     cfg = Config()
     asyncio.run(build_index(w, "oracle", cfg))
+    long_query = w.tasks[0].prompt
+    assert len(long_query) >= 50
+    short_query = f"{w.policies[0].id} {w.policies[0].region}"
+    assert len(short_query) < 50
 
-    async def run(reply):
+    async def run(reply, query, **params):
+        kg_calls = []
+
         async def kg(prompt, system_prompt=None, history_messages=None, **kw):
+            kg_calls.append(prompt)
             return reply
 
         wd = index_dir(cfg, w.id, "oracle")
         rag = await open_rag(wd, w.id, kg, embedding_cache(cfg), query_time=True)
         try:
-            return await LgrArm("LGRo-q", False, rag, fact_matcher(w), query_params(cfg.lgr_budget_tokens), read_manifest(wd)).compile(w.tasks[0].prompt, w.tasks[0])
+            arm = LgrArm("LGRo-q", False, rag, fact_matcher(w), query_params(cfg.lgr_budget_tokens) | params, read_manifest(wd))
+            return await arm.compile(query, w.tasks[0]), kg_calls
         finally:
             await rag.finalize_storages()
 
     for reply in ("", "I'm sorry, I can't help with that.", '{"high_level_keywords": [], "low_level_keywords": []}'):
-        ctx = asyncio.run(run(reply))
+        ctx, calls = asyncio.run(run(reply, long_query))
         lg = ctx.meta["lightrag"]
-        assert lg["keyword_fallback"] and lg["keyword_error"] and lg["keywords"]["low"] == [w.tasks[0].prompt]
-        assert sum(lg["counts"]) > 0 and ctx.fact_ids, "the fallback context's units and facts are reported, not zero"
-    ok = asyncio.run(run('{"high_level_keywords": ["refund policy"], "low_level_keywords": ["EU"]}'))
+        assert lg["keyword_error"] and lg["keyword_fallback"] is False and not lg["empty_retrieval"], reply
+        assert ctx.text == "" and ctx.fact_ids == [] and len(calls) == 1, "no context and no second attempt, as stock LightRAG"
+        ctx, calls = asyncio.run(run(reply, short_query))
+        lg = ctx.meta["lightrag"]
+        assert lg["keyword_fallback"] and lg["keyword_error"] and lg["keywords"]["low"] == [short_query], reply
+        assert len(calls) == 1, "LightRAG's own fallback makes no second kg call"
+    # global mode retrieves relations by the high-level keywords only (mix also searches chunks by the query's embedding)
+    nothing, _ = asyncio.run(run('{"high_level_keywords": ["qqqqzz"], "low_level_keywords": ["xxyyzz"]}', long_query, mode="global"))
+    lg = nothing.meta["lightrag"]
+    assert lg["empty_retrieval"] and lg["keyword_fallback"] is False and lg["keyword_error"] is None and nothing.text == ""
+    naive, calls = asyncio.run(run("", long_query, mode="naive"))
+    assert naive.meta["lightrag"]["keyword_fallback"] is False and naive.meta["lightrag"]["keyword_error"] is None and calls == []
+    ok, _ = asyncio.run(run('{"high_level_keywords": ["refund policy"], "low_level_keywords": ["EU"]}', long_query))
     assert ok.meta["lightrag"]["keyword_fallback"] is False and ok.meta["lightrag"]["keyword_error"] is None
 
 
@@ -259,10 +283,13 @@ def test_stale_or_unlabelled_oracle_graphs_are_rebuilt(offline_env):
     path = graph_path(cfg, w.id, "oracle")
     fake = embedding_cache(cfg)
     doc = asyncio.run(ensure_graph(w, "oracle", cfg, fake))
-    assert doc["meta"] == {"worldHash": w.content_hash(), "author": "oracle", "embeddingModel": "fake-bow", "embeddingDim": 256}
+    assert doc["meta"] == {"worldHash": w.artifact_hash(), "chunksHash": chunks_hash(chunk_world(w)), "author": "oracle", "embeddingModel": "fake-bow", "embeddingDim": 256}
     legacy = {k: v for k, v in doc.items() if k != "meta"}  # as written before freshness checks
     path.write_text(json.dumps(legacy))
-    assert asyncio.run(ensure_graph(w, "oracle", cfg, fake))["meta"]["worldHash"] == w.content_hash()
+    assert asyncio.run(ensure_graph(w, "oracle", cfg, fake))["meta"]["worldHash"] == w.artifact_hash()
+    no_chunks = {**doc, "meta": {k: v for k, v in doc["meta"].items() if k != "chunksHash"}}  # predates the chunks check
+    path.write_text(json.dumps(no_chunks))
+    assert asyncio.run(ensure_graph(w, "oracle", cfg, fake))["meta"]["chunksHash"] == chunks_hash(chunk_world(w))
     wide = EmbeddingCache(cfg.cache_dir / "wide.sqlite", "text-embedding-3-small", client=_Wide())
     rebuilt = asyncio.run(ensure_graph(w, "oracle", cfg, wide))
     assert rebuilt["meta"]["embeddingModel"] == "text-embedding-3-small" and rebuilt["meta"]["embeddingDim"] == 1536

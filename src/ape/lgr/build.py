@@ -41,7 +41,7 @@ from ..config import Config, embedding_cache
 from ..llm.build_client import BuildLlm, max_failed_chunks
 from ..llm.ledger import Ledger
 from ..models import build_settings
-from ..worlds.render import Chunk, chunk_world
+from ..worlds.render import Chunk, chunk_world, chunks_hash
 from ..worlds.spec import World
 from .common import MANIFEST, index_dir, open_rag, write_manifest
 
@@ -98,13 +98,21 @@ def _dir_hash(path) -> str:
 
 
 def build_key(world: World, kind: str, embedding_model: str) -> dict:
-    """What an index is built from; a manifest with the same key means the index is current."""
+    """What an index is built from; a manifest with the same key means the index is current.
+
+    - `world_hash`: the world without its tasks (`World.artifact_hash`), so a world regenerated with more or fewer
+      tasks keeps its index;
+    - `chunks_hash`: the shared chunks the index was built from, so a renderer or chunker change marks it stale;
+    - `lightrag_version`: extraction prompts and storage formats change between LightRAG releases;
+    - the kind, the embedding model and, for extract builds, the build model and effort."""
     if kind not in ("extract", "oracle"):
         raise ValueError(f"unknown LightRAG build kind {kind!r}; expected 'extract' or 'oracle'")
     model, effort = build_settings() if kind == "extract" else (None, None)
     return {
         "world_id": world.id,
-        "world_hash": world.content_hash(),
+        "world_hash": world.artifact_hash(),
+        "chunks_hash": chunks_hash(chunk_world(world)),
+        "lightrag_version": importlib.metadata.version("lightrag-hku"),
         "kind": kind,
         "embedding_model": embedding_model,
         "build_model": model,
@@ -120,10 +128,15 @@ def _read_json(path: Path) -> dict | None:
 
 
 def index_current(world: World, kind: str, cfg: Config) -> bool:
-    """True when the index's manifest exists and records this world version and the current build settings."""
-    manifest = _read_json(index_dir(cfg, world.id, kind) / MANIFEST)
+    """True when the index's manifest exists, records this world version and the current build settings, and its
+    files still hash to the manifest's `index_hash` (queries never write to an index, so any difference is damage or
+    a half-copied directory)."""
+    wd = index_dir(cfg, world.id, kind)
+    manifest = _read_json(wd / MANIFEST)
     key = build_key(world, kind, embedding_cache(cfg).model)
-    return manifest is not None and all(manifest.get(k) == v for k, v in key.items())
+    if manifest is None or any(manifest.get(k) != v for k, v in key.items()):
+        return False
+    return manifest.get("index_hash") == _dir_hash(wd)
 
 
 def _prepare_dir(wd: Path, key: dict) -> bool:
@@ -219,7 +232,7 @@ async def build_index(world: World, kind: str, cfg: Config) -> dict:
                 f"{extraction['tolerated']} tolerated (APE_BUILD_MAX_FAILED_SHARE); FAILED documents {extraction['failed_docs']}, "
                 f"documents with facts but no entity {extraction['empty_docs']} ({dropped} cached repl{'y' if dropped == 1 else 'ies'} dropped)"
             )
-    manifest = {**key, "lightrag_version": importlib.metadata.version("lightrag-hku"), "chunks": len(chunks)}
+    manifest = {**key, "chunks": len(chunks)}
     if extraction is not None:
         manifest["extraction"] = extraction
     manifest["index_hash"] = _dir_hash(wd)

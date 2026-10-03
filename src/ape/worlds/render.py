@@ -56,6 +56,16 @@ def chunk_world(world: World, max_tokens: int = DEFAULT_CHUNK_TOKENS) -> list[Ch
     return [c for doc in world.documents for c in chunk_document(doc, max_tokens)]
 
 
+def chunks_hash(chunks: list[Chunk]) -> str:
+    """Hash of a chunk set (IDs, text, fact IDs). Recorded in graph and index build keys, so a change to the renderer
+    or the chunker (not only to the world) marks the artifacts built from the old chunks stale."""
+    import hashlib
+    import json
+
+    payload = json.dumps([[c.id, c.text, list(c.fact_ids)] for c in chunks])
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
 def corpus_text(world: World) -> str:
     """The full corpus, used verbatim by the monolith arm (S1)."""
     return "\n\n".join(doc.text for doc in world.documents)

@@ -204,6 +204,8 @@ async def score_both(question: str, answer: str, ground_truth: str, qtype: str, 
             r = await accuracy.answer_correctness(question, answer, ground_truth, generate, emb.queries)
         except Excluded as e:
             return {"accuracy": None, "excluded": True, "classification_parse_failed": False, "error": str(e)}
+        except ragas.Truncated as e:  # a truncated judge reply is unparseable for this scorer too
+            return {"accuracy": None, "excluded": True, "classification_parse_failed": True, "error": str(e)}
         return {**r, "excluded": False}
 
     async def vendored_ragas() -> dict:
@@ -215,7 +217,13 @@ async def score_both(question: str, answer: str, ground_truth: str, qtype: str, 
         return {**r, "parse_failed": False}
 
     if qtype in RAGAS_TYPES:
-        current, matched = await asyncio.gather(official(), vendored_ragas())
+        # A TaskGroup, not gather: if one scorer raises, the other's judge calls are cancelled instead of left running.
+        try:
+            async with asyncio.TaskGroup() as tg:
+                cur, mat = tg.create_task(official()), tg.create_task(vendored_ragas())
+        except* Exception as eg:
+            raise eg.exceptions[0] from None
+        current, matched = cur.result(), mat.result()
         matched["scorer"] = "ragas-e6305f5"
         return matched, current
     current = await official()
@@ -239,7 +247,10 @@ def answer_accuracy(cfg: Config) -> Scorer:
         judge = get_model(role="judge", required=True)
 
         async def generate(prompt: str) -> str:
-            return (await judge.generate([ChatMessageUser(content=prompt)])).completion
+            out = await judge.generate([ChatMessageUser(content=prompt)])
+            if out.stop_reason in ("max_tokens", "model_length"):  # finish_reason=length: RAGAS's LLMDidNotFinish
+                raise ragas.Truncated(f"judge reply truncated (stop reason {out.stop_reason})")
+            return out.completion
 
         matched, current = await score_both(state.input_text, answer, target.text, state.metadata["question_type"], generate, emb)
         current.pop("classification_raw", None)
