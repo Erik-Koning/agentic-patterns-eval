@@ -6,11 +6,14 @@ ones, which share the schema), and measured capability per point ({point: value}
 **Inference is design-based and clustered by session** (D-029). A session is one F8 world; its epochs are pooled
 first. Every confirmatory estimand is a linear combination L = Σ_c a_c ḡ_c of per-point session means ḡ_c of a
 per-session value (a paired difference, a linear form of several arms, or a linearised ratio):
-- **Interval** (`lincomb`): variance Σ_w ψ_w² with ψ_w = Σ_c (a_c / n_c) √(n_c / (n_c − 1)) (d_wc − ḡ_c), so a world
-  that appears at several points (same seeds) is one cluster across them; with distinct worlds this is exactly the
-  Welch variance Σ_c a_c² s_c² / n_c. Welch–Satterthwaite df, capped at G − 1 when worlds are shared. This is the
-  gate's validated world-clustered t-interval (D-023) generalised from equal-weight cell means to any weights; on
-  a pooled mean it reproduces `gate_stats.cluster_t` (tests).
+- **Interval** (`lincomb`): the unbiased variance of L with a world that appears at several points (same seeds) one
+  cluster across them: Σ_c a_c² s_c² / n_c plus the cross-point terms over the worlds two points share
+  (`_pair_weights`); with distinct worlds this is exactly the Welch variance, and with full, balanced overlap it is
+  Σ_w ψ_w² with ψ_w = Σ_c (a_c / n_c) √(n_c / (n_c − 1)) (d_wc − ḡ_c). Welch–Satterthwaite df; when worlds are shared,
+  capped at G_eff − 1, the model-based effective number of clusters (`_effective_clusters`; G for balanced designs,
+  about 12.6 of 16 for D-033's topology design, where the G − 1 cap left the G-H3 tests at 0.028–0.030). This is the
+  gate's validated world-clustered t-interval (D-023) generalised from equal-weight cell means to any weights; on a
+  pooled mean it reproduces `gate_stats.cluster_t` (tests).
 - **Sign-flip** (`flip_test`): the wild sign-flip with null-restricted residuals: the per-point means are moved to
   the nearest values satisfying the null, residuals are flipped per world, and the studentised statistic is
   recomputed. All 2^G sign vectors are enumerated while 2^G ≤ 8 × the resamples (up to G = 16 at the report's
@@ -24,10 +27,12 @@ per-session value (a paired difference, a linear form of several arms, or a line
   ≥ 0.8) are tested as linear forms, (N − r D) > 0, which needs no ratio inference; a per-point ratio that enters
   a slope (G-H2b) is linearised per session (`ratio_pseudo`).
 
-**Hypotheses** (`ape.analysis.g_hypotheses` is the table): `gh1` (topology gap slope on measured capability, for any
-single-agent reference), `gap_iut`, `headroom`, `tost` and `gh2` (context management), `gh3` (isolation and
-specialisation shares, S-CM* recovery at cost), and the descriptive `degradation`, `short_control`,
-`crossing_split`, `probe_table`, `probe_behaviour`, `taxonomy_table`, `cost_table` and `glmm`.
+**Hypotheses** (`ape.analysis.g_hypotheses` is the table): the confirmatory `gap_iut` (G-H2a) and `gh3` (G-H3:
+isolation and specialisation shares, S-CM* recovery at cost, pooled over every point where all four topology arms
+ran); `gh1` (topology gap slope on measured capability, for any single-agent reference) and `tost` (G-H2b's change
+in R_x), descriptive since D-033 though their tests are still computed; `headroom` and `gh2`; and the descriptive
+`degradation`, `short_control`, `crossing_split`, `probe_table`, `probe_behaviour`, `taxonomy_table`, `cost_table`
+and `glmm`.
 
 Nothing here raises on missing arms, points or sessions: a test that cannot run returns `testable: False` and a
 `reason`.
@@ -199,8 +204,25 @@ def _matrix(v: pd.DataFrame, weights: Mapping[str, float]) -> tuple[list, list, 
     return list(worlds), pts, D, a
 
 
-def _core(D: np.ndarray, M: np.ndarray, a: np.ndarray):
-    """Vectorised over leading axes: D (..., G, C) with mask M (G, C). Returns est, V, means, s2, n, psi."""
+def _pair_weights(M: np.ndarray, a: np.ndarray) -> np.ndarray:
+    """W (C, C) with Σ_cd W_cd Σ_w e_wc e_wd an unbiased estimate of Var(Σ_c a_c ḡ_c): W_cc = a_c² / (n_c (n_c − 1));
+    for c ≠ d, W_cd = a_c a_d / (n_c n_d κ_cd) with κ_cd = 1 − 1/n_c − 1/n_d + n_cd/(n_c n_d), since
+    E[Σ_{w at both} e_wc e_wd] = n_cd κ_cd σ_cd. For distinct worlds (n_cd = 0) or full overlap with equal sessions this
+    is the ψ form Σ_w ψ_w²; with partial overlap (16 worlds at two points, 8 of them at a third) the ψ form understates
+    the cross terms (by 3.4% for 16 vs 8)."""
+    n = M.sum(0).astype(float)
+    Mf = M.astype(float)
+    ncd = Mf.T @ Mf
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kappa = 1 - 1 / n[:, None] - 1 / n[None, :] + ncd / np.outer(n, n)
+        W = np.outer(a, a) / (np.outer(n, n) * kappa)
+        np.fill_diagonal(W, a**2 / (n * (n - 1)))
+    return np.where((ncd > 1) & np.isfinite(W), W, 0.0)
+
+
+def _core(D: np.ndarray, M: np.ndarray, a: np.ndarray, W: np.ndarray | None = None):
+    """Vectorised over leading axes: D (..., G, C) with mask M (G, C). Returns est, V, means, s2, n, psi. V is the
+    unbiased pairwise form (`_pair_weights`), falling back to the ψ form Σ_w ψ_w² where it is not positive."""
     n = M.sum(0).astype(float)
     Dm = np.where(M, D, 0.0)
     g = Dm.sum(-2) / n
@@ -209,16 +231,49 @@ def _core(D: np.ndarray, M: np.ndarray, a: np.ndarray):
         s2 = (e**2).sum(-2) / (n - 1)
         b = a / n * np.sqrt(n / (n - 1))
     psi = (e * b[..., None, :]).sum(-1)
-    return (a * g).sum(-1), (psi**2).sum(-1), g, s2, n, psi
+    V_psi = (psi**2).sum(-1)
+    W = _pair_weights(M, a) if W is None else W
+    V = np.einsum("cd,...gc,...gd->...", W, e, e)
+    V = np.where(V > 0, V, V_psi)
+    return (a * g).sum(-1), V, g, s2, n, psi
 
 
-def _df(a: np.ndarray, s2: np.ndarray, n: np.ndarray, shared: bool, G: int) -> np.ndarray:
+def _df(a: np.ndarray, s2: np.ndarray, n: np.ndarray, shared: bool, G: int, g_eff: float | None = None) -> np.ndarray:
+    """Welch–Satterthwaite df over points; when worlds are shared across points, capped at G_eff − 1 (G − 1 when G_eff
+    is not given)."""
     comps = a**2 * s2 / n
     tot = comps.sum(-1)
     with np.errstate(divide="ignore", invalid="ignore"):
         df = tot**2 / (comps**2 / (n - 1)).sum(-1)
     df = np.where(np.isfinite(df), df, np.nan)
-    return np.minimum(df, G - 1) if shared else df
+    return np.minimum(df, (g_eff if g_eff is not None else G) - 1) if shared else df
+
+
+def _effective_clusters(D: np.ndarray, M: np.ndarray, a: np.ndarray) -> float:
+    """Model-based effective number of clusters of the variance Σ_w ψ_w²: G_eff = (Σ_w τ_w)² / Σ_w τ_w², with
+    τ_w = E[ψ_w²] = b_w' Σ b_w under the per-point residual covariance Σ (estimated pairwise over the worlds two points
+    share) and b_w the world's coefficients (zero at points it did not run). Equals G when every world has the same
+    expected contribution (one point, or full overlap with equal sessions per point); below G when worlds contribute
+    unequally, e.g. 16 worlds at two points of which 8 also at a third (D-033's topology design), where capping the df at
+    G − 1 left the t-test at 0.028–0.030 instead of 0.025 (10,000 simulated studies)."""
+    n = M.sum(0).astype(float)
+    g = np.where(M, D, 0.0).sum(0) / n
+    E = np.where(M, D - g, 0.0)
+    C = M.shape[1]
+    S = np.zeros((C, C))
+    for j in range(C):
+        for k in range(j, C):
+            both = M[:, j] & M[:, k]
+            m = int(both.sum())
+            S[j, k] = S[k, j] = float((E[both, j] * E[both, k]).sum() / (m - 1)) if m > 1 else 0.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        b = a / n * np.sqrt(n / (n - 1))
+    B = np.where(M, b, 0.0)  # (G, C)
+    tau = np.einsum("gc,cd,gd->g", B, S, B)
+    tau = np.clip(tau, 0.0, None)
+    if not tau.sum() > 0:
+        return float(M.shape[0])
+    return float(tau.sum() ** 2 / (tau**2).sum())
 
 
 def lincomb(v: pd.DataFrame, weights: Mapping[str, float]) -> dict:
@@ -245,7 +300,9 @@ def lincomb(v: pd.DataFrame, weights: Mapping[str, float]) -> dict:
     _, V, _, s2, nn, _ = _core(D, M, a)
     out["se"] = float(math.sqrt(max(float(V), 0.0)))
     if V > 0:
-        df = float(_df(a, s2, nn, shared, len(worlds)))
+        g_eff = _effective_clusters(D, M, a) if shared else None
+        out["effective_clusters"] = g_eff
+        df = float(_df(a, s2, nn, shared, len(worlds), g_eff))
         out["df"] = df if np.isfinite(df) else None
     return out
 
@@ -540,9 +597,11 @@ REFERENCE_ARMS = {"S-CM*": ("S-CM*", None), "S1": ("S1", None), "S1-pre": ("S1",
 
 
 def gh1(sessions: pd.DataFrame, capability, *, topology: str = "M2", reference: str = "S-CM*", block: str | None = "topo", outcome: str = "item_success", scale: str = "logit", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, weighting: str = "sessions", flip: bool = True, primary: str = "t", boot: int = 0) -> dict:
-    """G-H1: the per-session gap Δ = topology − reference regressed on measured capability; H1: slope < 0 (the gap
-    shrinks). `reference`: S-CM*, S1 (as scored: overflow fails the rest of the session) or S1-pre (both arms on the
-    items before S1's earliest overflow in the session). Per-point gaps are reported with their intervals."""
+    """G-H1: the per-session gap Δ = topology − reference regressed on measured capability (a negative slope: the gap
+    shrinks). Descriptive since D-033: the estimate and its intervals are what the report uses; the one-sided p-values
+    are still computed. `reference`: S-CM* (D-033's), S1-pre (both arms on the items before S1's earliest overflow
+    in the session; the sensitivity analysis) or S1 (as scored: overflow fails the rest of the session). Per-point
+    gaps are reported with their intervals."""
     if reference not in REFERENCE_ARMS:
         raise ValueError(f"reference {reference!r}: one of {sorted(REFERENCE_ARMS)}")
     ref, pre = REFERENCE_ARMS[reference]
@@ -598,9 +657,9 @@ def headroom(sessions: pd.DataFrame, strategy: str, *, block: str | None = "cm",
 
 
 def tost(sessions: pd.DataFrame, capability, strategy: str, *, estimand: str = TOST_ESTIMAND, margin: float | None = None, block: str | None = "cm", high: str = "O-state", low: str = "CM0", scale: str = "logit", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, flip: bool = True, primary: str = "t", min_den: float = MIN_DEN) -> dict:
-    """G-H2b: equivalence of a strategy's effect across capability. θ = the slope on measured capability × the span
-    (the change along the fitted line from the lowest to the highest point), tested against ±margin with two one-sided
-    tests at α each (equivalent when both reject; a (1 − 2α) interval inside the margin).
+    """G-H2b: a strategy's effect across capability. θ = the slope on measured capability × the span (the change along
+    the fitted line from the lowest to the highest point) with its (1 − 2α) interval, which is what the report uses
+    (descriptive since D-033); the TOST against ±margin (two one-sided tests at α each) is still computed.
 
     estimand `R`: headroom recovered per point, linearised per session (default; scale-free, and it normalises CM0's
     overflow, which makes raw gains grow with capability even at a constant R). `gain`: s_x − s_CM0 on `scale`
@@ -649,8 +708,8 @@ def tost(sessions: pd.DataFrame, capability, strategy: str, *, estimand: str = T
 
 
 def gh2(sessions: pd.DataFrame, capability, *, strategies: Sequence[str] = ("CM-sum", "CM-todo"), estimand: str = TOST_ESTIMAND, margin: float | None = None, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t", block: str | None = "cm") -> dict:
-    """G-H2: Gap_T at every point (G-H2a), R_x per strategy present (G-H2c), and the TOST per confirmatory strategy with
-    Holm across them (G-H2b)."""
+    """G-H2: Gap_T at every point (G-H2a), R_x per strategy present (G-H2c), and θ per strategy (G-H2b; its TOST with
+    Holm across the strategies is still computed, though D-033 decides nothing on it)."""
     gaps = gap_iut(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, block=block)
     arms = sorted(set(_rows(sessions, block, "long", None).get("arm", pd.Series(dtype=str))) - {"O-state", "CM0"})
     heads = {s: headroom(sessions, s, alpha=alpha, boot=boot, seed=seed, block=block) for s in arms}
