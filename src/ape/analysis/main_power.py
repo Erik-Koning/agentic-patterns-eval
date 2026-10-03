@@ -1,0 +1,525 @@
+"""Power and type I error of every confirmatory main-study test, simulated through the analysis itself (BUILD_PLAN B4).
+
+    uv run python -m ape.analysis.main_power --reps 1000 [--seed 1] [--sigma-w 0.5 --sigma-g 0.3] [--pilot vc.json] [--out power.json]
+
+**Model** (`power/power_sim.py`'s, extended to the main study's designs). For tier r, cell c, world w, task t, arm a:
+
+    logit P(success) = x_{r,c,a} + u_w (σ_w) + g_{r,c,w,a} (σ_g) + v_t (σ_u) + e_{r,t,a} (σ_v)
+
+- u_w is the world (KB) effect, shared by every arm and both tiers; F1/F2 worlds of one seed share one registry, so
+  they share u across Study A's cells (the analysis clusters them as one, `main_stats.cluster_of`);
+- g is the world × arm effect, drawn independently per tier (conservative for the tier contrast);
+- v_t is task difficulty, shared by arms and tiers (the pairing); e is the task × arm interaction;
+- x_{r,c,a} is solved so the arm's marginal success is the scenario's target (Gauss–Hermite quadrature);
+- epochs are Bernoulli draws; S1 runs its pool (8 runs in Studies A/B, 3 elsewhere), and its task mean is the pool's
+  first 3 runs, as in `main_stats.build_tables`;
+- each S1 run submits an answer: right; or, when wrong, nothing (prob `abstain`), the task's one attractor wrong answer
+  (prob `rho`) or a wrong answer of its own. The S8 frontier is then built from these keys by `frontier` itself;
+- each sample costs arm-multiple × task multiplier × run noise (lognormal CVs); S1 runs cost 1 on average.
+
+σ defaults are the gate's priors (`pilot.py`: σ_w 0.5, σ_g 0.3, σ_u 1.5, σ_v 0.5); `sigmas_from_pilot` takes a
+`pilot.variance_components` result instead. Baselines (S1's success per cell) and cost multiples (budget priors,
+`config/budget_assumptions.yaml`) are assumptions to replace with the micro-pilot's numbers.
+
+**The real path.** Each replicate builds `main_stats.Tables` (task means, task-mean costs, S1 pools) and runs
+`main_stats.evaluate_family`, the function `main_report` runs: the same contrasts, frontier interpolation at the
+arm's realised cost, sign-flip tests, Holm and gatekeeping. `Draw.frame()` emits the same replicate as the
+loader's tidy frame, and a test checks that `build_tables` on it equals the direct `Draw.tables()`.
+
+**Scenarios** per family: its null boundary (type I error; must not exceed the nominal α beyond Monte Carlo error)
+and plausible effects (power). Sizes come from `config/run_plan.yaml` (`planned_sizes`): 100 tasks per cell over 9
+test worlds (main.build.kg: 9 test + 2 pilot worlds per KG condition), 3 epochs, the 8-run S1 pool, Sol 100.
+`min_p_table` gives the smallest p the exact world-level sign flip can attain at each test's cluster count and
+whether it reaches the test's smallest Holm level.
+"""
+
+import argparse
+import json
+import math
+import sys
+from dataclasses import asdict, dataclass, field, replace
+from functools import cache
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+from scipy.special import expit, logit
+
+from ..config import ROOT
+from . import frontier as fr
+from .main_hypotheses import HYPOTHESES, PRIMARY_TIER, STUDY_A_CELLS, STUDY_B_CELLS, TIER_CELLS, Hypothesis, confirmatory
+from .main_load import tier_of
+from .main_stats import EXACT_MAX_CLUSTERS, S1_EPOCHS, Pool, Tables, evaluate_family
+
+RUN_PLAN = ROOT / "config" / "run_plan.yaml"
+MODELS = ROOT / "config" / "models.yaml"
+TEST_WORLDS = 9  # main.build.kg: 11 worlds per KG condition = 9 test + 2 pilot (BUILD_PLAN; run_plan.yaml note)
+WORLD_SEED = 4000  # BUILD_PLAN B1's proposed main test seed base (labels only)
+# S1's success per Luna cell. F3/F7: the gate's power baselines (D-023); F1/F2/F7-100: assumptions until the
+# micro-pilot (F1-32 and F2-10 are the hard endpoints). Sol adds SOL_SHIFT on the logit scale.
+BASELINES = {"F1-2": 0.80, "F1-32": 0.40, "F2-2": 0.80, "F2-10": 0.50, "F3-5": 0.75, "F3-60": 0.60, "F7-10": 0.85, "F7-100": 0.65, "F7-1000": 0.45}
+SOL_SHIFT = 0.5
+# Mean cost per sample relative to one S1 run (budget_assumptions.yaml multipliers; S5 per-step KG ≈ S1 on tokens).
+COST = {"S1": 1.0, "S3s": 1.0, "S5": 1.0, "S7": 1.0, "S9": 1.3, "M1": 2.5, "M1s": 2.5, "M1k": 2.5, "M2": 2.5, "M7": 3.0, "S8k3": 3.0}
+_GH_X, _GH_W = np.polynomial.hermite_e.hermegauss(48)
+_GH_W = _GH_W / _GH_W.sum()
+
+
+@dataclass(frozen=True)
+class Sigmas:
+    w: float = 0.5
+    g: float = 0.3
+    u: float = 1.5
+    v: float = 0.5
+
+    @property
+    def total(self) -> float:
+        return math.sqrt(self.w**2 + self.g**2 + self.u**2 + self.v**2)
+
+
+def sigmas_from_pilot(vc: dict | None, base: Sigmas = Sigmas()) -> Sigmas:
+    """σ_w and σ_g from a `pilot.variance_components` result (the priors where it could not estimate them)."""
+    if not vc or not vc.get("estimable"):
+        return base
+    return replace(base, w=float(vc.get("sigma_w") if vc.get("sigma_w") is not None else base.w), g=float(vc.get("sigma_g") if vc.get("sigma_g") is not None else base.g))
+
+
+@dataclass(frozen=True)
+class Settings:
+    worlds: int = TEST_WORLDS
+    rho: float = 0.3  # P(a wrong S1 answer is the task's attractor)
+    abstain: float = 0.1  # P(a wrong S1 run submits nothing)
+    cost_cv_task: float = 0.3
+    cost_cv_run: float = 0.3
+    sol_shift: float = SOL_SHIFT
+    flip_reps: int = 2000  # Monte Carlo sign flips above EXACT_MAX_CLUSTERS clusters
+    exact_max: int = EXACT_MAX_CLUSTERS
+
+
+@dataclass(frozen=True)
+class S8Target:
+    """An arm whose marginal success is the population S8 frontier at `ratio` S1-run costs, plus `offset`."""
+
+    ratio: float
+    offset: float = 0.0
+
+
+# --------------------------------------------------------------------------- planned sizes
+
+
+def planned_sizes(path: Path = RUN_PLAN, models: Path = MODELS) -> dict[tuple[str, str, str], dict]:
+    """(tier, cell, arm) -> {n_tasks, epochs, plan_cell} for the main study's test phases (Studies A, B and F)."""
+    plan = yaml.safe_load(path.read_text())
+    profiles = (yaml.safe_load(models.read_text()) or {}).get("profiles", {})
+    main = plan["studies"]["main"]
+    default = main.get("profile", "main_luna")
+    out: dict = {}
+    for phase in ("study_a", "study_b", "study_f"):
+        for cell in main["phases"].get(phase) or []:
+            prof = cell.get("profile", default)
+            tier = tier_of(((profiles.get(prof) or {}).get("agent") or {}).get("model"))
+            for arm in cell["arms"]:
+                for c in cell["cells"]:
+                    out[(tier, c, arm)] = {"n_tasks": int(cell["n_tasks"]), "epochs": int(cell["epochs"]), "plan_cell": cell["id"]}
+    return out
+
+
+# --------------------------------------------------------------------------- the generative model
+
+
+def _marginal(x: float, s: float) -> float:
+    return float(_GH_W @ expit(x + s * _GH_X))
+
+
+def location(target: float, s: float) -> float:
+    """x with E[expit(x + s Z)] = target (bisection)."""
+    if not 0.0 < target < 1.0:
+        raise ValueError(f"target success {target} must lie strictly between 0 and 1")
+    lo, hi = -15.0, 15.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if _marginal(mid, s) < target else (lo, mid)
+    return (lo + hi) / 2
+
+
+def _answer_codes(rng: np.random.Generator, ok: np.ndarray, rho: float, abstain: float) -> np.ndarray:
+    """Per run: 0 right; when wrong: ABSTAIN, 1 (the task's attractor) or a code of its own (2 + run index)."""
+    T, K = ok.shape
+    r = rng.random((T, K))
+    codes = np.where(r < abstain, fr.ABSTAIN, np.where(r < abstain + (1 - abstain) * rho, 1, 2 + np.arange(K)[None, :]))
+    return np.where(ok, 0, codes)
+
+
+@cache
+def population_s8(x_s1: float, s: float, rho: float, abstain: float, K: int = 8, tasks: int = 20_000, seed: int = 7) -> tuple[float, ...]:
+    """The population S8(k) success, k = 1..K, under the model (Monte Carlo over `tasks` tasks, exact over subsets)."""
+    rng = np.random.default_rng(seed)
+    acc = np.zeros(K)
+    done = 0
+    while done < tasks:
+        n = min(2000, tasks - done)
+        p = expit(x_s1 + s * rng.standard_normal(n))
+        ok = rng.random((n, K)) < p[:, None]
+        codes = _answer_codes(rng, ok, rho, abstain)
+        ts, _ = fr.s8_success(codes, ok.astype(float))
+        acc += ts.sum(axis=0)
+        done += n
+    return tuple((acc / tasks).tolist())
+
+
+def s8_at(curve: tuple[float, ...], ratio: float) -> float:
+    """The population frontier at `ratio` S1-run costs (S8(k) costs k), linear between adjacent k."""
+    K = len(curve)
+    if ratio <= 1:
+        return curve[0]
+    if ratio >= K:
+        return curve[-1]
+    k = int(math.floor(ratio))
+    lam = ratio - k
+    return (1 - lam) * curve[k - 1] + lam * curve[k]
+
+
+def _world_id(cell: str, seed: int) -> str:
+    return f"{cell}-test-s{seed}"
+
+
+@dataclass
+class Draw:
+    """One simulated main study (the cells and arms one family needs)."""
+
+    index: dict = field(default_factory=dict)  # (tier, cell) -> MultiIndex (cell, world, task)
+    runs: dict = field(default_factory=dict)  # (tier, cell, arm) -> (T, E) success
+    cost: dict = field(default_factory=dict)  # (tier, cell, arm) -> (T, E) cost (tokens)
+    codes: dict = field(default_factory=dict)  # (tier, cell) -> (T, K) S1 answer codes
+
+    def tables(self, cluster_by: str = "kb", s1_epochs: int = S1_EPOCHS) -> Tables:
+        """Tables directly from the arrays (what `build_tables` would compute from `frame()`)."""
+        tm: dict = {}
+        cost: dict = {}
+        pools: dict = {}
+        for tier in sorted({t for t, _ in self.index}):
+            parts, cparts = [], []
+            for (t, cell), idx in self.index.items():
+                if t != tier:
+                    continue
+                arms = sorted(a for (tt, c, a) in self.runs if tt == tier and c == cell)
+                cols = {a: (self.runs[(tier, cell, a)][:, :s1_epochs] if a == "S1" else self.runs[(tier, cell, a)]).mean(axis=1) for a in arms}
+                ccols = {a: (self.cost[(tier, cell, a)][:, :s1_epochs] if a == "S1" else self.cost[(tier, cell, a)]).mean(axis=1) for a in arms}
+                parts.append(pd.DataFrame(cols, index=idx))
+                cparts.append(pd.DataFrame(ccols, index=idx))
+                if (tier, cell) in self.codes:
+                    K = self.runs[(tier, cell, "S1")].shape[1]
+                    pools[(tier, cell, None)] = Pool(idx, self.codes[(tier, cell)], self.runs[(tier, cell, "S1")], {"tokens": self.cost[(tier, cell, "S1")]}, K)
+                    for k in range(1, K + 1):
+                        pools[(tier, cell, k)] = Pool(idx, self.codes[(tier, cell)][:, :k], self.runs[(tier, cell, "S1")][:, :k], {"tokens": self.cost[(tier, cell, "S1")][:, :k]}, k)
+            df = pd.concat(parts).sort_index()
+            df.columns.name = "arm"
+            tm[tier] = df
+            cdf = pd.concat(cparts).sort_index()
+            cdf.columns.name = "arm"
+            cost[tier] = {"tokens": cdf}
+        return Tables(tm, cost, {}, {"tokens": "tokens"}, cluster_by, "sum", pools)
+
+    def frame(self) -> pd.DataFrame:
+        """The same replicate as the loader's tidy frame: one row per (sample, epoch)."""
+        rows = []
+        for (tier, cell, arm), y in self.runs.items():
+            idx = self.index[(tier, cell)]
+            T, E = y.shape
+            codes = self.codes.get((tier, cell)) if arm == "S1" else None
+            for e in range(E):
+                keys = [None if codes is None or codes[i, e] == fr.ABSTAIN else f"{idx[i][2]}:{codes[i, e]}" for i in range(T)] if codes is not None else [None] * T
+                rows.append(pd.DataFrame({
+                    "plan_cell": f"sim.{tier}", "arm": arm, "cell": cell, "world": idx.get_level_values("world"), "task": idx.get_level_values("task"),
+                    "epoch": e + 1, "tier": tier, "success": y[:, e], "answer_key": keys, "tokens": self.cost[(tier, cell, arm)][:, e],
+                    "error": False, "cap_hit": False, "delivery": "push",
+                }))  # fmt: skip
+        return pd.concat(rows, ignore_index=True)
+
+
+def simulate(spec: dict, n_tasks: dict, epochs: dict, sigmas: Sigmas, settings: Settings, rng: np.random.Generator) -> Draw:
+    """One replicate. `spec` {(tier, cell): {arm: target}} (target: marginal success or S8Target); `n_tasks`
+    {(tier, cell): n}; `epochs` {(tier, cell, arm): E} (S1: its pool size). Tiers share worlds, tasks, u and v."""
+    s = sigmas.total
+    draw = Draw()
+    seeds = WORLD_SEED + np.arange(settings.worlds)
+    u_reg = rng.normal(0, sigmas.w, settings.worlds)  # registry KB per seed (F1/F2)
+    shared: dict = {}  # cell -> (u per task, v per task, task multiplier per task)
+    for (tier, cell), arms in sorted(spec.items()):
+        n = n_tasks[(tier, cell)]
+        per_world = np.full(settings.worlds, n // settings.worlds) + (np.arange(settings.worlds) < n % settings.worlds)
+        wi = np.repeat(np.arange(settings.worlds), per_world)
+        if cell not in shared:
+            u = u_reg[wi] if cell.split("-")[0] in ("F1", "F2") else rng.normal(0, sigmas.w, settings.worlds)[wi]
+            shared[cell] = (wi, u, rng.normal(0, sigmas.u, n), rng.lognormal(-0.5 * math.log1p(settings.cost_cv_task**2), math.sqrt(math.log1p(settings.cost_cv_task**2)), n))
+        wi, u, v, tau = shared[cell]
+        worlds = [_world_id(cell, int(seeds[w])) for w in wi]
+        draw.index[(tier, cell)] = pd.MultiIndex.from_arrays([[cell] * n, worlds, [f"{w}-t{j:03d}" for j, w in enumerate(worlds)]], names=["cell", "world", "task"])
+        s1_target = arms.get("S1")
+        x_s1 = location(s1_target, s) if s1_target is not None else None
+        for arm, target in arms.items():
+            if isinstance(target, S8Target):
+                curve = population_s8(round(x_s1, 9), round(s, 9), settings.rho, settings.abstain)
+                target = s8_at(curve, target.ratio) + target.offset
+            x = location(float(target), s)
+            g = rng.normal(0, sigmas.g, settings.worlds)[wi]
+            p = expit(x + u + g + v + rng.normal(0, sigmas.v, n))
+            E = epochs[(tier, cell, arm)]
+            ok = rng.random((n, E)) < p[:, None]
+            draw.runs[(tier, cell, arm)] = ok.astype(float)
+            sd = math.sqrt(math.log1p(settings.cost_cv_run**2))
+            draw.cost[(tier, cell, arm)] = COST.get(arm, 1.0) * tau[:, None] * rng.lognormal(-0.5 * sd**2, sd, (n, E))
+            if arm == "S1":
+                draw.codes[(tier, cell)] = _answer_codes(rng, ok, settings.rho, settings.abstain)
+    return draw
+
+
+# --------------------------------------------------------------------------- scenarios per family
+
+
+def _base(tier: str, cell: str, baselines: dict, settings: Settings) -> float:
+    b = baselines[cell]
+    return b if tier == PRIMARY_TIER else float(expit(logit(b) + settings.sol_shift))
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """One simulated truth for a family: `spec` {(tier, cell): {arm: target}}; `nulls`, the members whose H0 holds
+    in it (their rejections are false: the family-wise error rate is P(any of them rejected))."""
+
+    name: str
+    spec: dict
+    nulls: tuple[str, ...] = ()
+
+    @property
+    def kind(self) -> str:
+        return "null" if self.nulls else "power"
+
+
+def scenarios(hyp_id: str, baselines: dict = BASELINES, settings: Settings = Settings()) -> list[Scenario]:
+    """Each confirmatory family's null boundary (type I) and plausible effects (power)."""
+    b = lambda c, t=PRIMARY_TIER: _base(t, c, baselines, settings)  # noqa: E731
+    L = PRIMARY_TIER
+    out = []
+    if hyp_id == "M1":
+        for d in (0.0, 0.05, 0.10, 0.15):
+            out.append(Scenario(f"M1 − S9 = {d:+.2f}", {(L, "F1-32"): {"S9": b("F1-32") + 0.05, "M1": b("F1-32") + 0.05 + d}}, ("M1.F1-32",) if d == 0 else ()))
+    elif hyp_id == "M2":
+        out.append(Scenario("global null: M1 = S1 (below the frontier)", {(L, "F1-32"): {"S1": b("F1-32"), "M1": b("F1-32")}}, ("M2.gate", "M2.frontier")))
+        for d in (0.0, 0.05, 0.10, 0.15):
+            out.append(Scenario(f"M1 − S8@M1 = {d:+.2f} (M1 > S1)", {(L, "F1-32"): {"S1": b("F1-32"), "M1": S8Target(COST["M1"], d)}}, ("M2.frontier",) if d == 0 else ()))
+    elif hyp_id in ("M3", "M5"):
+        for d in (0.03, -0.03, 0.0, 0.01):
+            if hyp_id == "M3":
+                spec = {(L, c): {"S1": b(c), "M7": S8Target(COST["M7"], d)} for c in STUDY_A_CELLS}
+                name = f"M7 − S8@M7 = {d:+.2f}"
+            else:
+                spec = {(L, c): {"M1k": b(c) + 0.03, "M2": b(c) + 0.03 + d} for c in STUDY_B_CELLS}
+                name = f"M2 − M1k = {d:+.2f}"
+            out.append(Scenario(name, spec, (f"{hyp_id}.pooled",) if abs(d) >= 0.03 else ()))
+    elif hyp_id == "K1":
+        cells = ("F7-1000", "F3-60")
+        for d in (0.0, 0.05, 0.10, 0.15):
+            out.append(Scenario(f"S5 − S3s = {d:+.2f} in both cells", {(L, c): {"S3s": b(c) + 0.05, "S5": b(c) + 0.05 + d} for c in cells}, ("K1.F7-1000", "K1.F3-60") if d == 0 else ()))
+        out.append(Scenario("S5 − S3s = +0.10 on F7-1000 only", {(L, c): {"S3s": b(c) + 0.05, "S5": b(c) + 0.05 + (0.10 if c == "F7-1000" else 0.0)} for c in cells}, ("K1.F3-60",)))
+    elif hyp_id == "K2":
+        def spec(d_int: float, d_ni: float) -> dict:
+            return {(L, c): {"S1": b(c), "M1": b(c) + 0.03, "S5": b(c) + 0.05, "M1k": b(c) + 0.08 + d_int, "M2": b(c) + 0.05 - d_ni} for c in STUDY_B_CELLS}
+
+        out.append(Scenario("interaction 0; S5 − M2 = −0.03 (both NI boundaries)", spec(0.0, -0.03), ("K2.interaction", "K2.ni-F3", "K2.ni-F7")))
+        for d in (-0.05, -0.10, -0.15):
+            out.append(Scenario(f"interaction {d:+.2f}; S5 = M2", spec(d, 0.0)))
+        out.append(Scenario("interaction 0; S5 = M2", spec(0.0, 0.0), ("K2.interaction",)))
+        out.append(Scenario("interaction −0.10; S5 − M2 = +0.03", spec(-0.10, 0.03)))
+    elif hyp_id == "H6":
+        def spec6(d: float) -> dict:
+            return {(t, c): {"S1": b(c, t), "M1": S8Target(COST["M1"], 0.05 - (d if t != L else 0.0))} for t in (L, "sol") for c in TIER_CELLS}
+
+        for d in (0.0, 0.05, 0.10, 0.15):
+            out.append(Scenario(f"payoff falls by {d:.2f} Luna → Sol in both cells", spec6(d), ("H6.F1-32", "H6.F7-100") if d == 0 else ()))
+    else:
+        raise KeyError(f"no scenarios for {hyp_id}")
+    return out
+
+
+def _sizes_for(spec: dict, sizes: dict, settings: Settings) -> tuple[dict, dict]:
+    n_tasks, epochs = {}, {}
+    for (tier, cell), arms in spec.items():
+        ns = [sizes[(tier, cell, a)]["n_tasks"] for a in arms if (tier, cell, a) in sizes]
+        n_tasks[(tier, cell)] = max(ns) if ns else 100
+        for a in arms:
+            epochs[(tier, cell, a)] = sizes.get((tier, cell, a), {}).get("epochs", 3)
+    return n_tasks, epochs
+
+
+def scale_sizes(sizes: dict, factor: float) -> dict:
+    """The planned sizes with every cell's task count multiplied by `factor` (rounded)."""
+    return {k: v | {"n_tasks": int(round(v["n_tasks"] * factor))} for k, v in sizes.items()}
+
+
+def simulate_family(hyp: Hypothesis, scenario: Scenario, reps: int, seed: int = 0, sigmas: Sigmas = Sigmas(), settings: Settings = Settings(), sizes: dict | None = None) -> dict:
+    """Over `reps` replicates of `scenario`: each member's claim rate ("supported": rejected after Holm or gatekeeping,
+    with its cost condition), the rate of any and all claims, and the family-wise false-claim rate over the scenario's
+    true nulls."""
+    sizes = planned_sizes() if sizes is None else sizes
+    n_tasks, epochs = _sizes_for(scenario.spec, sizes, settings)
+    rng = np.random.default_rng(seed)
+    hits = {m.id: 0 for m in hyp.members}
+    any_hit = all_hit = false_hit = 0
+    for r in range(reps):
+        draw = simulate(scenario.spec, n_tasks, epochs, sigmas, settings, rng)
+        res = evaluate_family(draw.tables(), hyp, reps=settings.flip_reps, seed=seed + r, ci=False, exact_max=settings.exact_max)
+        rej = {i: m.get("label") == "supported" for i, m in res["members"].items()}
+        for i, v in rej.items():
+            hits[i] += v
+        any_hit += any(rej.values())
+        all_hit += all(rej.values())
+        false_hit += any(rej[i] for i in scenario.nulls)
+    return {"reps": reps, "members": {i: h / reps for i, h in hits.items()}, "any": any_hit / reps, "all": all_hit / reps, "false_claims": false_hit / reps if scenario.nulls else None}
+
+
+def mc_se(p: float, reps: int) -> float:
+    return math.sqrt(max(p * (1 - p), 1e-12) / reps)
+
+
+def run_scenarios(hyp: Hypothesis, scens: list[Scenario], reps: int, seed: int, sigmas: Sigmas, settings: Settings, sizes: dict) -> list[dict]:
+    rows = []
+    for j, sc in enumerate(scens):
+        res = simulate_family(hyp, sc, reps, seed + j, sigmas, settings, sizes)
+        row = {"scenario": sc.name, "kind": sc.kind, "nulls": list(sc.nulls)} | res
+        if sc.nulls:
+            row["exceeds_alpha"] = res["false_claims"] > hyp.alpha + 2 * mc_se(hyp.alpha, reps)
+        row["underpowered"] = {m: p < 0.8 for m, p in res["members"].items() if m not in sc.nulls}
+        rows.append(row)
+    return rows
+
+
+def power_table(reps: int = 1000, seed: int = 20261003, sigmas: Sigmas = Sigmas(), settings: Settings = Settings(), baselines: dict = BASELINES, families: tuple[str, ...] | None = None, hypotheses=HYPOTHESES, sizes: dict | None = None) -> dict:
+    """Every confirmatory family's scenarios through `simulate_family` at the planned sizes. Flags a family-wise
+    false-claim rate above α + 2 Monte Carlo SEs (`exceeds_alpha`) and each non-null member's power below 0.8."""
+    sizes = planned_sizes() if sizes is None else sizes
+    out = {"reps": reps, "seed": seed, "sigmas": asdict(sigmas), "settings": asdict(settings), "baselines": baselines, "families": {}}
+    for i, hyp in enumerate(confirmatory(hypotheses)):
+        if families and hyp.id not in families:
+            continue
+        rows = run_scenarios(hyp, scenarios(hyp.id, baselines, settings), reps, seed + 1000 * i, sigmas, settings, sizes)
+        out["families"][hyp.id] = {"alpha": hyp.alpha, "procedure": hyp.procedure, "scenarios": rows}
+    return out
+
+
+def _members(hyp: Hypothesis, **changes) -> Hypothesis:
+    return replace(hyp, members=tuple(replace(m, **changes) for m in hyp.members))
+
+
+def alternatives(reps: int = 500, seed: int = 20261004, sigmas: Sigmas = Sigmas(), settings: Settings = Settings(), baselines: dict = BASELINES, only: tuple[str, ...] | None = None) -> list[dict]:
+    """Power under design changes that would fix the underpowered tests (each against the planned design's scenario):
+    more test worlds for the same tasks, more tasks, wider equivalence / NI margins, fewer Holm members, pooling cells.
+    `only`: run the cases whose name contains one of these strings."""
+    from .main_hypotheses import get
+
+    sizes = planned_sizes()
+    sc = {h: {s.name: s for s in scenarios(h, baselines, settings)} for h in ("M1", "M2", "M3", "M5", "K1", "K2", "H6")}
+    k1_one = replace(get("K1"), members=(get("K1").members[0],))
+    h6 = get("H6")
+    h6_pooled = replace(h6, members=(replace(h6.members[0], id="H6.pooled", cells=TIER_CELLS),))
+    k2_ni_only = replace(get("K2"), members=get("K2").members[1:])
+    k2 = get("K2")
+    k2_ni_pooled = lambda margin: replace(k2, members=(replace(k2.members[1], id="K2.ni-pooled", cells=STUDY_B_CELLS, margin=margin),))  # noqa: E731
+    cases = [
+        ("M2 frontier at +0.10, 20 worlds", get("M2"), sc["M2"]["M1 − S8@M1 = +0.10 (M1 > S1)"], replace(settings, worlds=20), sizes),
+        ("M3 at 0, margin ±6 pp", _members(get("M3"), margin=0.06), sc["M3"]["M7 − S8@M7 = +0.00"], settings, sizes),
+        ("M5 at 0, margin ±6 pp", _members(get("M5"), margin=0.06), sc["M5"]["M2 − M1k = +0.00"], settings, sizes),
+        ("K2 NI pooled over Study B, own family, margin 3 pp", k2_ni_pooled(0.03), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
+        ("K2 NI pooled over Study B, own family, margin 5 pp", k2_ni_pooled(0.05), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
+        ("M1 at +0.10, 20 worlds (same 100 tasks)", get("M1"), sc["M1"]["M1 − S9 = +0.10"], replace(settings, worlds=20), sizes),
+        ("M1 at +0.10, 200 tasks over 9 worlds", get("M1"), sc["M1"]["M1 − S9 = +0.10"], settings, scale_sizes(sizes, 2)),
+        ("M2 frontier at +0.10, 200 tasks", get("M2"), sc["M2"]["M1 − S8@M1 = +0.10 (M1 > S1)"], settings, scale_sizes(sizes, 2)),
+        ("M3 at 0, margin ±5 pp", _members(get("M3"), margin=0.05), sc["M3"]["M7 − S8@M7 = +0.00"], settings, sizes),
+        ("M3 at 0, margin ±5 pp, 20 worlds", _members(get("M3"), margin=0.05), sc["M3"]["M7 − S8@M7 = +0.00"], replace(settings, worlds=20), sizes),
+        ("M5 at 0, margin ±5 pp", _members(get("M5"), margin=0.05), sc["M5"]["M2 − M1k = +0.00"], settings, sizes),
+        ("M5 at 0, margin ±3 pp, 300 tasks per cell", get("M5"), sc["M5"]["M2 − M1k = +0.00"], settings, scale_sizes(sizes, 3)),
+        ("K1 F7-1000 alone (no Holm partner) at +0.10", k1_one, sc["K1"]["S5 − S3s = +0.10 in both cells"], settings, sizes),
+        ("K1 at +0.10, 20 worlds", get("K1"), sc["K1"]["S5 − S3s = +0.10 in both cells"], replace(settings, worlds=20), sizes),
+        ("K2 NI at S5 = M2, margin 5 pp (Holm of 3)", _members(get("K2"), margin=0.05), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
+        ("K2 NI only (interaction its own family), margin 5 pp", _members(k2_ni_only, margin=0.05), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
+        ("H6 pooled over F1-32 and F7-100 at 0.10", h6_pooled, sc["H6"]["payoff falls by 0.10 Luna → Sol in both cells"], settings, sizes),
+        ("H6 pooled at 0.10, 200 tasks per cell", h6_pooled, sc["H6"]["payoff falls by 0.10 Luna → Sol in both cells"], settings, scale_sizes(sizes, 2)),
+    ]
+    out = []
+    for i, (name, hyp, scen, st, sz) in enumerate(cases):
+        if only and not any(o in name for o in only):
+            continue
+        res = simulate_family(hyp, scen, reps, seed + 100 * i, sigmas, st, sz)
+        out.append({"case": name, "family": hyp.id, "scenario": scen.name} | res)
+    return out
+
+
+def min_p_table(settings: Settings = Settings(), hypotheses=HYPOTHESES, report_flips: int = 10_000) -> list[dict]:
+    """Per confirmatory member at the planned sizes: its cluster count, the smallest p its sign flip can attain (exact:
+    2^-G; Monte Carlo: 1 / (flips + 1) at the report's `report_flips`), the smallest level Holm may test it at (α over the
+    members of its family or gate stage; TOST: α per one-sided test), and whether that level is reachable."""
+    out = []
+    for hyp in confirmatory(hypotheses):
+        for m in hyp.members:
+            reg = {c for c in m.cells if c.split("-")[0] in ("F1", "F2")}
+            G = (settings.worlds if reg else 0) + settings.worlds * len(set(m.cells) - reg)
+            exact = G <= settings.exact_max
+            p_min = 2.0**-G if exact else 1.0 / (report_flips + 1)
+            stage = [x for x in hyp.members if x.stage == m.stage] if hyp.procedure == "serial" else list(hyp.members)
+            level = hyp.alpha / len(stage)
+            out.append({"family": hyp.id, "member": m.id, "cells": list(m.cells), "clusters": G, "exact": exact, "min_p": p_min, "smallest_holm_level": level, "reachable": p_min <= level})
+    return out
+
+
+def _fmt(x: float | None) -> str:
+    return "–" if x is None else f"{x:.3f}"
+
+
+def render(table: dict, minp: list[dict], alts: list[dict] | None = None) -> str:
+    L = [f"# Main-study power and type I error ({table['reps']} replicates per scenario)", "", f"σ: {table['sigmas']}; settings: {table['settings']}", ""]
+    L += ["Claim rates per member (rejected after Holm / gatekeeping, with any cost condition). `False claims`: P(any true-null member claimed).", ""]
+    L += ["| Family | Scenario | True nulls | Member claim rates | False claims | Flag |", "|---|---|---|---|---|---|"]
+    for fam, f in table["families"].items():
+        for r in f["scenarios"]:
+            flags = (["FALSE CLAIMS > α"] if r.get("exceeds_alpha") else []) + [f"{m} < 0.8" for m, u in r["underpowered"].items() if u]
+            L.append(f"| {fam} (α {f['alpha']}) | {r['scenario']} | {', '.join(r['nulls']) or '–'} | " + "; ".join(f"{m} {_fmt(p)}" for m, p in r["members"].items()) + f" | {_fmt(r['false_claims'])} | {', '.join(flags)} |")
+    L += ["", "| Member | Clusters | Exact | Min p | Smallest Holm level | Reachable |", "|---|---|---|---|---|---|"]
+    L += [f"| {m['member']} | {m['clusters']} | {m['exact']} | {m['min_p']:.5f} | {m['smallest_holm_level']:.4f} | {m['reachable']} |" for m in minp]
+    if alts:
+        L += ["", "## Design alternatives", "", "| Case | Scenario | Member claim rates |", "|---|---|---|"]
+        L += [f"| {a['case']} | {a['scenario']} | " + "; ".join(f"{m} {_fmt(p)}" for m, p in a["members"].items()) + " |" for a in alts]
+    return "\n".join(L) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--reps", type=int, default=1000)
+    ap.add_argument("--seed", type=int, default=20261003)
+    ap.add_argument("--sigma-w", type=float, default=None)
+    ap.add_argument("--sigma-g", type=float, default=None)
+    ap.add_argument("--pilot", type=Path, default=None, help="a pilot.variance_components result (JSON) for σ_w, σ_g")
+    ap.add_argument("--families", nargs="*", default=None)
+    ap.add_argument("--flip-reps", type=int, default=Settings().flip_reps)
+    ap.add_argument("--alternatives", type=int, default=0, metavar="REPS", help="also simulate the design alternatives at this many replicates")
+    ap.add_argument("--out", type=Path, default=None, help="write the JSON here (the markdown always goes to stdout)")
+    args = ap.parse_args(argv)
+    sig = sigmas_from_pilot(json.loads(args.pilot.read_text())) if args.pilot else Sigmas()
+    if args.sigma_w is not None:
+        sig = replace(sig, w=args.sigma_w)
+    if args.sigma_g is not None:
+        sig = replace(sig, g=args.sigma_g)
+    settings = Settings(flip_reps=args.flip_reps)
+    table = power_table(args.reps, args.seed, sig, settings, families=tuple(args.families) if args.families else None)
+    minp = min_p_table(settings=settings)
+    if args.out:  # written before the (long) alternatives, so a failure there loses nothing
+        args.out.write_text(json.dumps({"power": table, "min_p": minp, "alternatives": None}, indent=1, default=float))
+    alts = alternatives(args.alternatives, sigmas=sig, settings=settings) if args.alternatives else None
+    if args.out and alts is not None:
+        args.out.write_text(json.dumps({"power": table, "min_p": minp, "alternatives": alts}, indent=1, default=float))
+    sys.stdout.write(render(table, minp, alts))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
