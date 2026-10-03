@@ -47,17 +47,23 @@ CHOICES = (
     "vote, ties count as the expected success of a random tied answer; S8(k) costs k mean runs on every meter "
     "('sum'; wall-clock may be priced with parallel members, 'max'). An arm is matched at its realised mean cost per "
     "sample in the cell, linear between adjacent k; below one run it meets S8(1) (flagged), above S8(K) it is beyond the "
-    "frontier (named, not tested; a pooled member leaves that cell out). The live S8k3 may break ties differently.",
+    "frontier (named, not tested; a pooled member leaves that cell out). The live S8k3 votes on the same keys but breaks "
+    "ties with an LLM aggregator (earliest tied attempt as fallback), so it is compared with the post-hoc S8(3) "
+    "descriptively.",
     f"Frontier meter for the confirmatory tests: {PRIMARY_METER} (the cap-enforcement meter, brief §4.5); every meter is "
     "reported in the frontier table.",
     "Holm within each family (the gate's holm_test, stopping at the first non-rejection); M2 is serial gatekeeping (M1 > S1 "
     "first, then M1 > S8 at matched cost). Superiority, NI and `less` families at one-sided α = 0.025; TOST families at "
     "0.05 per one-sided test (the 90% interval). No correction across families (brief §7.4).",
-    "H2's NI members (S5 ≥ M2 − 3 pp, per family F3 and F7, each pooling its two cells) also need S5/M2's realised cost "
-    "ratio ≤ 0.5 with the upper end of its 95% world-clustered BCa interval ≤ 0.6 (intersection-union: no extra α).",
+    "D-033 (the owner's decision on the power findings): M3 and M5 TOST margins ±6 pp; K2's interaction is its own "
+    "family; H2's operational NI is family K2-NI, one member pooled over Study B's four cells at 5 pp (S5 ≥ M2 − 5 pp), "
+    "which also needs S5/M2's realised cost ratio ≤ 0.5 with the upper end of its 95% world-clustered BCa interval ≤ 0.6 "
+    "(intersection-union: no extra α); T1 (the brief's H6 tier clause) is descriptive; the superiority members' planned MDE is ~15 pp.",
     "H1a's and H1b's F2 clauses have no margin in the brief: reported descriptively.",
-    "H6: the brief's coordination payoff M1 − S8 (matched cost) from 3-run frontiers in both tiers, Sol minus Luna, "
-    "one-sided `less`, per cell (F1-32, F7-100) with Holm.",
+    "T1 (descriptive; the brief's H6 tier clause): the coordination payoff M1 − S8 (matched cost) from 3-run frontiers in both tiers, Sol "
+    "minus Luna on the same tasks, per cell (F1-32, F7-100) and pooled.",
+    "Cap hits of multi-agent arms come from their agents' stop reasons (B2's mas_agents: turn_cap or limit, sample "
+    "unanswered), since their turns_used is only the top agent's.",
     "Rank flips (H3): cost per solved task (mean cost / mean success, cells equally weighted, on the tasks every ranked arm "
     "ran) under tokens, cache-adjusted $ and wall-clock (Inspect working time); a family flips when its smallest pairwise "
     "Kendall τ-b is below 0.8; the rule needs 2 of the 4 families. World-clustered bootstrap support is reported.",

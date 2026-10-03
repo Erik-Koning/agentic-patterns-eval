@@ -3,7 +3,7 @@ world. `main_hypotheses` says what is tested; this module says how.
 
 **Unit and estimand.** Every contrast is a per-task value built from task-level epoch means (S1's first `s1_epochs`
 pool runs, so it has the 3 epochs every arm has): a paired difference (M1 − S9), a difference in differences (H2's
-2×2, H6's arm × tier) or an arm against the S8 frontier at that arm's realised cost (`frontier`). A member pools its
+2×2, T1's arm × tier) or an arm against the S8 frontier at that arm's realised cost (`frontier`). A member pools its
 cells with equal weights; within a cell the estimate is the mean over its paired tasks (the gate's ratio estimator).
 
 **Clusters.** Tasks within a world share their KB and its KG build (the gate's finding), so worlds are the

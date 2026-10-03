@@ -14,8 +14,30 @@ def test_planned_sizes_come_from_the_run_plan():
     s = mp.planned_sizes()
     assert s[("luna", "F1-32", "S1")] == {"n_tasks": 100, "epochs": 8, "plan_cell": "main.A.s1-pool"}
     assert s[("luna", "F1-32", "M1s")]["n_tasks"] == 50 and s[("luna", "F7-100", "S1")]["epochs"] == 3
-    assert s[("sol", "F7-100", "M2")] == {"n_tasks": 100, "epochs": 3, "plan_cell": "main.F.sol"}
+    m2 = s[("sol", "F7-100", "M2")]
+    assert (m2["n_tasks"], m2["epochs"]) == (100, 3) and m2["plan_cell"].startswith("main.F.sol")
     assert not any(v["plan_cell"].startswith("main.C.") for v in s.values()), "Study C is determinism only"
+
+
+def test_planned_sizes_follow_d034s_study_f_layout(tmp_path):
+    """D-034: M2 leaves F1-32 in Study F (main.F.luna runs S5 there; main.F.sol S1, S5, M1; main.F.sol-m2 M2 on F7-100)."""
+    import yaml
+
+    plan = yaml.safe_load(mp.RUN_PLAN.read_text())
+    plan["studies"]["main"]["phases"]["study_f"] = [
+        {"id": "main.F.luna", "arms": ["S5"], "cells": ["F1-32"], "n_tasks": 100, "epochs": 3},
+        {"id": "main.F.luna-f7-100", "arms": ["S1", "S5", "M1", "M2"], "cells": ["F7-100"], "n_tasks": 100, "epochs": 3},
+        {"id": "main.F.sol", "profile": "main_sol", "arms": ["S1", "S5", "M1"], "cells": ["F1-32", "F7-100"], "n_tasks": 100, "epochs": 3},
+        {"id": "main.F.sol-m2", "profile": "main_sol", "arms": ["M2"], "cells": ["F7-100"], "n_tasks": 100, "epochs": 3},
+    ]
+    path = tmp_path / "run_plan.yaml"
+    path.write_text(yaml.safe_dump(plan))
+    s = mp.planned_sizes(path)
+    assert s[("sol", "F7-100", "M2")]["plan_cell"] == "main.F.sol-m2"
+    assert ("sol", "F1-32", "M2") not in s and ("luna", "F1-32", "M2") not in s
+    assert s[("sol", "F1-32", "S1")]["epochs"] == 3 and s[("luna", "F1-32", "S5")]["plan_cell"] == "main.F.luna"
+    t1 = [sc for sc in mp.scenarios("T1")]
+    assert all("M2" not in arms for sc in t1 for arms in sc.spec.values()), "T1 needs no M2"
 
 
 def test_location_hits_the_target_marginal_and_s8_1_is_the_s1_marginal():
@@ -27,7 +49,7 @@ def test_location_hits_the_target_marginal_and_s8_1_is_the_s1_marginal():
     assert mp.s8_at(curve, 2.5) == pytest.approx((curve[1] + curve[2]) / 2) and mp.s8_at(curve, 0.5) == curve[0]
 
 
-@pytest.mark.parametrize("hyp_id", ["M3", "H6"])
+@pytest.mark.parametrize("hyp_id", ["M3", "T1"])
 def test_the_simulation_shortcut_equals_build_tables_on_the_same_replicate(hyp_id):
     """Draw.tables() (what the power runs use) equals build_tables(Draw.frame()) (the loader's path), down to the
     frontier and every member's p-value."""
@@ -44,7 +66,8 @@ def test_the_simulation_shortcut_equals_build_tables_on_the_same_replicate(hyp_i
         assert np.allclose(a.cost, b.cost) and np.allclose(a.success, b.success)
     pa = ms.evaluate_family(direct, get(hyp_id), reps=500, ci=False)
     pb = ms.evaluate_family(via, get(hyp_id), reps=500, ci=False)
-    assert {i: m["p"] for i, m in pa["members"].items()} == pytest.approx({i: m["p"] for i, m in pb["members"].items()})
+    for key in ("est", "p") if get(hyp_id).status == "confirmatory" else ("est",):
+        assert {i: m[key] for i, m in pa["members"].items()} == pytest.approx({i: m[key] for i, m in pb["members"].items()})
 
 
 def _se(p: float, reps: int) -> float:
@@ -75,7 +98,8 @@ def test_min_p_table_flags_what_each_cluster_count_can_reach():
     assert rows["M1.F1-32"]["clusters"] == 9 and rows["M1.F1-32"]["min_p"] == pytest.approx(1 / 512) and rows["M1.F1-32"]["reachable"]
     assert rows["M3.pooled"]["clusters"] == 9, "Study A's four cells share 9 registry KBs"
     assert rows["M5.pooled"]["clusters"] == 36 and not rows["M5.pooled"]["exact"]
-    assert rows["K2.ni-F3"]["clusters"] == 18 and rows["K2.ni-F3"]["smallest_holm_level"] == pytest.approx(0.025 / 3)
+    assert rows["K2-NI.pooled"]["clusters"] == 36 and rows["K2-NI.pooled"]["smallest_holm_level"] == pytest.approx(0.025), "D-033: its own family"
+    assert rows["K2.interaction"]["smallest_holm_level"] == pytest.approx(0.025) and not any(m.startswith("T1") for m in rows), "T1 is descriptive"
     tight = {r["member"]: r for r in mp.min_p_table(mp.Settings(worlds=5))}
     assert not tight["K1.F7-1000"]["reachable"], "5 worlds: 2^-5 = 0.031 > 0.0125"
 

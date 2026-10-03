@@ -112,17 +112,21 @@ def mechanism_contrasts(tables: Tables, alpha: float = 0.025, reps: int = REPS, 
     return out
 
 
-TIER_CONTRASTS = (("M1", "S1"), ("S5", "S1"), ("M2", "S1"), ("M2", "S5"), ("M2", "M1"))
+# Study F's arm contrasts per cell: S1, S5 and M1 run both tiers on F1-32 and F7-100; M2 only on F7-100 (D-034).
+TIER_CONTRASTS = {
+    "F1-32": (("M1", "S1"), ("S5", "S1"), ("S5", "M1")),
+    "F7-100": (("M1", "S1"), ("S5", "S1"), ("S5", "M1"), ("M2", "S1"), ("M2", "S5"), ("M2", "M1")),
+}
 
 
-def tier_contrasts(tables: Tables, cells=TIER_CELLS, contrasts=TIER_CONTRASTS, tiers=(PRIMARY_TIER, "sol"), alpha: float = 0.025, reps: int = REPS, seed: int = 0) -> list[dict]:
+def tier_contrasts(tables: Tables, cells=TIER_CELLS, contrasts: dict = TIER_CONTRASTS, tiers=(PRIMARY_TIER, "sol"), alpha: float = 0.025, reps: int = REPS, seed: int = 0) -> list[dict]:
     """Study F's arm × tier model as paired contrasts (brief §7.4): each arm contrast in each tier, and its change from
-    the first tier to the second, a difference in differences on the same tasks (descriptive; H6 tests the
-    cost-matched coordination payoff)."""
+    the first tier to the second, a difference in differences on the same tasks (descriptive; T1 reports the
+    cost-matched coordination payoff). A contrast whose arms did not run is left out."""
     base, other = tiers
     out = []
     for cell in cells:
-        for a, b in contrasts:
+        for a, b in contrasts.get(cell, ()):
             row = {"cell": cell, "contrast": f"{a} − {b}"}
             for tier in tiers:
                 r = describe(tables, (Term(a, 1, tier), Term(b, -1, tier)), (cell,), alpha=alpha, reps=reps, seed=seed)

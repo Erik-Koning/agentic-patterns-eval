@@ -48,7 +48,7 @@ from scipy.special import expit, logit
 
 from ..config import ROOT
 from . import frontier as fr
-from .main_hypotheses import HYPOTHESES, PRIMARY_TIER, STUDY_A_CELLS, STUDY_B_CELLS, TIER_CELLS, Hypothesis, confirmatory
+from .main_hypotheses import HYPOTHESES, NI_MARGIN, PRIMARY_TIER, STUDY_A_CELLS, STUDY_B_CELLS, TIER_CELLS, TOST_MARGIN, Hypothesis, confirmatory
 from .main_load import tier_of
 from .main_stats import EXACT_MAX_CLUSTERS, S1_EPOCHS, Pool, Tables, evaluate_family
 
@@ -310,34 +310,34 @@ def scenarios(hyp_id: str, baselines: dict = BASELINES, settings: Settings = Set
         for d in (0.0, 0.05, 0.10, 0.15):
             out.append(Scenario(f"M1 − S8@M1 = {d:+.2f} (M1 > S1)", {(L, "F1-32"): {"S1": b("F1-32"), "M1": S8Target(COST["M1"], d)}}, ("M2.frontier",) if d == 0 else ()))
     elif hyp_id in ("M3", "M5"):
-        for d in (0.03, -0.03, 0.0, 0.01):
+        m = TOST_MARGIN
+        for d in (m, -m, 0.0, 0.02, 0.03):
             if hyp_id == "M3":
                 spec = {(L, c): {"S1": b(c), "M7": S8Target(COST["M7"], d)} for c in STUDY_A_CELLS}
                 name = f"M7 − S8@M7 = {d:+.2f}"
             else:
                 spec = {(L, c): {"M1k": b(c) + 0.03, "M2": b(c) + 0.03 + d} for c in STUDY_B_CELLS}
                 name = f"M2 − M1k = {d:+.2f}"
-            out.append(Scenario(name, spec, (f"{hyp_id}.pooled",) if abs(d) >= 0.03 else ()))
+            out.append(Scenario(name, spec, (f"{hyp_id}.pooled",) if abs(d) >= m else ()))
     elif hyp_id == "K1":
         cells = ("F7-1000", "F3-60")
         for d in (0.0, 0.05, 0.10, 0.15):
             out.append(Scenario(f"S5 − S3s = {d:+.2f} in both cells", {(L, c): {"S3s": b(c) + 0.05, "S5": b(c) + 0.05 + d} for c in cells}, ("K1.F7-1000", "K1.F3-60") if d == 0 else ()))
         out.append(Scenario("S5 − S3s = +0.10 on F7-1000 only", {(L, c): {"S3s": b(c) + 0.05, "S5": b(c) + 0.05 + (0.10 if c == "F7-1000" else 0.0)} for c in cells}, ("K1.F3-60",)))
     elif hyp_id == "K2":
-        def spec(d_int: float, d_ni: float) -> dict:
-            return {(L, c): {"S1": b(c), "M1": b(c) + 0.03, "S5": b(c) + 0.05, "M1k": b(c) + 0.08 + d_int, "M2": b(c) + 0.05 - d_ni} for c in STUDY_B_CELLS}
-
-        out.append(Scenario("interaction 0; S5 − M2 = −0.03 (both NI boundaries)", spec(0.0, -0.03), ("K2.interaction", "K2.ni-F3", "K2.ni-F7")))
-        for d in (-0.05, -0.10, -0.15):
-            out.append(Scenario(f"interaction {d:+.2f}; S5 = M2", spec(d, 0.0)))
-        out.append(Scenario("interaction 0; S5 = M2", spec(0.0, 0.0), ("K2.interaction",)))
-        out.append(Scenario("interaction −0.10; S5 − M2 = +0.03", spec(-0.10, 0.03)))
-    elif hyp_id == "H6":
+        for d in (0.0, -0.05, -0.08, -0.10, -0.15):
+            spec = {(L, c): {"S1": b(c), "M1": b(c) + 0.03, "S5": b(c) + 0.05, "M1k": b(c) + 0.08 + d} for c in STUDY_B_CELLS}
+            out.append(Scenario(f"interaction {d:+.2f}", spec, ("K2.interaction",) if d == 0 else ()))
+    elif hyp_id == "K2-NI":
+        for d in (-NI_MARGIN, -0.02, 0.0, 0.03):
+            spec = {(L, c): {"S5": b(c) + 0.05, "M2": b(c) + 0.05 - d} for c in STUDY_B_CELLS}
+            out.append(Scenario(f"S5 − M2 = {d:+.2f}", spec, ("K2-NI.pooled",) if d <= -NI_MARGIN else ()))
+    elif hyp_id == "T1":  # descriptive since D-033: kept for the two-tier generator check (tests), not in the power table
         def spec6(d: float) -> dict:
             return {(t, c): {"S1": b(c, t), "M1": S8Target(COST["M1"], 0.05 - (d if t != L else 0.0))} for t in (L, "sol") for c in TIER_CELLS}
 
-        for d in (0.0, 0.05, 0.10, 0.15):
-            out.append(Scenario(f"payoff falls by {d:.2f} Luna → Sol in both cells", spec6(d), ("H6.F1-32", "H6.F7-100") if d == 0 else ()))
+        for d in (0.0, 0.10):
+            out.append(Scenario(f"payoff falls by {d:.2f} Luna → Sol in both cells", spec6(d)))
     else:
         raise KeyError(f"no scenarios for {hyp_id}")
     return out
@@ -413,38 +413,24 @@ def _members(hyp: Hypothesis, **changes) -> Hypothesis:
 
 
 def alternatives(reps: int = 500, seed: int = 20261004, sigmas: Sigmas = Sigmas(), settings: Settings = Settings(), baselines: dict = BASELINES, only: tuple[str, ...] | None = None) -> list[dict]:
-    """Power under design changes that would fix the underpowered tests (each against the planned design's scenario):
-    more test worlds for the same tasks, more tasks, wider equivalence / NI margins, fewer Holm members, pooling cells.
+    """Power of the superiority members (MDE ~15 pp at the planned sizes; D-033 keeps them) at +10 pp under design
+    changes: more test worlds for the same tasks, more tasks, no Holm partner. The equivalence, NI and T1 alternatives
+    that D-031 reported were settled by D-033 (TOST ±6 pp, K2-NI pooled at 5 pp, T1 descriptive).
     `only`: run the cases whose name contains one of these strings."""
     from .main_hypotheses import get
 
     sizes = planned_sizes()
-    sc = {h: {s.name: s for s in scenarios(h, baselines, settings)} for h in ("M1", "M2", "M3", "M5", "K1", "K2", "H6")}
+    sc = {h: {s.name: s for s in scenarios(h, baselines, settings)} for h in ("M1", "M2", "K1")}
     k1_one = replace(get("K1"), members=(get("K1").members[0],))
-    h6 = get("H6")
-    h6_pooled = replace(h6, members=(replace(h6.members[0], id="H6.pooled", cells=TIER_CELLS),))
-    k2_ni_only = replace(get("K2"), members=get("K2").members[1:])
-    k2 = get("K2")
-    k2_ni_pooled = lambda margin: replace(k2, members=(replace(k2.members[1], id="K2.ni-pooled", cells=STUDY_B_CELLS, margin=margin),))  # noqa: E731
+    m1, m2, k1 = sc["M1"]["M1 − S9 = +0.10"], sc["M2"]["M1 − S8@M1 = +0.10 (M1 > S1)"], sc["K1"]["S5 − S3s = +0.10 in both cells"]
     cases = [
-        ("M2 frontier at +0.10, 20 worlds", get("M2"), sc["M2"]["M1 − S8@M1 = +0.10 (M1 > S1)"], replace(settings, worlds=20), sizes),
-        ("M3 at 0, margin ±6 pp", _members(get("M3"), margin=0.06), sc["M3"]["M7 − S8@M7 = +0.00"], settings, sizes),
-        ("M5 at 0, margin ±6 pp", _members(get("M5"), margin=0.06), sc["M5"]["M2 − M1k = +0.00"], settings, sizes),
-        ("K2 NI pooled over Study B, own family, margin 3 pp", k2_ni_pooled(0.03), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
-        ("K2 NI pooled over Study B, own family, margin 5 pp", k2_ni_pooled(0.05), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
-        ("M1 at +0.10, 20 worlds (same 100 tasks)", get("M1"), sc["M1"]["M1 − S9 = +0.10"], replace(settings, worlds=20), sizes),
-        ("M1 at +0.10, 200 tasks over 9 worlds", get("M1"), sc["M1"]["M1 − S9 = +0.10"], settings, scale_sizes(sizes, 2)),
-        ("M2 frontier at +0.10, 200 tasks", get("M2"), sc["M2"]["M1 − S8@M1 = +0.10 (M1 > S1)"], settings, scale_sizes(sizes, 2)),
-        ("M3 at 0, margin ±5 pp", _members(get("M3"), margin=0.05), sc["M3"]["M7 − S8@M7 = +0.00"], settings, sizes),
-        ("M3 at 0, margin ±5 pp, 20 worlds", _members(get("M3"), margin=0.05), sc["M3"]["M7 − S8@M7 = +0.00"], replace(settings, worlds=20), sizes),
-        ("M5 at 0, margin ±5 pp", _members(get("M5"), margin=0.05), sc["M5"]["M2 − M1k = +0.00"], settings, sizes),
-        ("M5 at 0, margin ±3 pp, 300 tasks per cell", get("M5"), sc["M5"]["M2 − M1k = +0.00"], settings, scale_sizes(sizes, 3)),
-        ("K1 F7-1000 alone (no Holm partner) at +0.10", k1_one, sc["K1"]["S5 − S3s = +0.10 in both cells"], settings, sizes),
-        ("K1 at +0.10, 20 worlds", get("K1"), sc["K1"]["S5 − S3s = +0.10 in both cells"], replace(settings, worlds=20), sizes),
-        ("K2 NI at S5 = M2, margin 5 pp (Holm of 3)", _members(get("K2"), margin=0.05), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
-        ("K2 NI only (interaction its own family), margin 5 pp", _members(k2_ni_only, margin=0.05), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
-        ("H6 pooled over F1-32 and F7-100 at 0.10", h6_pooled, sc["H6"]["payoff falls by 0.10 Luna → Sol in both cells"], settings, sizes),
-        ("H6 pooled at 0.10, 200 tasks per cell", h6_pooled, sc["H6"]["payoff falls by 0.10 Luna → Sol in both cells"], settings, scale_sizes(sizes, 2)),
+        ("M1 at +0.10, 20 worlds (same 100 tasks)", get("M1"), m1, replace(settings, worlds=20), sizes),
+        ("M1 at +0.10, 200 tasks over 9 worlds", get("M1"), m1, settings, scale_sizes(sizes, 2)),
+        ("M1 at +0.10, 200 tasks over 20 worlds", get("M1"), m1, replace(settings, worlds=20), scale_sizes(sizes, 2)),
+        ("M2 frontier at +0.10, 20 worlds", get("M2"), m2, replace(settings, worlds=20), sizes),
+        ("M2 frontier at +0.10, 200 tasks", get("M2"), m2, settings, scale_sizes(sizes, 2)),
+        ("K1 F7-1000 alone (no Holm partner) at +0.10", k1_one, k1, settings, sizes),
+        ("K1 at +0.10, 20 worlds", get("K1"), k1, replace(settings, worlds=20), sizes),
     ]
     out = []
     for i, (name, hyp, scen, st, sz) in enumerate(cases):
