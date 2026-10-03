@@ -349,13 +349,13 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **K2:** the 2×2 interaction and both NI members form one Holm family; the cost clause (S5/M2 tokens, upper 95% ≤ 0.6) is an intersection-union condition.
 - **C1:** arms ranked by cost per solved task under tokens, cache-adjusted $ and working time; a family flips when its smallest pairwise Kendall τ-b is below 0.8 (Study A and B cells).
 - **Outcomes:** wall-clock = Inspect working time; a cap hit is the eval's turn cap reached without an answer, or any Inspect limit; errored samples are failures.
-- **Power** (1,000 replicates per scenario, gate priors, 9 worlds × 100 tasks, 3 epochs): type I error at or below nominal for every family. Power is below 0.8 for most members at plausible effects (see the Open table, P-1).
+- **Power** (1,000 replicates per scenario, gate priors, 9 worlds × 100 tasks, 3 epochs): type I error at or below nominal for every family. Power is below 0.8 for most members at plausible effects (decided in D-033).
 
 **D-032 (2026-10-03, BUILD_PLAN B10: Study G statistics; `src/ape/analysis/g_*.py`).** Choices made while implementing D-029. The hypothesis table (`g_hypotheses.HYPOTHESES`) is the single source PREREGISTRATION_G.md copies.
 - **Decision test:** a session-clustered t with Satterthwaite df (capped at clusters − 1; a world run at several capability points is one cluster), on weighted sums of per-point session means with epochs pooled first. The exact wild sign-flip (null-restricted residuals) is reported alongside. The t is primary here, unlike the main study, because 4 Astra sessions give a sign-flip floor of p = 0.0625; its type I error is 0.023–0.027 at nominal 0.025 in 10,000 simulated studies.
 - **Ratios** (isolation share ≥ 0.5, recovery ≥ 0.8) are tested as linear forms; the ratios get delta, Fieller and bootstrap intervals, and are not estimated when their denominator is ≤ 2 pp.
 - **Estimands:** session outcome = item success rate (binary whole-session success is reported with pass^k). G-H2's equivalence estimand is R_x (headroom recovered), not the logit gain, which drifts under a constant R. Degradation slopes exclude overflowed items. Cost meters exclude probes and include management calls.
-- **Power** at the planned sizes: type I at nominal everywhere; G-H1, G-H2b and G-H3b are far below 0.8 (see the Open table, P-2).
+- **Power** at the planned sizes: type I at nominal everywhere; G-H1, G-H2b and G-H3b are far below 0.8 (decided in D-033).
 
 **D-033 (2026-10-03, user, on the power findings P-1 and P-2).** What the main study and Study G claim, given the power simulations of D-031 and D-032.
 - **Main study:**
