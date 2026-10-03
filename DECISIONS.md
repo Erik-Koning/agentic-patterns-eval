@@ -404,6 +404,8 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Error handling:** bad content from a management call is logged and handled; provider exceptions on summary and extraction calls propagate, so the sample retries and resumes; only native compaction errors are absorbed.
 - **Knobs share one namespace** (`APE_CM_PRUNE_KEEP` applies to CM-prune and S-CM*), so each tuning env group runs only its own arm.
 
+**D-038 (2026-10-03, amends D-032's df rule; Study G statistics after D-033).** With the D-033 topology design, all 16 Luna worlds run at both Luna points but only 8 also at Sol, so worlds contribute unequally, and capping the t's df at clusters − 1 let G-H3's tests reject at 0.028–0.030 against a nominal 0.025 (10,000 simulated studies). The df are now capped at G_eff − 1, the model-based effective number of clusters (≈ 12.6 here), and the variance uses exactly unbiased cross-point terms for partially shared worlds; both reduce to the old rule for balanced designs. Type I is back at 0.026–0.027. Power at the D-033 design: G-H2a 0.99; G-H3a 0.997 at an isolation share of 0.75 (0.90 at 0.70); G-H3b 0.69 at recovery 0.95 and cost ratio 0.45 (24 Luna sessions per point would give 0.76 for about +$51). G-H1 (descriptive): its interval excludes 0 in 26% of studies under full convergence.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
