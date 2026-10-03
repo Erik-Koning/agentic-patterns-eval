@@ -22,8 +22,11 @@
 
 budget:
   total_usd: 5000
-  allocations: {gate: 700, main: 1000, study_g: 2700}   # FX-5 targets, conservative scenario
-  contingency_usd: 600
+  # Per-study ceilings the orchestrators' budget guards enforce (with the program total). D-035 (2026-10-03): set to the
+  # right-sized plan's conservative projection plus headroom (gate 214, main 1,013, study_g 3,483 -> 4,710); were the
+  # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells.
+  allocations: {gate: 300, main: 1100, study_g: 3600}
+  contingency_usd: 280
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
   # ends with limit "cost" and counts as a cap hit (PC5). Only applied when every model of the run is priced.

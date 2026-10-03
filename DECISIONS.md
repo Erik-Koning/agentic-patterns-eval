@@ -380,6 +380,11 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Worker failures** return a marked result to the orchestrator and are recorded; the sample continues (single-agent arms error on a push compile failure). B12's smoke checks `mas_agents[*].error`.
 - One private Inspect API is used (`inspect_ai.util._store.init_subtask_store`, pinned at 0.3.273).
 
+**D-035 (2026-10-03, budget after the build's measurements).** The plan is priced with what B2 and B8 measured, and the per-study allocations now match it.
+- **Measured overheads:** M7 at 5× a single agent (D-034); CM-todo, CM-reset and S-CM* at 0.20, 0.25 and 0.25 management calls per agent call (B8, gold and naive mocks, `todo_write` traffic included; were 0.15, 0.05, 0.15). CM-sum and CM-native keep their priors (0.08, 0.05), which exceed the mock rates; their T_abs triggers fire more often with real agents, so the micro-pilot recalibrates them.
+- **Allocations** (`run_plan.yaml` `budget.allocations`, enforced by both orchestrators' budget guards): gate 300, main 1,100, Study G 3,600 (were the FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells). Contingency target 280.
+- **Totals:** $4,710 conservative / $3,160 expected (gate 214, main 1,013, Study G 3,483); contingency $290.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

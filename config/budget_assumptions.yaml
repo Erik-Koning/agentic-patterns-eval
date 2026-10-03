@@ -151,12 +151,12 @@ study_g:
     CM-prune: {view: managed, overhead: 0.0, cache: session_managed}
     CM-trim: {view: managed, overhead: 0.0, cache: session_managed}
     CM-sum: {view: managed, overhead: 0.08, cache: session_managed}
-    CM-todo: {view: managed, overhead: 0.15, cache: session_managed}
-    CM-reset: {view: managed, overhead: 0.05, cache: session_managed}
+    CM-todo: {view: managed, overhead: 0.20, cache: session_managed}   # [measured, B8 gold/naive mock incl. todo_write traffic ~0.20; was 0.15]
+    CM-reset: {view: managed, overhead: 0.25, cache: session_managed}  # [measured, B8: ~0.23 incl. todo traffic, handoffs every 5 items; was 0.05]
     CM-native: {view: managed, overhead: 0.05, cache: session_managed}
     O-state: {view: oracle, overhead: 0.0, cache: session_oracle}
     S1: {view: full, overhead: 0.0, cache: session_full}               # topology block: single agent
-    S-CM*: {view: managed, overhead: 0.15, cache: session_managed}     # best single-agent stack (dev)
+    S-CM*: {view: managed, overhead: 0.25, cache: session_managed}     # best single-agent stack (dev); default stack prune+todo+reset [measured like CM-reset, B8; was 0.15]
     M1: {view: managed, overhead: 0.0, multiplier: 2.5, cache: multi_agent}
     M2: {view: managed, overhead: 0.0, multiplier: 2.5, cache: multi_agent}
 
