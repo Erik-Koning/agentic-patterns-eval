@@ -12,8 +12,8 @@ Conventions (D-029, D-032, D-033; CONTEXT_MANAGEMENT_AUDIT §2, §7; HYPOTHESES 
 - **One-sided α = 0.025 per family** (the gate's convention: the reported intervals are two-sided 95%); fixed-sequence
   gatekeeping where a row has `step`.
 - **Decision test** (D-032): the session-clustered t on a linear combination of per-point session means
-  (Welch–Satterthwaite df, capped at clusters − 1 when worlds are shared across points), the gate's validated
-  interval (D-023). The exact session-level sign-flip (a wild sign-flip with null-restricted residuals for contrasts
+  (Welch–Satterthwaite df, capped at G_eff − 1, the effective number of clusters, when worlds are shared across
+  points: D-038), the gate's validated interval (D-023). The exact session-level sign-flip (a wild sign-flip with null-restricted residuals for contrasts
   across points) is reported beside it, with its minimum attainable p.
 - **Confirmatory rows (D-033):** G-H2a, and G-H3-pre → G-H3a → G-H3b. **G-H1 and G-H2b are descriptive**: no affordable
   design gives them useful power (G-H1 0.12–0.44, G-H2b's TOST 0.01 at ±0.20 R), so each is reported as an estimate
@@ -308,4 +308,15 @@ def markdown() -> str:
         margin = "–" if h.margin is None else f"{h.margin:g} ({h.margin_units})"
         step = f" ({h.step})" if h.step else ""
         rows.append(f"| {h.id} | {h.role} | {h.family}{step} | {', '.join(h.arms)} | {h.estimand} | {h.test} | {margin} |")
+    return "\n".join(rows) + "\n"
+
+
+def design_markdown() -> str:
+    """Each row's plan cells, level and planned power or precision (its `notes`, from g_power), as
+    PREREGISTRATION_G.md shows them beside `markdown()`."""
+    rows = ["| ID | Plan cells | One-sided α | Planned power and precision |", "|---|---|---|---|"]
+    for h in HYPOTHESES:
+        level = f"{h.alpha:g}" if h.role == "confirmatory" else "– (descriptive)"
+        notes = (h.notes or "–").replace("|", "\\|")
+        rows.append(f"| {h.id} | {', '.join(h.cells)} | {level} | {notes} |")
     return "\n".join(rows) + "\n"
