@@ -1,6 +1,6 @@
 # Audit: adding context management to the study
 
-**Status:** audit and design, 2026-09-30. Nothing here is implemented yet.
+**Status:** audit and design, 2026-09-30. **Implemented and superseded where they differ (2026-10-03)** by `PREREGISTRATION_G.md` and DECISIONS D-029 (design-based inference), D-030 (session runner), D-032/D-038 (statistics), D-033 (G-H1 and the G-H2 TOST are descriptive; 16 Luna topology sessions plus a Luna-low point), D-037 (CM arms; CM-notes and the fixed-summariser sensitivity are not planned), D-040 (topology arms in sessions) and D-042 (T_abs fixed at 20K). Read this file for the rationale, the pre-registration for what runs.
 **Scope:** how to add compaction, pruning, external state (notes/todos), task extraction, restarts, reflection, offline consolidation and subagent isolation to the Inspect harness. The aim is to measure them as performance changes and to test whether their value survives stronger models (the "bitter lesson" question).
 
 Mechanism names are used throughout. The motivating analogies map to them as follows.
