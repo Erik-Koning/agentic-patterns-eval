@@ -6,19 +6,30 @@ this loader reads each log once and reuses the gate's per-sample pieces (`pipeli
 - **The turn cap from the eval's metadata** (`max_turns`, which `tasks.main` scales with the registry knob: 44 turns
   at F1-32). The gate's loader takes it from the APE_MAX_TURNS knob (default 12), which would flag every F1-32
   sample that used more than 12 turns without answering as a cap hit.
-- **The four cost meters** (brief §6.2), per sample, over every Inspect-metered call (agent and roles, subagents
-  included): `tokens` (input incl. cache reads and writes, plus output incl. reasoning), `calls` (completed model
-  events), `usd` (cache-adjusted: Inspect's own cost from the model-cost config, `config/model_costs.yaml`) and
-  `wall` (Inspect working time, which leaves out rate-limit and shared-resource waits; `total_time` is kept too).
-  `usd_list` prices every input token at the list input price (no cache discount), from the same table.
+- **The four cost meters** (brief §6.2), per sample, over every Inspect-metered call (agent and roles, every agent
+  of a multi-agent arm included: B2 runs its agents as spans of the one sample): `tokens` (input incl. cache reads
+  and writes, plus output incl. reasoning), `calls` (completed model events, cache hits left out as Inspect leaves
+  them out of the usage; B2's `mas_accounting` counts the same events), `usd` (cache-adjusted: Inspect's own cost from
+  the model-cost config, `config/model_costs.yaml`) and `wall` (Inspect working time, which leaves out rate-limit and
+  shared-resource waits; `total_time` is kept too). `usd_list` prices every input token at the list input price (no
+  cache discount), from the same table.
 - **A canonical answer key** (`answer_key`): the part of the submitted answer the scorer reads, normalised exactly
   as `scorers.success.is_success` normalises it, as a short digest. Equal keys therefore always score alike, which
   the post-hoc S8 vote needs (`frontier`). F1: the normalised ratings; F2: the final supplier; F7: the whole answer
-  with `deadline_days` as an int; F3: the end state (the sorted mutating calls, possibly none); F5: the folded
-  answer. None when the run submitted nothing or errored (an abstention in the vote).
+  with `deadline_days` as an int; F3: the end state (the sorted mutating calls; an F3 run that neither finished nor
+  made a call abstains, as in the live S8k3 vote, `agent.multi.primitives.answer_key`); F5: the folded answer. None
+  when the run submitted nothing or errored (an abstention in the vote). Multi-agent arms write the answer and the
+  end state to the sample's own store (`env_answer`, `env_calls`; S8k3: its winning attempt's), so one rule serves
+  every arm.
 - **The tier** from the eval's model and effort (`tier` = "luna", "sol", ...; `effort`; `profile` = "luna-high").
-- `multi_agent` from the eval metadata, and per-agent accounting from the sample store when an arm records it
-  (`PER_AGENT_KEYS`; surfaced as `per_agent`, never required).
+- **Multi-agent records** (BUILD_PLAN B2, `agent/multi/core.py`): `multi_agent` from the eval metadata; the per-agent
+  accounting `mas_accounting` (surfaced as `per_agent`, with its `realized_parallelism`), the switch vector
+  `mas_switches` (`switches`), and each agent's stop reason from `mas_agents[*].stop` (done | text | turn_cap | limit |
+  interrupted | error), counted in `agent_stops`. None of them is required.
+- **Cap hits** (`cap_hit_of`): a sample cut short by an Inspect limit; or, unanswered, a single agent at the eval's turn
+  cap, or (multi-agent) any agent stopped at its turn cap or a limit. A multi-agent sample's `turns_used` is only its
+  top agent's, so its own agents' stop reasons decide; `agent_cap_hits` counts capped agents even when the sample
+  answered (a diagnostic, not a cap hit).
 
 Errored samples are failures (success 0, `error` True, `error_label` "harness_error"), as in the gate.
 """
@@ -36,14 +47,18 @@ from ..worlds.env_tools import ANSWER, CALLS
 from .gate_stats import DEFAULT_MAX_TURNS, pipeline_miss
 
 METERS = {"tokens": "tokens", "calls": "calls", "usd": "usd", "wall": "wall"}  # meter -> tidy-frame column
-# Sample-store keys a multi-agent arm may use for per-agent accounting (BUILD_PLAN B2); the first present is surfaced.
-PER_AGENT_KEYS = ("agent_usage", "agent_accounting", "per_agent", "agents")
+# Sample-store keys of a multi-agent arm's records (BUILD_PLAN B2, agent/multi/core.py `Team.write`).
+PER_AGENT_KEYS = ("mas_accounting",)  # per-agent accounting; the first present is surfaced as `per_agent`
+SWITCHES_KEY = "mas_switches"
+AGENTS_KEY = "mas_agents"  # [{id, role, parent, turns, stop, ...}]
+CAPPED_STOPS = ("turn_cap", "limit")  # an agent's loop ended at its turn cap or on a sample limit
 COLUMNS = (
     "plan_cell", "arm", "family", "level", "cell", "world", "task", "epoch", "tier", "model", "effort", "profile",
     "success", "error", "error_label", "answered", "answer_key", "turns_used", "max_turns", "cap_hit", "limit_hit",
     "tokens", "tokens_input", "tokens_cache_read", "tokens_cache_write", "tokens_output", "tokens_reasoning", "calls",
     "usd", "usd_list", "cost_usd", "wall", "total_time", "working_time", "multi_agent", "delivery", "split",
-    "partial_credit", "evidence_recall", "pipeline_miss", "per_agent", "log_file",
+    "partial_credit", "evidence_recall", "pipeline_miss", "per_agent", "switches", "agents", "agent_stops",
+    "agent_cap_hits", "realized_parallelism", "log_file",
 )  # fmt: skip
 
 
@@ -52,8 +67,11 @@ def _digest(obj) -> str:
 
 
 def canonical_answer(family: str, answer: dict | None, calls: list | None):
-    """What `is_success` compares, normalised as it normalises; None for no answer (F3: the end state always exists)."""
+    """What `is_success` compares, normalised as it normalises; None for no answer. F3's answer is its end state once
+    the run finished or made a call (an F3 run with neither abstains, as in the live S8k3 vote)."""
     if family == "F3":
+        if answer is None and not calls:
+            return None
         return sorted(json.dumps(c, sort_keys=True) for c in (calls or []))
     if not isinstance(answer, dict):
         return None
@@ -107,11 +125,37 @@ def _list_usd(model_usage: dict, prices: dict) -> float:
 
 
 def _model_calls(sample) -> float:
-    """Completed model generations in the sample (every role and subagent), or NaN when the log kept no events."""
+    """Completed model generations in the sample (every role and agent), cache hits left out, or NaN when the log kept
+    no events."""
     events = sample.events or []
     if not events:
         return float("nan")
-    return float(sum(1 for e in events if e.event == "model" and not getattr(e, "pending", False) and e.error is None and e.output is not None))
+    return float(sum(1 for e in events if e.event == "model" and not getattr(e, "pending", False) and getattr(e, "cache", None) != "read" and e.error is None and e.output is not None))
+
+
+def cap_hit_of(errored: bool, limit: str | None, answered: bool, turns: int | None, max_turns: int, agents: list | None = None) -> bool:
+    """Whether a sample was cut short (module docstring): an Inspect sample limit; or, unanswered, the single agent at
+    the eval's turn cap, or any agent of a multi-agent arm (`mas_agents`) stopped at its turn cap or a limit. An errored
+    sample is a harness error, not a cap hit."""
+    if errored:
+        return False
+    if limit is not None:
+        return True
+    if answered:
+        return False
+    if agents:
+        return any(isinstance(a, dict) and a.get("stop") in CAPPED_STOPS for a in agents)
+    return turns is not None and turns >= max_turns
+
+
+def _agent_stops(agents: list | None) -> dict | None:
+    if not agents:
+        return None
+    out: dict[str, int] = {}
+    for a in agents:
+        stop = str(a.get("stop")) if isinstance(a, dict) else "unknown"
+        out[stop] = out.get(stop, 0) + 1
+    return out
 
 
 def load_main(log_files: Sequence[str | Path], plan_cell: str | None = None, require_cost: bool = True, store_keys: Sequence[str] = PER_AGENT_KEYS) -> pd.DataFrame:
@@ -155,11 +199,13 @@ def load_main(log_files: Sequence[str | Path], plan_cell: str | None = None, req
                 except (TypeError, ValueError):
                     answer = None
             success = 1.0 if ts is not None and ts.value == "C" else 0.0
-            answered = answer is not None if family != "F3" else not errored
+            answered = bool(ts_md.get("answered", answer is not None))  # F3: `finish` records the answer
             turns = ts_md.get("turns_used", store.get("turns_used"))
             ea = scores.get("error_analysis")
             ev = scores.get("delivered_evidence")
             meters = _usage(usage)
+            per_agent = next((store[k] for k in store_keys if k in store), None)
+            agents = store.get(AGENTS_KEY) if isinstance(store.get(AGENTS_KEY), list) else None
             rows.append(
                 {
                     "plan_cell": plan_cell or emd.get("plan_cell"),
@@ -181,7 +227,7 @@ def load_main(log_files: Sequence[str | Path], plan_cell: str | None = None, req
                     "answer_key": None if errored else answer_key(family, answer, calls),
                     "turns_used": turns,
                     "max_turns": max_turns,
-                    "cap_hit": (not errored) and ((turns is not None and turns >= max_turns and not ts_md.get("answered", answered)) or s.limit is not None),
+                    "cap_hit": cap_hit_of(errored, s.limit.type if s.limit is not None else None, answered, turns, max_turns, agents),
                     "limit_hit": s.limit.type if s.limit is not None else None,
                     **meters,
                     "calls": _model_calls(s),
@@ -196,7 +242,12 @@ def load_main(log_files: Sequence[str | Path], plan_cell: str | None = None, req
                     "partial_credit": ea.value.get("partial_credit", np.nan) if ea is not None and isinstance(ea.value, dict) else np.nan,
                     "evidence_recall": ev.value.get("evidence_recall", np.nan) if ev is not None and isinstance(ev.value, dict) else np.nan,
                     "pipeline_miss": None if success or errored else pipeline_miss(store.get("compile_log", []), store.get("step_log", []), md.get("task") or {}),
-                    "per_agent": next((store[k] for k in store_keys if k in store), None),
+                    "per_agent": per_agent,
+                    "switches": store.get(SWITCHES_KEY),
+                    "agents": len(agents) if agents else None,
+                    "agent_stops": _agent_stops(agents),
+                    "agent_cap_hits": sum(1 for a in agents if isinstance(a, dict) and a.get("stop") in CAPPED_STOPS) if agents else None,
+                    "realized_parallelism": per_agent.get("realized_parallelism") if isinstance(per_agent, dict) else None,
                     "log_file": str(f),
                 }
             )

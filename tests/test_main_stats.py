@@ -10,7 +10,7 @@ import pytest
 from ape.analysis import gate_stats
 from ape.analysis import main_power as mp
 from ape.analysis import main_stats as ms
-from ape.analysis.main_hypotheses import Hypothesis, Member, Term, get
+from ape.analysis.main_hypotheses import NI_MARGIN, TOST_MARGIN, Hypothesis, Member, Term, get
 
 ALPHA = 0.025
 
@@ -78,17 +78,21 @@ def test_shifted_p_is_monotone_in_the_null_and_the_inverted_bounds_sit_at_alpha(
 # ---------------------------------------------------------------- margins: exact accept / reject at the boundary
 
 
-@pytest.mark.parametrize("d,tost_ok,ni_ok", [(0.029, True, True), (0.031, False, True), (-0.029, True, True), (-0.031, False, False), (0.0, True, True)])
-def test_tost_and_ni_accept_just_inside_and_reject_just_outside_the_margin(d, tost_ok, ni_ok):
-    """Every world has A − B = d: each shifted test has p = 2^-9 when d is inside, 1 when outside."""
-    t = _tables(_tm({"F7-10": _const(d)}))
+@pytest.mark.parametrize("tost_m,ni_m", [(0.03, 0.03), (TOST_MARGIN, NI_MARGIN)], ids=["3pp", "d033"])
+@pytest.mark.parametrize("d", [-1.001, -0.999, -0.5, 0.0, 0.999, 1.001])
+def test_tost_and_ni_accept_just_inside_and_reject_just_outside_the_margin(tost_m, ni_m, d):
+    """Every world has A − B = Δ: each shifted test has p = 2^-9 when Δ is inside, 1 when outside. Δ = d × margin, at
+    the brief's 3 pp and at D-033's margins (TOST ±6 pp, NI 5 pp)."""
     terms = (Term("A"), Term("B", -1))
-    tost = ms.evaluate_family(t, Hypothesis("T", "test", "", "confirmatory", (Member("T.x", terms, ("F7-10",), "tost", 0.03),), alpha=0.05), reps=500)
-    ni = ms.evaluate_family(t, Hypothesis("N", "test", "", "confirmatory", (Member("N.x", terms, ("F7-10",), "ni", 0.03),), alpha=ALPHA), reps=500)
-    assert (tost["members"]["T.x"]["label"] == "supported") is tost_ok
-    assert (ni["members"]["N.x"]["label"] == "supported") is ni_ok
-    m = tost["members"]["T.x"]
-    assert (m["ci"][0] > -0.03 and m["ci"][1] < 0.03) is tost_ok, "the inverted interval agrees with the TOST decision"
+    for kind, m in (("tost", tost_m), ("ni", ni_m)):
+        delta = d * m
+        t = _tables(_tm({"F7-10": _const(delta)}))
+        res = ms.evaluate_family(t, Hypothesis("T", "test", "", "confirmatory", (Member("T.x", terms, ("F7-10",), kind, m),), alpha=0.05 if kind == "tost" else ALPHA), reps=500)
+        member = res["members"]["T.x"]
+        inside = abs(delta) < m if kind == "tost" else delta > -m
+        assert (member["label"] == "supported") is inside, (kind, m, delta)
+        if kind == "tost":
+            assert (member["ci"][0] > -m and member["ci"][1] < m) is inside, "the inverted interval agrees with the TOST decision"
 
 
 def test_cluster_t_reproduces_the_gates_on_nested_clusters():

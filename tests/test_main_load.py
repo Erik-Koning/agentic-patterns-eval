@@ -1,6 +1,7 @@
 """The main-study loader (analysis/main_load.py) on real Inspect logs from offline mock runs, and its answer keys."""
 
 import asyncio
+import itertools
 import json
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from inspect_ai import eval as inspect_eval
 from inspect_ai.model import ChatMessageTool, ModelOutput, get_model
 
 from ape.analysis.gate_stats import load_results
-from ape.analysis.main_load import COLUMNS, answer_key, load_main, load_plan_cells, tier_of
+from ape.analysis.main_load import COLUMNS, answer_key, cap_hit_of, load_main, load_plan_cells, tier_of
 from ape.build import build
 from ape.tasks.main import main_study
 from ape.worlds.spec import World
@@ -32,10 +33,59 @@ def test_answer_keys_follow_the_scorers_normalisation():
     assert answer_key("F7", {"action": "a", "deadline_days": "5"}, None) == answer_key("F7", {"action": "a", "deadline_days": 5}, None)
     calls = [{"tool": "x", "args": {"a": 1}}, {"tool": "y", "args": {}}]
     assert answer_key("F3", None, calls) == answer_key("F3", None, calls[::-1]), "F3's end state ignores call order"
-    assert answer_key("F3", None, []) is not None, "an empty F3 end state is still an answer"
+    assert answer_key("F3", {"finished": True}, []) is not None, "a finished F3 run with no calls is an answer"
+    assert answer_key("F3", None, []) is None, "an F3 run that neither finished nor called abstains (as in the live S8k3 vote)"
     assert answer_key("F1", None, None) is None and answer_key("F7", "not a dict", None) is None
     assert answer_key("F5", {"answer": "the Kraków office"}, None) == answer_key("F5", {"answer": "Krakow, Poland"}, None)
     assert answer_key("F1", {"ratings": {}}, None) != answer_key("F2", {"final": ""}, None), "keys are per family"
+
+
+def test_the_main_loaders_answer_key_agrees_with_the_live_s8k3_vote():
+    """Post-hoc S8 and the live S8k3 (agent/multi) must group answers alike: equal keys there, equal keys here."""
+    from ape.agent.multi.primitives import answer_key as live_key
+    from ape.worlds.spec import TaskItem
+
+    cases = {
+        "F1": [{"ratings": {"SUP-1": "approved"}}, {"ratings": {"sup-1": "Approved "}}, {"ratings": {"SUP-1": "preferred"}}, None],
+        "F2": [{"final": "SUP-2", "chain": ["a"]}, {"final": "sup-2 ", "chain": []}, {"final": "SUP-3"}, None],
+        "F7": [{"action": "deny", "deadline_days": "3"}, {"action": "deny", "deadline_days": 3}, {"action": "approve", "deadline_days": 3}, None],
+    }
+    for fam, answers in cases.items():
+        task = TaskItem(id="t", world_id="w", family=fam, level="2", prompt="", gold={}, gold_fact_ids=[], answer_tool="x")
+        for a, b in itertools.combinations(answers, 2):
+            assert (answer_key(fam, a, []) == answer_key(fam, b, [])) == (live_key(task, a, []) == live_key(task, b, [])), (fam, a, b)
+    f3 = TaskItem(id="t", world_id="w", family="F3", level="5", prompt="", gold={}, gold_fact_ids=[], answer_tool="finish")
+    x, y = {"tool": "x", "args": {"o": 1}}, {"tool": "y", "args": {}}
+    for a, b in itertools.combinations([(None, [x, y]), (None, [y, x]), ({}, []), (None, []), ({}, [x])], 2):
+        assert (answer_key("F3", *a) == answer_key("F3", *b)) == (live_key(f3, *a) == live_key(f3, *b)), (a, b)
+        assert (answer_key("F3", *a) is None) == (live_key(f3, *a) is None)
+
+
+def test_cap_hits_read_multi_agent_stop_reasons():
+    capped = [{"id": "orch", "stop": "text"}, {"id": "w1", "stop": "turn_cap"}]
+    clean = [{"id": "orch", "stop": "done"}, {"id": "w1", "stop": "done"}]
+    assert cap_hit_of(False, None, False, 3, 12, capped), "a worker at its cap, sample unanswered: cut short"
+    assert not cap_hit_of(False, None, True, 3, 12, capped), "answered anyway: not a cap hit (agent_cap_hits keeps it)"
+    assert not cap_hit_of(False, None, False, 30, 12, clean), "the top agent's turns_used does not decide for a team"
+    assert cap_hit_of(False, None, False, 12, 12, None) and not cap_hit_of(False, None, False, 11, 12, None)
+    assert cap_hit_of(False, "token", True, 1, 12, clean) and not cap_hit_of(True, "token", False, 12, 12, capped)
+
+
+def test_load_main_reads_a_multi_agent_log(offline_env):
+    """B2's M1 on F1-2 with its gold mock: the team's records reach the frame, every agent's calls count."""
+    from ape.llm.mock_multi import GoldMulti
+
+    asyncio.run(build("dev", "F1", ["2"], n_worlds=1, n_tasks=2, relational=True, embed=True))
+    gold = GoldMulti(offline_env / "worlds")
+    log = inspect_eval(main_study(family="F1", level="2", split="dev", arm="M1"), model=get_model(MODEL, custom_outputs=gold, memoize=False), model_roles={"kg": get_model(MODEL, custom_outputs=gold.kg, memoize=False)}, log_dir=str(offline_env / "logs"), display="none")[0]
+    assert log.status == "success", log.error
+    df = load_main([log.location], require_cost=False)
+    assert df["multi_agent"].all() and (df["success"] == 1.0).all() and df["answer_key"].notna().all() and not df["cap_hit"].any()
+    for (_, row), s in zip(df.iterrows(), log.samples, strict=True):
+        acc = s.store["mas_accounting"]
+        assert row["per_agent"] == acc and row["calls"] == acc["totals"]["calls"] and row["tokens"] == acc["totals"]["total_tokens"]
+        assert row["agents"] == len(s.store["mas_agents"]) >= 2 and row["agent_stops"] and row["agent_cap_hits"] == 0
+        assert row["switches"] == s.store["mas_switches"] and row["realized_parallelism"] == acc["realized_parallelism"]
 
 
 def test_tier_from_the_eval_model():

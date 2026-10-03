@@ -8,10 +8,12 @@ part of the answer the scorer reads, normalised as it normalises, so equal keys 
   That is the U-statistic of a k-run ensemble drawn from the task's run distribution, so it is unbiased for the
   success of a fresh k-run ensemble, and it uses every run (no resampling noise).
 - **Ties** count as the expected success of a uniform random choice among the tied answers. No LLM aggregator is
-  run post hoc. The live S8k3 arm (Study C) aggregates with its own rule and may break ties differently, so the
-  live arm and the post-hoc S8(3) are not interchangeable; the report compares them descriptively.
-- **Abstentions.** A run without an answer (cap hit, harness error; key None, coded -1) casts no vote; it still
-  costs. When every run of a subset abstains, the ensemble fails.
+  run post hoc. The live S8k3 arm (Study C, `agent/multi`) votes on the same keys but breaks ties with an LLM
+  aggregator (the earliest tied attempt as its fallback), and its aggregator call is part of its cost, so the live
+  arm and the post-hoc S8(3) are not interchangeable; the report compares them descriptively (`s8k3_check`).
+- **Abstentions.** A run without an answer (cap hit, harness error; an F3 run that neither finished nor made a call;
+  key None, coded -1) casts no vote, as in the live arm; it still costs. When every run of a subset abstains, the
+  ensemble fails.
 - **Cost.** S8(k)'s realised cost is the sum of its runs' costs, per meter, so its expected cost over the subsets is
   exactly k times the task's mean run cost. For wall-clock, `aggregate="max"` prices members run in parallel (the
   expected maximum over a random k-subset, from order statistics) instead of serially (`"sum"`, the default).
