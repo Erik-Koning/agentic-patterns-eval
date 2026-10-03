@@ -109,8 +109,8 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | B9 | ✅ merged 83172ed | D-040 (incl. a B7 checkpoint fix) |
 | Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
 | B5 | ✅ merged 2d29cb4 | D-044 |
-| B11 | PREREGISTRATION_G.md ✅ merged d04e2d4 (D-042); G tuning grid + probe extension 🔄 building | |
-| B12 | ⏳ waiting on dependencies | |
+| B11 | ✅ PREREGISTRATION_G.md d04e2d4; tuning grid + probe extension merged | D-042, D-043 |
+| B12 | 🔄 smoke checks, cache nonce, runaway guard building; independent review next | |
 
 **Follow-ups found during the build** (must be done before any paid run):
 - **For B12:** a per-run cache nonce (brief §6.2: provider prefix caches must not carry across runs or arms sharing a monolith prefix) and a runaway wall-clock guard (brief §4.5); the runner writing the `cap multiple` and `pilot σ and power` pre-registration items.
