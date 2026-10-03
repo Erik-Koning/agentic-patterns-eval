@@ -6,10 +6,11 @@
 - Every candidate is valid for its arm by the arm's own parser and validator (`context_policy.resolve_knobs`,
   `validate`), sets only APE_CM_* knobs its arm reads (a typo or another arm's knob would silently tune nothing), and
   is the arm's whole configuration: exactly the knobs its components read. The candidates of a system differ, the
-  arm's default (D-037) comes first, and CM-sum's and CM-todo's two candidates cover their one knob.
+  arm's default (D-037) comes first, and CM-sum's and CM-todo's two candidates cover their one knob. The runner's
+  own grid check (`run_study.grid_problems`, with `cm_candidate_problems`) finds nothing.
 - So every tuned arm runs in the test exactly as it ran on dev, for every combination of selections, under the
-  study runner's rule for selections that share a knob (agree: together; disagree: each tuned arm apart), and the
-  untuned arms keep their defaults.
+  study runner's rule (D-042, `env_group`: each tuned arm with exactly its own selection's knobs), and the untuned
+  arms keep their defaults.
 - Every candidate runs a perfect gold session through the real loop with its knobs recorded and its mechanism
   visibly configured (extraction on or off, the reset schedule, the handoff, the summary prompt).
 """
@@ -84,26 +85,10 @@ def candidate_problems(arm: str, env: dict[str, str]) -> list[str]:
         return [*problems, f"{arm} rejects {env}: {e}"]
     reads, sets = _reads(arm, knobs), {_env_knob(k) for k in env}
     if missing := sorted(reads - sets):
-        problems.append(f"{arm} also reads {missing}: write them out, or another system's selection can change them in the test")
+        problems.append(f"{arm} also reads {missing}: write them out, so the selection states the whole configuration that ran")
     if unread := sorted(sets - reads):
         problems.append(f"{arm} does not read {unread} in this configuration")
     return problems
-
-
-def _test_envs(selected: dict[str, dict]) -> dict[str, dict[str, str]]:
-    """The env each tuned arm runs under in the test phase, by the study runner's rule for selections that share
-    APE_CM_* knobs (BUILD_PLAN B1, `selection_env` and `env_group`): every selection's knobs together when they agree
-    on each shared knob, else each tuned arm under its own selection. The runner's own functions when it has them;
-    modelled here until then (a runner whose `selection_env` refuses any shared knob stops this grid's test phase)."""
-    if hasattr(run_study, "env_group"):
-        together = run_study.selection_env(selected)
-        return {name: run_study.env_group(name, s["arm"], selected, together)[1] for name, s in selected.items()} | {"*untuned*": dict(together or {})}
-    together: dict[str, str] = {}
-    for s in selected.values():
-        if any(together.get(k, v) != v for k, v in s["env"].items()):
-            return {name: dict(s["env"]) for name, s in selected.items()} | {"*untuned*": {}}
-        together |= s["env"]
-    return dict.fromkeys(selected, together) | {"*untuned*": together}
 
 
 # --- The grid against the plan ---------------------------------------------------------------------------------------
@@ -166,7 +151,7 @@ def test_the_checker_catches_typos_foreign_knobs_bad_values_and_partial_configur
     assert "rejects" in candidate_problems("CM-sum", {"APE_CM_SUM_PROMPT": "fancy"})[0]
     assert "rejects" in candidate_problems("S-CM*", {"APE_CM_STACK": "prune+trim"})[0]
     assert "not a string" in candidate_problems("CM-prune", {"APE_CM_PRUNE_KEEP": 6})[0]
-    assert candidate_problems("CM-reset", {"APE_CM_RESET_EVERY": "10"}) == ["CM-reset also reads ['reset_summary', 'todo_extract']: write them out, or another system's selection can change them in the test"]
+    assert candidate_problems("CM-reset", {"APE_CM_RESET_EVERY": "10"}) == ["CM-reset also reads ['reset_summary', 'todo_extract']: write them out, so the selection states the whole configuration that ran"]
     assert candidate_problems("S-CM*", {"APE_CM_STACK": "prune+sum", "APE_CM_PRUNE_KEEP": "3", "APE_CM_SUM_PROMPT": "plain", "APE_CM_TODO_EXTRACT": "true"}) == ["S-CM* does not read ['todo_extract'] in this configuration"]
 
 
@@ -182,30 +167,26 @@ def test_candidates_differ_the_default_comes_first_and_binary_knobs_are_covered(
     assert keeps == [ALL_KNOBS["prune_keep"], 6, 12]
 
 
-def test_main_studys_static_check_passes_except_for_the_deliberately_shared_knobs():
-    """`tuning.study_grid_problems` (B3) holds for the main study's per-arm APE_MAS_* knobs. Here the arms share APE_CM_*
-    knobs by design (D-037) and each candidate writes out its whole configuration, so its no-shared-variable rule
-    fires, and only it: the study runner runs disagreeing selections apart (BUILD_PLAN B1)."""
-    problems = tuning.study_grid_problems(GRID, None, lambda system, env: candidate_problems(system, env))
-    assert problems and all(" is set by the candidates of " in p for p in problems), problems
-    assert {p.split(" ")[0] for p in problems} == {"APE_CM_PRUNE_KEEP", "APE_CM_SUM_PROMPT", "APE_CM_TODO_EXTRACT", "APE_CM_RESET_EVERY", "APE_CM_RESET_SUMMARY"}
+def test_the_runners_grid_check_finds_nothing(tmp_path):
+    """`run_study.grid_problems`: `tuning.study_grid_problems` against what g.tune.luna prices, with Study G's own-knob
+    check (`cm_candidate_problems`); the shared APE_CM_* names are allowed (D-042)."""
+    assert run_study.grid_problems(StudyRun("study_g", "grid", offline=True, runs_root=tmp_path / "runs")) == []
+    assert all(run_study.cm_candidate_problems(name, c["env"]) == [] for name, c in _candidates())
 
 
 def test_every_tuned_arm_runs_in_the_test_as_on_dev_whichever_selections_win():
+    """The runner's `env_group` (D-042) for every combination of selections: each tuned arm under its own selection's
+    knobs, the same configuration it ran on dev; the untuned arms with none, at their defaults."""
     systems = GRID["systems"]
-    together = apart = 0
-    for combo in itertools.product(*(sdef["candidates"] for sdef in systems.values())):
+    combos = list(itertools.product(*(sdef["candidates"] for sdef in systems.values())))
+    for combo in combos:
         selected = {name: {"arm": c["arm"], "env": dict(c["env"]), "candidate": c["id"]} for name, c in zip(systems, combo, strict=True)}
-        envs = _test_envs(selected)
         for name, c in zip(systems, combo, strict=True):
-            assert effective(c["arm"], envs[name]) == effective(c["arm"], c["env"]), (name, c["id"], envs[name])
-        for arm in ("CM-trim", "CM-native"):  # untuned arms keep their defaults
-            assert effective(arm, envs["*untuned*"]) == effective(arm, {})
-        if all(envs[name] == envs["*untuned*"] for name in systems) and envs["*untuned*"]:
-            together += 1
-        else:
-            apart += 1
-    assert together and apart, "both of the runner's cases occur among the 108 combinations"
+            group, env = run_study.env_group(name, c["arm"], selected)
+            assert group.startswith("sel-") and env == c["env"] and effective(c["arm"], env) == effective(c["arm"], c["env"]), (name, c["id"], env)
+        for arm in ("CM0", "O-state", "CM-trim", "CM-native", "S1", "M1", "M2"):
+            assert run_study.env_group(arm, arm, selected) == ("selected", {})
+    assert len(combos) == 3 * 2 * 2 * 3 * 3
 
 
 # --- Each candidate through the real session loop --------------------------------------------------------------------

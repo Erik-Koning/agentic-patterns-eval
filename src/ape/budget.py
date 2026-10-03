@@ -26,8 +26,10 @@ where the input rate blends the input price and the cached-input price by the ca
 The orchestrator (FX-6) calls `projected_cost(...)` for a phase and `program_remaining(...)` for what is left of the
 program budget, and refuses the phase with `require_affordable(...)` when the projection exceeds it. Spend is
 read per sample from Inspect's sample summaries, each sample once by uuid, so retried tasks and killed runs count
-correctly (`log_samples`); `program_spend` sums every log dir and ledger in the program's spend registry
-(`ape.spend`). `sample_cost_limit` is the per-sample runaway guard the runner passes to Inspect.
+correctly (`log_samples`). Inspect logs a sample's last attempt only, so each log dir's usage ledger
+(`ape.usage_ledger`, every model call as it happens) adds the errored attempts Inspect retried and a killed run's
+in-flight samples (`unlogged_spend`, D-030). `program_spend` sums every log dir (logs plus that), and every build
+ledger, in the program's spend registry (`ape.spend`). `sample_cost_limit` is the per-sample runaway guard the runner passes to Inspect.
 """
 
 import argparse
@@ -755,41 +757,85 @@ def ledger_spend(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH, 
         raise BudgetError(f"ledger {ledger_path}: {e}") from None
 
 
-def spent(log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
+def usage_ledgers(root: str | Path) -> list[Path]:
+    """The per-log-dir usage ledgers (`ape.usage_ledger`) under `root`."""
+    from .usage_ledger import LEDGER_NAME
+
+    return sorted(Path(root).rglob(LEDGER_NAME)) if Path(root).is_dir() else []
+
+
+def unlogged_spend(log_files: Iterable[str | Path], ledgers: Iterable[str | Path], since: float | None = None) -> dict:
+    """What the usage ledgers add to these logs (`ape.usage_ledger.unlogged_spend`): the earlier attempts of the samples
+    the logs hold (retried after an error) and every call of a sample no log holds (a killed run's in-flight samples).
+    Unreadable logs are skipped (their samples then count from the ledger)."""
+    from .usage_ledger import read_entries, unlogged_spend as from_entries
+
+    logged: dict[str, float] = {}
+    for f in log_files:
+        try:
+            info = log_samples(f)
+        except Exception:  # noqa: BLE001  (a log being rewritten: its samples count from the ledger)
+            continue
+        for key, usd, _ in info["samples"]:
+            logged[key] = usd
+    try:
+        return from_entries(read_entries(ledgers), logged, since)
+    except ValueError as e:
+        raise BudgetError(str(e)) from None
+
+
+def spent(log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH, usage_ledger_files: Iterable[str | Path] = ()) -> dict:
     """$ already spent by these logs (each sample once; `logs_spend`) plus one build/embedding ledger, both priced
-    from the one table. Pass every log of the tasks, failed attempts included: a sample shared with a retry's
-    log is counted once."""
+    from the one table, plus what the logs' usage ledgers hold that the logs do not (`unlogged_usd`: errored attempts,
+    killed runs' in-flight samples). Pass every log of the tasks, failed attempts included: a sample shared with a
+    retry's log is counted once."""
+    log_files = list(log_files)
     logs = logs_spend(log_files)
     ledger_usd = ledger_spend(ledger_path, costs_path)
-    return {"inspect_usd": logs["inspect_usd"], "ledger_usd": ledger_usd, "spent_usd": logs["inspect_usd"] + ledger_usd, "partial_logs": logs["partial_logs"], "unreadable": logs["unreadable"]}
+    u = unlogged_spend(log_files, usage_ledger_files)
+    return {
+        "inspect_usd": logs["inspect_usd"], "ledger_usd": ledger_usd, "unlogged_usd": u["unlogged_usd"],
+        "spent_usd": logs["inspect_usd"] + u["unlogged_usd"] + ledger_usd, "partial_logs": logs["partial_logs"], "unreadable": logs["unreadable"],
+    }  # fmt: skip
 
 
-def remaining(budget_usd: float, log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
-    """What is left of `budget_usd` after the logs' and the ledger's spend."""
-    s = spent(log_files, ledger_path, costs_path)
+def remaining(budget_usd: float, log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH, usage_ledger_files: Iterable[str | Path] = ()) -> dict:
+    """What is left of `budget_usd` after the logs', their usage ledgers' and the build ledger's spend."""
+    s = spent(log_files, ledger_path, costs_path, usage_ledger_files)
     return {"budget_usd": float(budget_usd), **s, "remaining_usd": float(budget_usd) - s["spent_usd"]}
 
 
 def program_spend(registry: Path | None = None, costs_path: Path = COSTS_PATH) -> dict:
     """Spend over the whole program registry (`ape.spend`): every `.eval` log under every registered log dir
-    (finished, failed or killed; each sample once, attributed to the first dir that logged it) plus every
-    registered ledger. Missing dirs and files count $0 and are listed."""
+    (finished, failed or killed; each sample once, attributed to the first dir that logged it), what the dir's usage
+    ledgers hold that its logs do not (`unlogged_usd`: errored attempts Inspect retried, a killed run's in-flight
+    samples; `ape.usage_ledger`), plus every registered build/embedding ledger. Missing dirs and files count $0 and
+    are listed. Cross-checks: `usage_ledger_usd` (every recorded call) and `final_attempt_diff_usd` (the ledgers' final
+    attempts less the logs, about 0)."""
     from . import spend as reg
 
     registry = registry if registry is not None else reg.registry_path(live=True)
     dirs, ledgers = reg.registered(registry)
     seen: set[str] = set()
     rows, by_study, missing, unreadable, partial = [], defaultdict(float), [], [], 0
+    usage = {"usage_ledger_usd": 0.0, "final_attempt_diff_usd": 0.0, "retried_samples": 0, "samples_in_no_log": 0}
     for d, info in dirs.items():
         path = Path(d)
         if not path.is_dir():
             missing.append(d)
             continue
-        s = logs_spend(sorted(path.rglob("*.eval")), seen)
+        evals = sorted(path.rglob("*.eval"))
+        s = logs_spend(evals, seen)
+        u = unlogged_spend(evals, usage_ledgers(path))
+        for k in usage:
+            usage[k] += u["ledger_usd" if k == "usage_ledger_usd" else k]
         partial += s["partial_logs"]
         unreadable += s["unreadable"]
-        rows.append({"log_dir": d, "label": info["label"], "study": info["study"], "live": info["live"], "usd": s["inspect_usd"], "samples": s["samples"], "partial_logs": s["partial_logs"], "finished": info["finishes"] >= info["starts"]})
-        by_study[info["study"]] += s["inspect_usd"]
+        rows.append({
+            "log_dir": d, "label": info["label"], "study": info["study"], "live": info["live"], "usd": s["inspect_usd"], "unlogged_usd": u["unlogged_usd"],
+            "samples": s["samples"], "partial_logs": s["partial_logs"], "finished": info["finishes"] >= info["starts"],
+        })  # fmt: skip
+        by_study[info["study"]] += s["inspect_usd"] + u["unlogged_usd"]
     ledger_rows = []
     for f, info in ledgers.items():
         if not Path(f).is_file():
@@ -799,12 +845,15 @@ def program_spend(registry: Path | None = None, costs_path: Path = COSTS_PATH) -
         ledger_rows.append({"path": f, "label": info["label"], "study": info["study"], "usd": usd})
         by_study[info["study"]] += usd
     inspect_usd = sum(r["usd"] for r in rows)
+    unlogged_usd = sum(r["unlogged_usd"] for r in rows)
     ledger_usd = sum(r["usd"] for r in ledger_rows)
     return {
         "registry": str(registry) if registry is not None else None,
         "inspect_usd": inspect_usd,
+        "unlogged_usd": unlogged_usd,
         "ledger_usd": ledger_usd,
-        "spent_usd": inspect_usd + ledger_usd,
+        "spent_usd": inspect_usd + unlogged_usd + ledger_usd,
+        **usage,
         "by_study": dict(sorted(by_study.items())),
         "dirs": rows,
         "ledgers": ledger_rows,
@@ -878,7 +927,8 @@ def spend_report(s: dict, budget_usd: float) -> str:
     """`python -m ape.budget spend`: program spend by study, then by registered log dir and ledger."""
     lines = [
         f"Program spend (registry {s['registry']}): ${s['spent_usd']:,.2f} of ${budget_usd:,.0f} "
-        f"(Inspect ${s['inspect_usd']:,.2f}, ledgers ${s['ledger_usd']:,.2f}); ${budget_usd - s['spent_usd']:,.2f} left",
+        f"(Inspect logs ${s['inspect_usd']:,.2f}, attempts no log holds ${s.get('unlogged_usd') or 0:,.2f}, ledgers ${s['ledger_usd']:,.2f}); "
+        f"${budget_usd - s['spent_usd']:,.2f} left",
         "",
     ]
     lines.append(_table([{"study": k, "usd": f"{v:,.2f}"} for k, v in s["by_study"].items()], [("study", "study"), ("usd", "$")], "By study") if s["by_study"] else "By study: nothing registered")

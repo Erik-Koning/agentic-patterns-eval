@@ -10,32 +10,30 @@
 # is created (`context_policy.resolve_knobs`, `validate`); tests/test_tuning_grid_study_g.py validates each one.
 #
 # Each candidate is the arm's whole configuration. The arms share one knob namespace (D-037: APE_CM_PRUNE_KEEP is read
-# by CM-prune and by S-CM*'s prune component; APE_CM_TODO_EXTRACT by CM-todo, CM-reset and S-CM*), so every candidate
-# writes out every knob its arm's components read, defaults included, and nothing else. An arm then runs in the test
-# exactly as it ran on dev whichever candidates win: selections that agree on a shared knob share one environment, and
-# selections that disagree run apart, each tuned arm under its own selection (ape.run_study `env_group`, BUILD_PLAN
-# B1). This relies on that rule: a runner that applies every selection's knobs together (and refuses any shared
-# variable, as `tuning.study_grid_problems` does for the main study's per-arm APE_MAS_* knobs) would either refuse
-# these selections or run a composite arm (CM-reset, S-CM*) under another system's selection.
+# by CM-prune and by S-CM*'s prune component; APE_CM_TODO_EXTRACT by CM-todo, CM-reset and S-CM*), and the runner gives
+# each tuned arm exactly its own selection's knobs (D-042, ape.run_study `env_group`), so an arm runs in the test
+# exactly as it ran on dev whichever candidates win. Every candidate still writes out every knob its arm's components
+# read, defaults included, and nothing else: the selection then states the whole configuration that ran, and no
+# default it relied on can change unrecorded. Systems may set the same knob names (`run_study.cm_candidate_problems`
+# checks each candidate against its own arm).
 #
 # T_abs is not tuned. The threshold is a task argument (D-030), but the runner passes the plan's T_abs to every
 # session task, in the tune and in the test, and a selection carries only `arm` and `env`; so T_abs stays at
 # run_plan.yaml `study_g.threshold` (20K) for every arm and candidate, which also keeps every arm on one trigger
 # point. W stays at 32K.
 #
-# Budgets. budget_per_system is 3, the count run_plan.yaml prices for every tuned system. Each system's candidates
-# span its real design choice at fixed T_abs. CM-sum and CM-todo each have one binary knob (summary prompt; todo
-# extraction), so their whole design space is 2 configurations and both are declared: no third distinct
-# configuration exists (`equal_budgets` is off for that reason; run_plan.yaml still prices a third, about $1.70
-# conservative each). The default configuration (D-037) comes first in every system, so the offline rehearsal's first
-# two candidates include it. Dev noise: 3 sessions x 40 items give a candidate's mean a standard error of at least
+# Budgets. budget_per_system is 3. Each system's candidates span its real design choice at fixed T_abs. CM-sum and
+# CM-todo each have one binary knob (summary prompt; todo extraction), so their whole design space is 2
+# configurations and both are declared: no third distinct configuration exists (`equal_budgets` is off for that
+# reason; g.tune.luna prices 3, 2, 2, 3, 3, D-043). The default configuration (D-037) comes first in every system, so
+# the offline rehearsal's first two candidates include it. Dev noise: 3 sessions x 40 items give a candidate's mean a standard error of at least
 # 4 pp (more with the sessions as clusters), so the tune catches broken or clearly worse configurations, not small
 # gains (as in the main study, D-041).
 #
 # Sign-off (as config/tuning_grid.yaml). Each system's owner reviews its candidates, names themselves in `owners` and
-# sets `signed_off` to true; a live tune refuses until every system has both. Proposed roles: the CM arms' owner (who
-# wrote the arms, B8) for CM-prune, CM-sum, CM-todo and CM-reset; the skeptic for S-CM*, the single-agent contender of
-# G-H3 (audit §6.2: "chosen on dev by the skeptic"). PC6-style completeness counts every configuration ever tried for
+# sets `signed_off` to true; a live tune refuses until every system has both. Roles (D-043): the CM-arm author (B8)
+# owns CM-prune, CM-sum, CM-todo and CM-reset; the skeptic owns S-CM*, the single-agent contender of G-H3 (audit §6.2:
+# "chosen on dev by the skeptic"). PC6-style completeness counts every configuration ever tried for
 # a system (archived tuning logs included) against budget_per_system. These keys are not candidates; the freeze
 # hashes this whole file.
 owners: {CM-prune: TODO, CM-sum: TODO, CM-todo: TODO, CM-reset: TODO, S-CM*: TODO}

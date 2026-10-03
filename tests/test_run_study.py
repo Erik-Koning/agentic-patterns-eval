@@ -228,9 +228,37 @@ def test_the_kg_arm_follows_the_gate_runs_verdict_and_selection(clean_env, monke
     with run_study.run_environment(run):
         assert os.environ["APE_KG_ARM"] == "APG-q" and os.environ["APE_APG_SHORTLIST_K"] == "24" and os.environ["APE_SPEND_LABEL"] == "main/m"
         assert "APE_KG_ARM" not in run_study.env_knobs(run) and "APE_APG_SHORTLIST_K" not in run_study.env_knobs(run), "recorded as the KG resolution"
-    assert "APE_KG_ARM" not in os.environ
+        assert os.environ["APE_S3S_BUDGET"] == "2000" and "APE_S3S_BUDGET" not in run_study.env_knobs(run), "S3s's inherited knobs too"
+    assert "APE_KG_ARM" not in os.environ and "APE_S3S_BUDGET" not in os.environ
     monkeypatch.setenv("APE_APG_SHORTLIST_K", "48")
     with pytest.raises(PhaseError, match=r"APE_APG_SHORTLIST_K=48 \(the gate's verdict sets 24\)"), run_study.run_environment(run):
+        pass
+
+
+def test_s3s_inherits_the_gate_runs_selection(clean_env, monkeypatch):
+    """D-041: the main grid inherits S3s from the gate (`inherited: {S3s: {source: gate, gate_key: S3s}}`): the gate
+    run's S3s selection is set with the KG arm for every phase, recorded in the params and the freeze, and a live run
+    refuses a gate run without it."""
+    runs = clean_env / "runs"
+    _fake_gate_run(runs, "g-go", "GO")
+    _fake_gate_run(runs, "g-nos3s", "GO", selected={k: v for k, v in SELECTED.items() if k != "S3s"})
+    _fake_gate_run(runs, "g-other", "GO", selected=SELECTED | {"S3s": {"arm": "S3", "env": {}, "candidate": "x"}})
+    assert run_study.gate_inherited_arms(StudyRun("main", "m", runs_root=runs)) == {"S3s": "S3s"}
+    assert run_study.gate_inherited_arms(StudyRun("study_g", "g", runs_root=runs)) == {}
+    run = StudyRun("main", "m", runs_root=runs, gate_run_id="g-go")
+    kg = run_study.kg_resolution(run)
+    assert kg["inherited"] == {"S3s": {"key": "S3s", "arm": "S3s", "env": {"APE_S3S_BUDGET": "2000"}, "candidate": "s3s-2000"}}
+    assert run_study.kg_env(run) == {"APE_KG_ARM": "APG-q", "APE_APG_SHORTLIST_K": "24", "APE_S3S_BUDGET": "2000"}
+    assert run_study.kg_params(run)["inherited"] == kg["inherited"] and run_study.base_params(run)["kg"]["inherited"] == kg["inherited"], "in every fingerprint"
+    for gid, why in (("g-nos3s", "has no S3s selection, which main's S3s inherits"), ("g-other", "the S3s selection runs S3, but main's S3s inherits only its knobs")):
+        with pytest.raises(PhaseError, match=why):
+            run_study.kg_resolution(StudyRun("main", "m", runs_root=runs, gate_run_id=gid))
+        off = run_study.kg_resolution(StudyRun("main", "m", offline=True, runs_root=runs, gate_run_id=gid))
+        assert off["inherited"] == {} and any("offline: S3s at its defaults" in n for n in off["notes"])
+    assert run_study.kg_resolution(StudyRun("main", "m", offline=True, runs_root=runs))["inherited"] == {}
+    # A live shell value for the inherited knob that disagrees is refused, as the KG arm's.
+    monkeypatch.setenv("APE_S3S_BUDGET", "4000")
+    with pytest.raises(PhaseError, match=r"APE_S3S_BUDGET=4000 \(the gate's verdict sets 2000\)"), run_study.run_environment(run):
         pass
 
 
@@ -261,41 +289,48 @@ def test_a_changed_gate_selection_changes_the_phases_fingerprints(clean_env):
 
 
 def test_unbuilt_arms_are_skipped_offline_recorded_and_refused_live(clean_env, monkeypatch):
-    from ape.agent import solvers
+    from ape.agent import context_policy, session, solvers
 
     run = StudyRun("main", "arms", offline=True, runs_root=clean_env / "runs")
-    missing = run_study.unbuilt_arms(run, "test")
-    assert "main.A.arms: M1" in missing and "main.C.a: S8k3" in missing and not any(m.endswith((": S1", ": S5", ": S3s", ": S7")) for m in missing)
-    g = StudyRun("study_g", "arms", offline=True, runs_root=clean_env / "runs")
-    assert "g.cm.luna-high: CM-prune" in run_study.unbuilt_arms(g, "test") and "g.cm.luna-high: CM0" not in run_study.unbuilt_arms(g, "test")
-    # An arm a package registers flows through: it is no longer skipped.
-    monkeypatch.setitem(solvers.MULTI_AGENT_ARMS, "M1", lambda arm, **kw: None)
-    assert "main.A.arms: M1" not in run_study.unbuilt_arms(run, "test") and "main.A.arms: S9" in run_study.unbuilt_arms(run, "test")
-    groups = run_study.run_groups(run, "micro-pilot")
-    assert [a["run"] for a in groups[0]["arms"]] == ["S1", "S5", "M1"] and groups[0]["skipped"] == []
+    assert run_study.unbuilt_arms(run, "test") == [] and run_study.unbuilt_arms(run, "micro-pilot") == [], "B2 built every main-study arm"
+    assert not run_study.arm_built("S99") and not run_study.arm_built("CM-nope", "session") and run_study.arm_built("CM-native", "session")
+    # An arm no package has registered (here M1, unregistered for the test) is skipped offline, and recorded...
     monkeypatch.delitem(solvers.MULTI_AGENT_ARMS, "M1")
-    # Live: a phase whose cells name an unbuilt arm refuses to start, naming them, before any record.
+    missing = run_study.unbuilt_arms(run, "test")
+    assert "main.A.arms: M1" in missing and "main.A.arms: S9" not in missing
+    (g0,) = run_study.run_groups(run, "micro-pilot")
+    assert [a["run"] for a in g0["arms"]] == ["S1", "S5"] and g0["skipped"] == [{"declared": "M1", "run": "M1", "reason": "not built yet"}]
+    # ...and a live phase whose cells name it refuses to start, naming it, before any record.
     _fake_gate_run(clean_env / "runs", "g-go", "GO")
     live = StudyRun("main", "live", runs_root=clean_env / "runs", gate_run_id="g-go")
     with pytest.raises(PhaseError, match=r"micro-pilot: its cells name arms that are not built yet: \['main.micro-pilot: M1'\]"):
         run_phases(live, "micro-pilot")
     assert not live.manifest_path("micro-pilot").exists()
-    with pytest.raises(PhaseError, match=r"not built yet: \[.*g.pilot.luna: CM-prune"):
+    # Study G: a session arm is built when it is a registered context policy or session arm (B8's CM arms, B9's
+    # topology arms S1, M1 and M2): all of them now.
+    g = StudyRun("study_g", "arms", offline=True, runs_root=clean_env / "runs")
+    assert all(run_study.unbuilt_arms(g, p) == [] for p in ("micro-pilot", "tune", "test")), "B8 and B9 built every Study G arm"
+    monkeypatch.delitem(context_policy.POLICIES, "CM-sum")
+    monkeypatch.setattr(session, "SESSION_ARMS", tuple(a for a in session.SESSION_ARMS if a != "CM-sum"))
+    with pytest.raises(PhaseError, match=r"not built yet: \['g.pilot.luna: CM-sum'\]"):
         run_phases(StudyRun("study_g", "live", runs_root=clean_env / "runs"), "micro-pilot")
+
+
+def rg_arm_names(cell) -> list[str]:
+    return list(cell.spec["arms"]) if isinstance(cell.spec["arms"], (list, dict)) else [cell.spec["arms"]]
 
 
 def test_the_offline_runs_record_every_skipped_arm(offline):
     run, g = _run(offline, "main"), _run(offline, "study_g")
-    assert _manifest(run, "micro-pilot")["skipped_arms"] == [{"cell": "main.micro-pilot", "declared": "M1", "run": "M1", "reason": "not built yet"}]
-    skipped = {(s["cell"], s["declared"]) for s in _manifest(run, "test")["skipped_arms"]}
-    assert {("main.A.arms", "S9"), ("main.B.arms", "M1k"), ("main.C.b", "S8k3"), ("main.F.sol", "M2")} <= skipped
-    assert not any(a in ("S1", "S3s", "S5", "S7") for _, a in skipped)
-    assert set(_manifest(run, "preflight")["unbuilt_arms"]) == {"micro-pilot", "pilot", "test"}
-    cells = _manifest(run, "test")["cells"]
-    assert cells["main.A.arms"]["status"] == "skipped" and cells["main.B.arms"]["status"] == "done"
-    gm = _manifest(g, "test")
-    assert {c: x["status"] for c, x in gm["cells"].items() if c.startswith("g.topo")} == dict.fromkeys(("g.topo.luna", "g.topo.sol", "g.topo.astra"), "skipped")
-    assert ("g.topo.luna", "S-CM*") in {(s["cell"], s["declared"]) for s in gm["skipped_arms"]}, "a tuned key without a selection is not built"
+    for phase in ("micro-pilot", "pilot", "test"):
+        assert _manifest(run, phase)["skipped_arms"] == [], f"every main-study arm runs ({phase})"
+    assert not _manifest(run, "preflight")["unbuilt_arms"]
+    assert set(x["status"] for x in _manifest(run, "test")["cells"].values()) == {"done"}
+    for phase in ("micro-pilot", "test"):
+        assert _manifest(g, phase)["skipped_arms"] == [], f"every Study G arm runs, B9's topology arms included ({phase})"
+    assert _manifest(g, "tune")["skipped_systems"] == [] and _manifest(run, "tune")["skipped_systems"] == []
+    assert not _manifest(g, "preflight")["unbuilt_arms"]
+    assert {c: x["status"] for c, x in _manifest(g, "test")["cells"].items()} == {c.id: "done" for c in run_study.phase_cells(g, "test")}
 
 
 # --- End to end, offline -------------------------------------------------------------------------------
@@ -310,7 +345,7 @@ def test_offline_all_runs_each_study_end_to_end(offline):
         for p, m in manifests.items():
             assert m["study"] == study and m["offline"] is True and m["errors"] == [] and m["fingerprint"]
             assert m["offline_check"]["ledger_entries"] == 0 and set(m["offline_check"]["models"]) <= {"mockllm/model"}
-            assert m["spend"]["spent_usd"] == 0.0 and m["spend"]["study_allocation_usd"] == {"main": 1000.0, "study_g": 2700.0}[study]
+            assert m["spend"]["spent_usd"] == 0.0 and m["spend"]["study_allocation_usd"] == float(run_study.plan(run).budget["allocations"][study])
             assert p == "analyze" or m["params"]["scale"] == {"offline": True, **run_study.OFFLINE_SCALE}
         assert manifests["test"]["primary_complete"] is True
         # The spend registry is the run's own, every log dir labelled with the study.
@@ -325,14 +360,19 @@ def test_offline_all_runs_each_study_end_to_end(offline):
         freeze = read_freeze(run)
         assert freeze["rehearsal"] is True and freeze["test_seeds"]["base"] == seeds["offline_test"] and freeze["role"] == {"kind": "primary", "of": None}
         assert (run.work_dir / "PROVENANCE.freeze.md").is_file() and f"study={study} run=t1 base={seeds['offline_test']}" in (run.work_dir / "PROVENANCE.freeze.md").read_text()
-        # The analysis hook: the main study's analysis exists (ape.analyze_main, tests/test_analyze_main.py); Study G's
-        # stub stays until ape.analyze_g lands.
-        if run_study.analysis_available(run):
-            assert manifests["analyze"]["analysis"]["status"] == "done" and (run.dir / "report" / "report.md").is_file()
-        else:
-            report = json.loads((run.dir / "report" / "analysis.json").read_text())
-            assert report["status"] == "not_implemented" and "analysis not implemented" in (run.dir / "report" / "report.md").read_text()
-            assert manifests["analyze"]["analysis"]["status"] == "not_implemented" and any("analysis not implemented" in w for w in manifests["analyze"]["warnings"])
+        # The analysis: each study's own module (ape.analyze_main, ape.analyze_g) writes the real report, never the stub.
+        assert run_study.analysis_available(run) and not (run.dir / "report" / "analysis.json").exists()
+        assert {"decision.json", "report.md"} <= set(manifests["analyze"]["outputs"]) and (run.dir / "report" / "report.md").is_file()
+        json.loads((run.dir / "report" / "decision.json").read_text())
+        assert manifests["analyze"]["analysis"]["status"] in ({"done"} if study == "main" else {"ok", "partial"})
+        # The analysis reads the tuning log and the study's models slice (a change re-runs it); the test manifest
+        # records each group's model overrides and effort, and its log files relative to the run directory.
+        assert {"tune/tuning_log.jsonl", "config/models.yaml", "config/selected.yaml"} <= set(manifests["analyze"]["inputs"])
+        assert manifests["analyze"]["inputs"]["config/models.yaml"]["slice"] == study and manifests["analyze"]["params"]["tune_manifest"]
+        test = manifests["test"]
+        groups = [g for c in test["cells"].values() for g in c["groups"] if g["status"] == "done"]
+        assert test["log_files_relative_to"] == "run_dir" and groups and all("models" in g and "effort" in g for g in groups)
+        assert all(not Path(f).is_absolute() and (run.dir / f).is_file() for g in groups for f in g["log_files"])
     assert not (ROOT / "runs" / "main" / "t1").exists() and not (ROOT / "runs" / "study_g" / "t1").exists()
 
 
@@ -342,9 +382,11 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
     run = _run(offline, "main")
     selected = yaml.safe_load(run.selected_path.read_text())
     grid = yaml.safe_load((offline["config"] / "tuning_grid_main.yaml").read_text())
-    assert set(selected) == set(grid["systems"]) and all(sel["arm"] == name for name, sel in selected.items()), "each system runs as its plan arm"
+    assert set(selected) == set(grid["systems"]) == set(run_study.study_grid(run)[0]["systems"]) and all(sel["arm"] == name for name, sel in selected.items()), "each system runs as its plan arm"
     tune = _manifest(run, "tune")
     assert not any("placeholder" in w for w in tune["warnings"]) and tune["tuning_completeness"]["pass"] is True, "PC6-style"
+    assert tune["grid_problems"] == [], "B3's grid keeps the tuning rules (a live tune refuses otherwise)"
+    assert "S3s" not in selected and tune["kg"]["inherited"] == {} and any("S3s: its defaults offline" in w for w in _manifest(run, "preflight")["warnings"]), "S3s is the gate's (D-041)"
     for name, sdef in grid["systems"].items():  # offline: each system's first candidates, one selected
         ran = [c["id"] for c in sdef["candidates"][: run_study.OFFLINE_SCALE["tune_candidates_per_system"]]]
         assert tune["tuning_completeness"]["systems"][name]["logged"] == sorted(ran) and selected[name]["candidate"] in ran
@@ -352,19 +394,29 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
     assert kg["arm"] == "APG-s" and kg["system"] == "apg" and read_freeze(run)["kg"]["arm"] == "APG-s"
     targets = json.loads(run.s7_targets_path.read_text())
     assert set(targets) == {"F3-5", "F3-60", "F7-10", "F7-1000"} and all(t > 0 for t in targets.values())
-    seen = set()
+    seen, records = set(), {}
     for f in sorted((run.dir / "test").rglob("*.eval")):
-        head = read_eval_log(str(f), header_only=True)
-        args, md = head.eval.task_args, head.eval.metadata
-        assert head.status == "success" and head.eval.model == "mockllm/model"
+        log = read_eval_log(str(f))
+        args, md = log.eval.task_args, log.eval.metadata
+        assert log.status == "success" and log.eval.model == "mockllm/model" and not any(s.error for s in log.samples)
         assert args["seed_base"] == STUDY_SEEDS["main"]["offline_test"] and args["split"] == "test" and args["plan_cell"] == md["plan_cell"]
-        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and all(md["knobs"][k] == v for sel in selected.values() for k, v in sel["env"].items()), "every selection's knobs"
+        own = (selected.get(run_study.selection_for(args["arm"], selected)) or {}).get("env") or {}
+        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and all(md["knobs"].get(k) == v for k, v in own.items()), "its own selection's knobs"
+        others = {k for sel in selected.values() for k in sel["env"]} - set(own)
+        assert not others & set(md["knobs"]), f"{args['arm']} runs with no other selection's knobs (D-042)"
         if args["arm"] == "S7":
             assert args["group"] == "s7" and md["knobs"]["APE_S7_PER_STEP"] == "1", "S7 mirrors the per-step KG arm"
         seen.add((args["plan_cell"], args["arm"]))
-    assert {("main.B.arms", "S5"), ("main.B.arms", "S7"), ("main.F.sol", "S1"), ("main.F.luna-f7-100", "S5")} <= seen
-    sol = {read_eval_log(str(f), header_only=True).eval.metadata["arm"] for f in (run.dir / "test" / "main.F.sol").rglob("*.eval")}
-    assert sol == {"S1", "S5", "M1"}, "main.F.sol's arms (M1 is built since B2)"
+        records[args["arm"]] = sorted(k for k in log.samples[0].store if k.startswith("mas_"))
+    # Every main-study arm runs through micro-pilot, pilot and test offline (the gold multi-role mock plays each role).
+    arms = {"S1", "S3s", "S5", "S7", "S9", "M1", "M1s", "M1k", "M2", "M7", "S8k3"}
+    assert {a for _, a in seen} == arms and {("main.F.sol-m2", "M2"), ("main.F.luna-f7-100", "S5"), ("main.B.arms", "S5"), ("main.B.arms", "S7"), ("main.F.sol", "S1")} <= seen
+    assert all("mas_accounting" in records[a] and "mas_agents" in records[a] for a in arms - {"S1", "S3s", "S5", "S7"}), "B2's per-agent records"
+    assert "mas_council" in records["M7"] and "mas_ensemble" in records["S8k3"] and "mas_specialists" in records["M2"]
+    ran = {read_eval_log(str(f), header_only=True).eval.task_args["arm"] for phase in ("micro-pilot", "pilot") for f in (run.dir / phase).rglob("*.eval")}
+    assert ran == arms - {"M1s", "S8k3"}, "the pilot cells name every arm but M1s and S8k3 (Studies A and C only)"
+    sol = [read_eval_log(str(f), header_only=True).eval for f in (run.dir / "test" / "main.F.sol").rglob("*.eval")]
+    assert {e.metadata["arm"] for e in sol} == {"S1", "S5", "M1"} and {e.model_generate_config.reasoning_effort for e in sol} == {"high"}, "main.F.sol's arms (M1 is built since B2)"
     # B6: the KG builds and their build-quality check, F1 included, in the one KG system built.
     bq = json.loads((run.phase_dir("micro-pilot") / "build_quality.json").read_text())
     assert bq["systems"] == ["apg"] and bq["verdict"] == "builder_passes" and {"F1-2", "F1-32", "F7-10", "F7-1000", "F3-5", "F3-60"} <= set(bq["cells"])
@@ -383,8 +435,27 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     heads = [read_eval_log(str(f), header_only=True) for f in sorted((run.dir / "test").rglob("*.eval"))]
     sessions = [h for h in heads if h.eval.task.endswith("f8_session")]
     anchor = [h for h in heads if h.eval.task.endswith("main_study")]
-    assert {(h.eval.task_args["level"], h.eval.task_args["variant"]) for h in sessions} == {("40", ""), ("10", ""), ("24", "o1750")}
-    assert {h.eval.task_args["arm"] for h in sessions} == {"CM0", "O-state"} and all(h.eval.task_args["window"] == 32000 for h in sessions)
+    assert {(h.eval.task_args["level"], h.eval.task_args["variant"]) for h in sessions} == {("40", ""), ("10", ""), ("24", "o1750"), ("20", "o2250")}
+    # Every context-management arm runs, and B9's session topology arms (S1, M1, M2) in the g.topo cells.
+    cm = {"CM0", "CM-prune", "CM-sum", "CM-todo", "CM-reset", "CM-native", "O-state", "S-CM*"}
+    assert cm | {"S1", "M1", "M2"} == {h.eval.task_args["arm"] for h in sessions} and all(h.eval.task_args["window"] == 32000 for h in sessions)
+    topo = {h.eval.task_args["arm"] for h in sessions if h.eval.metadata["plan_cell"].startswith("g.topo.")}
+    assert {"S1", "M1", "M2"} <= topo
+    for f in sorted((run.dir / "test").rglob("*.eval")):
+        head = read_eval_log(str(f), header_only=True)
+        if head.eval.task.endswith("f8_session") and head.eval.task_args["arm"] in ("M1", "M2"):
+            log = read_eval_log(str(f))
+            assert log.status == "success" and not any(x.error for x in log.samples) and all("mas_agents" in x.store for x in log.samples), "B9's team records"
+    plan = run_study.plan(run).study_g
+    assert all((a := h.eval.task_args)["seed_base"] == 29000 and a["threshold"] == plan["threshold"] and a["plan_cell"] and a["group"] for h in sessions)
+    sess = read_eval_log(str(next(f for f in sorted((run.dir / "test" / "g.cm.luna-high").rglob("*.eval")) if read_eval_log(str(f), header_only=True).eval.task_args["arm"] == "CM-native")))
+    assert sess.samples[0].store["f8_cm_events"] and not sess.samples[0].error, "CM-native took its mock route offline"
+    assert _manifest(run, "preflight")["checks"]["cm_native"] == {"g.pilot.luna": "mock", "g.cm.luna-high": "mock", "g.cm.sol-high": "mock"}, "D-043: Sol too"
+    # APE_SESSION_CHECKPOINTS reached the sessions: each sample saved there (a finished session deletes only its file).
+    assert {p.parent.name for p in run.session_checkpoints_dir.glob("*/epoch-1")} >= {"F8-40-pilot-s22000", "F8-40-dev-s1000", "F8-40-test-s29000", "F8-20-o2250-test-s29000"}
+    tlog = [json.loads(line) for line in (run.phase_dir("tune") / "tuning_log.jsonl").read_text().splitlines()]
+    tuned = {c["arm"] for sdef in run_study.study_grid(run)[0]["systems"].values() for c in sdef["candidates"]}
+    assert {r["candidate"]["arm"] for r in tlog if "candidate" in r} == tuned and (cm - {"CM0", "O-state", "CM-native"}) <= tuned, "the grid's session arms tune too"
     assert {(h.eval.task_args["family"], h.eval.task_args["level"]) for h in anchor} == {("F7", "10"), ("F3", "5")}
     assert all(h.eval.task_args["seed_base"] == 29000 and h.eval.config.token_limit is None for h in anchor), "G's own worlds; G is not capped"
     efforts = {(h.eval.metadata["plan_cell"], h.eval.model_generate_config.reasoning_effort) for h in anchor}
@@ -392,7 +463,8 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     worlds = {w["world_id"] for w in json.loads((run.phase_dir("build-test") / "worlds.json").read_text())["worlds"]}
     assert {"F8-40-test-s29000", "F8-24-o1750-test-s29000", "F8-20-o2250-test-s29000", "F7-10-rel-desc-test-s29000", "F3-5-test-s29000"} <= worlds
     assert {w["world_id"] for w in json.loads((run.phase_dir("build-dev") / "worlds.json").read_text())["worlds"]} == {"F8-40-dev-s1000"}
-    assert yaml.safe_load(run.selected_path.read_text())["CM0"]["candidate"] == "cm0-default"
+    assert set(yaml.safe_load(run.selected_path.read_text())) == set(run_study.study_grid(run)[0]["systems"])
+    assert _manifest(run, "tune")["grid_problems"] == run_study.grid_problems(run), "the grid's problems, recorded offline (a live tune refuses)"
     assert _manifest(run, "micro-pilot")["operational_env"]["APE_SESSION_CHECKPOINTS"] == str(run.session_checkpoints_dir)
 
 
@@ -461,6 +533,181 @@ def test_caps_borrow_the_nearest_measured_level_and_leave_unmeasured_families_un
     assert run_study.token_caps(StudyRun("study_g", "caps", offline=True, runs_root=clean_env / "runs")) == {}, "Study G is not capped"
 
 
+def test_the_pilot_cap_hit_gate_measures_every_arm_and_the_freeze_records_its_multiple(offline):
+    """D-039 on the offline rehearsal: every pilot arm's cap-hit rate per task cell, no re-run (the gold mock stays far
+    below 8 x B0), and the freeze records the multiple, every rate and the gate file (frozen like the caps)."""
+    from ape.analysis.gate_stats import MAX_CAP_HIT_RATE
+
+    run = _run(offline, "main")
+    gate = json.loads(run.cap_gate_path.read_text())
+    assert run_study.CAP_HIT_MAX == MAX_CAP_HIT_RATE and gate["max"] == 32 and gate["threshold"] == 0.1
+    assert gate["multiple"] == 8 and gate["rule"] == "token_rate" and gate["passed"] and gate["over"] == {} and [r["multiple"] for r in gate["rounds"]] == [8]
+    piloted = {(a, tc) for c in run_study.phase_cells(run, "pilot") for a in rg_arm_names(c) for tc in c.spec["cells"]}
+    assert {(a, tc) for a, cells in gate["rates"].items() for tc in cells} == piloted, "every pilot arm, per task cell"
+    assert all(r["samples"] > 0 and r["cap_hits"] == r["token_hits"] == 0 for cells in gate["rates"].values() for r in cells.values())
+    pilot = _manifest(run, "pilot")
+    assert pilot["cap_gate"]["multiple"] == 8 and pilot["params"]["cap_gate"] == {"base": 8, "doublings": 2, "threshold": 0.1, "rule": "token_rate"}
+    assert json.loads((run.phase_dir("pilot") / "pilot.json").read_text())["cap_gate"]["rates"] == gate["rates"]
+    freeze = read_freeze(run)
+    assert freeze["cap_multiple"] == 8 and freeze["cap_gate"]["rates"] == gate["rates"] and freeze["cap_gate"]["passed"] is True
+    assert "config/cap_gate.json" in freeze["files"] and run_study.read_cap_gate(run) == (gate, [])
+    # The pre-registration's pilot items, the cap multiple and the power re-simulation (no gate run offline: priors).
+    items = json.loads((run.phase_dir("pilot") / "pilot.json").read_text())["prereg_items"]
+    assert {"token caps", "cap multiple", "S7 targets per cell", "KG arm", "pilot σ and power"} == set(items)
+    assert items["cap multiple"].startswith("8 (D-039; no arm over 10% cap hits on the pilot")
+    assert items["pilot σ and power"].startswith("σ_w 0.500, σ_g 0.300 from the gate's priors (no gate run)") and "Full table:" in items["pilot σ and power"]
+    power = json.loads((run.phase_dir("pilot") / "power.json").read_text())
+    assert power["key"]["reps"] == run_study.OFFLINE_POWER["reps"] and set(power["power"]["families"]) and pilot["outputs"]["power"]
+
+
+def test_the_power_resimulation_takes_the_gate_pilots_sigma_and_is_reused(clean_env, monkeypatch):
+    """PREREGISTRATION_MAIN §2.6: σ_w and σ_g from the gate run's pilot (`pilot/power.json`, `variance_components`),
+    the priors otherwise, saying which; the re-simulation is reused while its inputs stand."""
+    from ape.analysis import main_power
+
+    runs = clean_env / "runs"
+    gdir = _fake_gate_run(runs, "g-go", "GO")
+    run = StudyRun("main", "pw", runs_root=runs, gate_run_id="g-go")
+    vc, source, path = run_study.gate_pilot_sigma(run)
+    assert vc is None and path is None and "missing" in source and run_study._gate_power_input(run) == {}
+    run_gate._write_json(gdir / "pilot" / "power.json", {"variance_components": {"estimable": False, "reason": "too few worlds"}})
+    assert "could not estimate σ_w and σ_g: too few worlds" in run_study.gate_pilot_sigma(run)[1]
+    good = {"estimable": True, "sigma_w": 0.42, "sigma_g": 0.21, "worlds_per_cell": {"F7-10": 8, "F3-5": 8}}
+    run_gate._write_json(gdir / "pilot" / "power.json", {"variance_components": good})
+    vc, source, path = run_study.gate_pilot_sigma(run)
+    assert vc == good and source.startswith("gate run g-go's pilot (") and source.endswith("; 8 worlds per cell)") and path == gdir / "pilot" / "power.json"
+    assert run_study._gate_power_input(run) == {"gate/pilot/power.json": path}, "a pilot input: a changed σ re-runs the pilot"
+    calls = []
+
+    def fake_table(reps, seed, sigmas, settings, sizes=None):
+        calls.append((reps, sigmas.w, sigmas.g, settings.flip_reps))
+        return {"families": {"K1": {"scenarios": [
+            {"scenario": "null", "nulls": ["K1.F7-1000"], "members": {"K1.F7-1000": 0.02}, "false_claims": 0.021},
+            {"scenario": "+0.10", "nulls": [], "members": {"K1.F7-1000": 0.71}, "false_claims": None},
+            {"scenario": "+0.15", "nulls": [], "members": {"K1.F7-1000": 0.93}, "false_claims": None},
+        ]}}}  # fmt: skip
+
+    monkeypatch.setattr(main_power, "power_table", fake_table)
+    record: dict = {"outputs": {}, "warnings": []}
+    out = run_study._pilot_power(run, record)
+    assert calls == [(run_study.POWER_REPS, 0.42, 0.21, main_power.Settings().flip_reps)] and out["sigmas"]["w"] == 0.42
+    assert out["summary"].startswith("σ_w 0.420, σ_g 0.210 from gate run g-go's pilot") and "K1.F7-1000 0.71-0.93" in out["summary"] and "K1 0.021" in out["summary"]
+    run_study._pilot_power(run, record)
+    assert len(calls) == 1, "reused while σ, replicates, seed and sizes stand"
+    run_gate._write_json(gdir / "pilot" / "power.json", {"variance_components": good | {"sigma_w": 0.6}})
+    run_study._pilot_power(run, record)
+    assert len(calls) == 2 and calls[-1][1] == 0.6
+
+
+def _cap_gate_pilot(clean_env, monkeypatch, *, offline: bool, hits, remaining: float = 1e6):
+    """A pilot of S1 and M7 on F1-2 (B0 1,000) whose logs are fakes: `hits(arm, multiple)` -> (cap hits, token hits)
+    of 20 samples. Returns the run, its groups and every re-run's groups."""
+    run = StudyRun("main", "cg", offline=offline, runs_root=clean_env / "runs")
+    run_study.write_caps(run.token_caps_path, {"F1-2": {"b0": 1000.0, "samples": 20}}, "micro-pilot")
+    groups = [
+        {"cell": "main.pilot.a", "plan_phase": "pilot", "name": "selected", "kind": "agent", "primary": False, "arms": [{"declared": "S1", "run": "S1"}, {"declared": "M7", "run": "M7"}],
+         "skipped": [], "env": {}, "cells": ["F1-2"], "deliveries": ["push"], "caps": {"F1-2": 8000}, "log_files": ["x8-S1.eval", "x8-M7.eval"], "dir": "main.pilot.a/selected-0"},
+    ]  # fmt: skip
+    reruns: list[list[dict]] = []
+
+    def fake_run(run_, record, phase, gs):
+        reruns.append(gs)
+        for g in gs:
+            g["log_files"] = [f"x{g['cap_multiple']}-{a['run']}.eval" for a in g["arms"]]
+        return [f for g in gs for f in g["log_files"]]
+
+    def fake_rates(logs):
+        out = {}
+        for f in logs:
+            m, arm = f.removesuffix(".eval").split("-")
+            cap, tok = hits(arm, int(m[1:]))
+            out[arm] = {"F1-2": {"samples": 20, "cap_hits": cap, "token_hits": tok, "rate": cap / 20, "token_rate": tok / 20}}
+        return out
+
+    monkeypatch.setattr(run_study, "run_phase_groups", fake_run)
+    monkeypatch.setattr(run_study, "cap_hit_rates", fake_rates)
+    monkeypatch.setattr(run_study, "_log_arm", lambda f: f.removesuffix(".eval").split("-")[1])
+    monkeypatch.setattr(run_study, "group_projected", lambda r, g: 1.0)
+    monkeypatch.setattr(run_study, "guard_remaining", lambda r: remaining)
+    return run, groups, reruns
+
+
+def test_the_cap_hit_gate_doubles_the_multiple_for_every_arm_and_reruns_only_the_arms_over(clean_env, monkeypatch):
+    """D-039 (live rule): M7 hits the cap on 25% of its F1-2 samples at 8 x B0 and 15% at 16; at 32 it is under 10%."""
+    m7 = {8: (5, 5), 16: (3, 3), 32: (1, 1)}
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=False, hits=lambda arm, m: m7[m] if arm == "M7" else (0, 0))
+    record: dict = {"outputs": {}, "warnings": [], "log_dirs": []}
+    gate, latest = run_study._cap_gate(run, record, groups)
+    assert gate["rule"] == "rate" and gate["multiple"] == 32 and gate["passed"] and gate["over"] == {}
+    assert [(r["multiple"], r["rerun"], r["over"]) for r in gate["rounds"]] == [(8, [], {"M7": ["F1-2"]}), (16, ["M7"], {"M7": ["F1-2"]}), (32, ["M7"], {})]
+    # Each re-run: M7 alone, the pilot's cells, under the new multiple's caps, in a log dir of its own.
+    assert [[(a["run"], g["caps"], g["cap_multiple"]) for g in gs for a in g["arms"]] for gs in reruns] == [[("M7", {"F1-2": 16000}, 16)], [("M7", {"F1-2": 32000}, 32)]]
+    assert len({g["dir"] for gs in reruns for g in gs} | {groups[0]["dir"]}) == 3 and "-x16-" in reruns[0][0]["dir"]
+    assert sorted(latest) == ["x32-M7.eval", "x8-S1.eval"], "the calibration reads every arm's latest logs"
+    assert gate["rates"]["M7"]["F1-2"]["rate"] == 0.05 and gate["rates"]["S1"]["F1-2"]["rate"] == 0.0
+    # One cap for every arm: the test applies 32 x B0; the phases before it ran at 8.
+    assert run_study.cap_multiple(run) == 32 and run_study.cap_multiple(run, "pilot") == run_study.cap_multiple(run, "tune") == 8
+    assert run_study.token_caps(run)["F1-2"]["cap"] == 32000 and run_study.token_caps(run, "pilot")["F1-2"]["cap"] == 8000
+    assert run_study.read_cap_gate(run)[1] == [] and any("raised from 8" in w for w in record["warnings"])
+    # The pilot's projection includes both re-runs of every arm (pilot-sized; live sizes, offline too).
+    proj = StudyRun("main", "proj", offline=True, runs_root=clean_env / "runs")
+    once = run_study.project(proj, [run_study.group_cell(proj, g) for g in run_study.run_groups(proj, "pilot", offline=False) if g["arms"]])
+    assert run_study._pilot_projected(proj) == pytest.approx(3 * once) and once > 0
+
+
+def test_the_cap_hit_gate_stops_at_32_and_the_freeze_refuses_an_arm_still_over(clean_env, monkeypatch):
+    """Live, every cap hit counts (B4's rule), a turn-cap one too: M7 stays over at 32 x B0 and the freeze refuses."""
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=False, hits=lambda arm, m: (4, 0) if arm == "M7" else (0, 0))
+    record: dict = {"outputs": {}, "warnings": [], "log_dirs": []}
+    gate, _ = run_study._cap_gate(run, record, groups)
+    assert gate["multiple"] == 32 and not gate["passed"] and gate["over"] == {"M7": ["F1-2"]} and len(reruns) == 2
+    gate_, problems = run_study.read_cap_gate(run)
+    assert gate_ == gate and problems == ["D-039: {'M7': ['F1-2']} still over 10% cap hits at 32 x B0 (the largest multiple): the caps cannot be frozen"]
+    assert any("the freeze refuses" in w for w in record["warnings"])
+    run.cap_gate_path.unlink()
+    assert "has not run" in run_study.read_cap_gate(run)[1][0]
+    assert run_study.read_cap_gate(StudyRun("study_g", "cg", runs_root=clean_env / "runs")) == (None, []), "Study G has no caps"
+    # A re-run the budget cannot afford stops before it runs.
+    run2, groups2, reruns2 = _cap_gate_pilot(clean_env, monkeypatch, offline=False, hits=lambda arm, m: (4, 4) if arm == "M7" else (0, 0), remaining=0.5)
+    with pytest.raises(BudgetError, match="pilot cap re-run at 16 x B0"):
+        run_study._cap_gate(run2, {"outputs": {}, "warnings": [], "log_dirs": []}, groups2)
+    assert reruns2 == []
+
+
+def test_offline_the_cap_hit_gate_loops_only_on_token_cap_hits(clean_env, monkeypatch):
+    """The mocks' unanswered turn-cap runs are artefacts a larger token cap cannot change: reported, never looped on."""
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=True, hits=lambda arm, m: (10, 0) if arm == "M7" else (0, 0))
+    record: dict = {"outputs": {}, "warnings": [], "log_dirs": []}
+    gate, _ = run_study._cap_gate(run, record, groups)
+    assert gate["rule"] == "token_rate" and gate["multiple"] == 8 and gate["passed"] and reruns == []
+    assert gate["reported"] == {"M7": ["F1-2"]} and any("not the token cap's" in w for w in record["warnings"])
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=True, hits=lambda arm, m: (10, 10) if (arm, m) == ("M7", 8) else (0, 0))
+    gate, _ = run_study._cap_gate(run, {"outputs": {}, "warnings": [], "log_dirs": []}, groups)
+    assert gate["multiple"] == 16 and gate["passed"] and [r["rerun"] for r in gate["rounds"]] == [[], ["M7"]], "real token-cap hits loop offline too"
+
+
+def test_cap_hit_rates_tell_token_cap_hits_from_other_cap_hits(monkeypatch):
+    import pandas as pd
+
+    from ape.analysis import main_load
+
+    frame = pd.DataFrame(
+        [
+            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": "token", "agent_stops": None},
+            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": None, "agent_stops": {"limit": 1, "done": 2}},  # an agent stopped on the limit
+            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": None, "agent_stops": {"turn_cap": 1}},  # a turn cap
+            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": "cost", "agent_stops": {"limit": 1}},  # the cost limit
+            {"arm": "M7", "cell": "F1-2", "cap_hit": False, "limit_hit": None, "agent_stops": {"done": 3}},
+            {"arm": "S1", "cell": "F7-10", "cap_hit": False, "limit_hit": None, "agent_stops": None},
+        ]
+    )
+    monkeypatch.setattr(main_load, "load_main", lambda files, require_cost=True: frame)
+    rates = run_study.cap_hit_rates(["x.eval"])
+    assert rates["M7"]["F1-2"] == {"samples": 5, "cap_hits": 4, "token_hits": 2, "rate": 0.8, "token_rate": 0.4}
+    assert rates["S1"]["F7-10"]["rate"] == 0.0 and run_study.cap_hit_rates([]) == {}
+    assert run_study.arms_over_cap(rates, "rate") == {"M7": ["F1-2"]} and run_study.arms_over_cap({"S1": {"F1-2": {"rate": 0.1}}}, "rate") == {}, "over is > 10%"
+
+
 def test_b0_counts_every_model_of_a_sample_and_skips_errored_ones(monkeypatch):
     from types import SimpleNamespace
 
@@ -493,7 +740,7 @@ def test_main_builds_cover_the_kg_cells_and_share_the_gates_dev_worlds(clean_env
     assert run_study.kg_build_cell(StudyRun("main", "b6n", runs_root=clean_env / "runs", gate_run_id="g-nogo"), "test")[0].spec["systems"] == ["lightrag"]
     dev = {f"{s['family']}-{s['level']}": s for s in run_study.world_specs(live, "dev")}
     assert set(dev) == {"F1-32", "F2-10", "F3-60", "F7-1000"}
-    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == ["chunks", "apg"]
+    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == ["apg"], "M1k and M2 read the KG; S3s no longer tunes in main (D-041)"
     assert "shared" not in dev["F1-32"] and dev["F1-32"]["kinds"] == [] and dev["F1-32"]["seed_base"] == 1000
     assert run_study.kg_worlds(live, "dev") == {}, "shared dev worlds are the gate's: not projected again"
 
@@ -545,9 +792,14 @@ def test_a_live_tune_refuses_a_placeholder_or_unsigned_grid(clean_env):
     grid = yaml.safe_load((ROOT / "config" / "tuning_grid_main.yaml").read_text())
     assert "placeholder" not in grid and "owners.M1 is not set" in run_study.tuning_signoff_problems(grid), "B3's grid, not signed off yet"
     assert any("placeholder" in p for p in run_study.tuning_signoff_problems(grid | {"placeholder": True}))
-    signed = grid | {"owners": dict.fromkeys(grid["owners"], "Ada"), "signed_off": dict.fromkeys(grid["signed_off"], True)}
+    signed = grid | {"owners": dict.fromkeys(grid["owners"], "Ada") | {"S1": "Sam"}, "signed_off": dict.fromkeys(grid["signed_off"], True)}
     assert run_study.tuning_signoff_problems(signed) == []
     assert run_study.tuning_signoff_problems(signed | {"owners": signed["owners"] | {"M1": "TODO"}}) == ["owners.M1 is not set"]
+    # Every owners key needs its owner and sign-off, S1 (the skeptic's sign-off on the baseline) included, though no
+    # system tunes it; and the skeptic never owns a multi-agent arm's prompts (brief §7.3).
+    assert run_study.tuning_signoff_problems(signed | {"signed_off": signed["signed_off"] | {"S1": False}}) == ["signed_off.S1 is not true"]
+    skeptic_owns = run_study.tuning_signoff_problems(signed | {"owners": signed["owners"] | {"M7": " sam "}})
+    assert skeptic_owns == ["owners.M7 is the skeptic (owners.S1: Sam): a multi-agent arm's prompts need an independent author (brief §7.3)"]
     g_grid = yaml.safe_load((ROOT / "config" / "tuning_grid_study_g.yaml").read_text())
     assert "placeholder" not in g_grid and "owners.S-CM* is not set" in run_study.tuning_signoff_problems(g_grid), "B11's grid, not signed off yet"
     run = StudyRun("study_g", "tune", runs_root=clean_env / "runs")
@@ -555,32 +807,105 @@ def test_a_live_tune_refuses_a_placeholder_or_unsigned_grid(clean_env):
     assert run_study._refuse_tune(StudyRun("study_g", "tune", offline=True, runs_root=clean_env / "runs")) is None
 
 
-def test_session_tasks_take_the_b7_arguments_once_f8_session_has_them(monkeypatch):
-    from ape.tasks import study_g
+def test_a_live_tune_refuses_a_grid_that_breaks_the_tuning_rules(clean_env, monkeypatch):
+    """`tuning.study_grid_problems` before any dev run (B3): a live tune refuses a signed-off grid that breaks a rule;
+    offline the tune records the problems and runs."""
+    grid = yaml.safe_load((ROOT / "config" / "tuning_grid_main.yaml").read_text())
+    grid |= {"owners": dict.fromkeys(grid["owners"], "Ada") | {"S1": "Sam"}, "signed_off": dict.fromkeys(grid["signed_off"], True)}
+    monkeypatch.setattr(run_study, "_load_grid", lambda r: grid)
+    monkeypatch.setattr(run_study, "_refuse_frozen", lambda phase: lambda r: None)
+    monkeypatch.setattr(run_study, "_refuse_unbuilt", lambda phase: lambda r: None)
+    run = StudyRun("main", "tune", runs_root=clean_env / "runs")
+    assert run_study.grid_problems(run) == [] and run_study._refuse_tune(run) is None, "B3's grid passes once signed off"
+    grid["systems"]["M7"]["candidates"] = grid["systems"]["M7"]["candidates"][:3]
+    reason = run_study._refuse_tune(run)
+    assert reason.startswith("tune:") and "breaks the tuning rules" in reason and "M7: 3 candidates; equal budgets give every system budget_per_system (4)" in reason
+    assert run_study._refuse_tune(StudyRun("main", "tune", offline=True, runs_root=clean_env / "runs")) is None
 
-    assert run_study._session_options(plan_cell="g.cm.x", group="selected", seed_base=23000) == {}, "today's f8_session takes none of them"
-    assert run_study.f8_takes_seed_base() is False
 
-    def f8_session(level="40", split="dev", arm="CM0", limit_worlds=None, window=32000, variant="", plan_cell=None, group=None, seed_base=None, skip_worlds=None):
-        return None
+def test_each_tuned_arm_runs_with_exactly_its_own_selections_knobs(clean_env):
+    """D-042: Study G's CM knobs share one namespace (APE_CM_PRUNE_KEEP is CM-prune's and S-CM*'s; CM-todo and CM-reset
+    both read todo_extract), so each tuned arm runs in an eval set of its own under its own selection's knobs alone,
+    and the untuned arms under none; two selections setting one knob name never refuse."""
+    run = StudyRun("study_g", "groups", offline=True, runs_root=clean_env / "runs")
+    selected = {
+        "CM-prune": {"arm": "CM-prune", "env": {"APE_CM_PRUNE_KEEP": "5"}},
+        "CM-sum": {"arm": "CM-sum", "env": {"APE_CM_SUM_RATIO": "0.3"}},
+        "CM-todo": {"arm": "CM-todo", "env": {"APE_CM_TODO_EXTRACT": "false"}},
+        "CM-reset": {"arm": "CM-reset", "env": {"APE_CM_TODO_EXTRACT": "true", "APE_CM_RESET_EVERY": "3"}},
+        "S-CM*": {"arm": "S-CM*", "env": {"APE_CM_STACK": "trim+todo"}},
+    }
+    run.out_config_dir.mkdir(parents=True)
+    run.selected_path.write_text(yaml.safe_dump(selected))
+    groups = {(g["cell"], g["name"]): g for g in run_study.run_groups(run, "test")}
+    cm = {name: g for (cell, name), g in groups.items() if cell == "g.cm.luna-high"}
+    assert set(cm) == {"selected", "sel-CM-prune", "sel-CM-sum", "sel-CM-todo", "sel-CM-reset"}
+    for name in ("CM-prune", "CM-sum", "CM-todo", "CM-reset"):
+        assert cm[f"sel-{name}"]["env"] == selected[name]["env"] and [a["run"] for a in cm[f"sel-{name}"]["arms"]] == [name]
+    assert cm["selected"]["env"] == {} and {a["run"] for a in cm["selected"]["arms"]} == {"CM0", "CM-native", "O-state"}, "untuned: no selection's knobs"
+    scm = groups[("g.topo.luna", "sel-S-CM_")]
+    assert scm["env"] == {"APE_CM_STACK": "trim+todo"} and "APE_CM_PRUNE_KEEP" not in scm["env"], "S-CM* sees none of CM-prune's knobs"
+    assert groups[("g.topo.luna", "selected")]["env"] == {} and {a["run"] for a in groups[("g.topo.luna", "selected")]["arms"]} == {"S1", "M1", "M2"}
+    # The main study: M1s runs under M1's selection (it reads M1's knobs, D-041), with M1, never another arm's.
+    main_sel = {"M1": {"arm": "M1", "env": {"APE_MAS_M1_PROMPT": "concise"}}, "M7": {"arm": "M7", "env": {"APE_MAS_M7_PROMPT": "verify"}}, "S9": {"arm": "S9", "env": {}}}
+    assert run_study.env_group("M1s", "M1s", main_sel) == ("sel-M1", {"APE_MAS_M1_PROMPT": "concise"})
+    assert run_study.env_group("M7", "M7", main_sel) == ("sel-M7", {"APE_MAS_M7_PROMPT": "verify"})
+    assert run_study.env_group("S9", "S9", main_sel) == ("selected", {}) and run_study.env_group("S1", "S1", main_sel) == ("selected", {})
+    assert run_study.env_group("S7", "S7", main_sel) == ("s7", {}), "S7's group carries only its schedule knob"
 
-    monkeypatch.setattr(study_g, "f8_session", f8_session)
-    assert run_study._session_options(plan_cell="g.cm.x", group="selected", seed_base=23000, skip_worlds=None) == {"plan_cell": "g.cm.x", "group": "selected", "seed_base": 23000}
-    assert run_study.f8_takes_seed_base() is True
+
+def test_study_g_grid_checks_allow_the_shared_cm_namespace_and_hold_each_arm_to_its_own_knobs(clean_env, monkeypatch):
+    """D-042 / B11: Study G's candidates write out their arm's whole APE_CM_* configuration, so systems share knob names;
+    the grid check holds each candidate to the knobs its own arm reads, with values the policy takes, and the plan's
+    session tuning cell prices its F8 cell. T_abs is no knob: the runner passes the plan's to every session task."""
+    from ape import tuning
+
+    assert tuning.plan_task_cells({"N": 40, "sessions": 3}) == ["F8-40"] and tuning.plan_task_cells({"cells": ["F1-2"]}) == ["F1-2"]
+    run = StudyRun("study_g", "gg", offline=True, runs_root=clean_env / "runs")
+    planned = tuning.planned_tuning((c.id, c.spec) for c in run_study.phase_cells(run, "tune"))
+    assert planned["CM-sum"] == {"candidates": {"g.tune.luna": 2}, "cells": ["F8-40"]} and planned["S-CM*"]["candidates"] == {"g.tune.luna": 3}
+    grid = {
+        "budget_per_system": 3, "equal_budgets": False, "dev_cells": ["F8-40"],
+        "systems": {
+            "CM-prune": {"candidates": [{"id": f"p{k}", "arm": "CM-prune", "env": {"APE_CM_PRUNE_KEEP": str(k)}} for k in (3, 6, 12)]},
+            "CM-sum": {"candidates": [{"id": f"s-{v}", "arm": "CM-sum", "env": {"APE_CM_SUM_PROMPT": v}} for v in ("structured", "plain")]},
+            "CM-todo": {"candidates": [{"id": f"t-{v}", "arm": "CM-todo", "env": {"APE_CM_TODO_EXTRACT": v}} for v in ("true", "false")]},
+            "CM-reset": {"candidates": [{"id": f"r{e}", "arm": "CM-reset", "env": {"APE_CM_TODO_EXTRACT": "true", "APE_CM_RESET_EVERY": e}} for e in ("5", "0", "3")]},
+            "S-CM*": {"candidates": [{"id": f"x{i}", "arm": "S-CM*", "env": {"APE_CM_STACK": st, "APE_CM_PRUNE_KEEP": "3", "APE_CM_TODO_EXTRACT": "true"}} for i, st in enumerate(("prune+todo+reset", "prune+todo+sum", "prune+todo"))]},
+        },
+    }  # fmt: skip
+    monkeypatch.setattr(run_study, "_load_grid", lambda r: grid)
+    assert run_study.grid_problems(run) == [], "APE_CM_PRUNE_KEEP and APE_CM_TODO_EXTRACT are set by several systems, by design"
+    grid["systems"]["CM-prune"]["candidates"][0]["env"] |= {"APE_CM_SUM_PROMPT": "plain"}
+    grid["systems"]["S-CM*"]["candidates"][2]["env"]["APE_CM_STACK"] = "prune+trim"
+    grid["systems"]["CM-todo"]["candidates"][1]["env"] = {"APE_CM_TODO_EXTRACT": "maybe", "APE_CM_THRESHOLD": "30000"}
+    assert run_study.grid_problems(run) == [
+        "CM-prune: candidate p3: CM-prune reads none of ['APE_CM_SUM_PROMPT'] (its knobs: ['prune_keep'])",
+        "CM-todo: candidate t-false: CM-todo reads none of ['APE_CM_THRESHOLD'] (its knobs: ['todo_extract'])",
+        "CM-todo: candidate t-false: CM-todo rejects {'APE_CM_TODO_EXTRACT': 'maybe', 'APE_CM_THRESHOLD': '30000'}: not a boolean: 'maybe'",
+        "S-CM*: candidate x2: S-CM* rejects {'APE_CM_STACK': 'prune+trim', 'APE_CM_PRUNE_KEEP': '3', 'APE_CM_TODO_EXTRACT': 'true'}: stack 'prune+trim': at most one of ['prune', 'trim'] and one of ['sum', 'reset']",
+    ]
+    assert run_study.cm_candidate_problems("CM-nope", {})[0].startswith("session arm 'CM-nope' is not built yet")
+    # Topology is a primary test plan phase (G-H3 is confirmatory, D-033 / D-042): its groups run with the primary ones.
+    assert run_study.STUDIES["study_g"].primary == ("capability_anchor", "context_management", "topology")
+    assert all(g["primary"] for g in run_study.run_groups(run, "test") if g["cell"].startswith(("g.cap.", "g.cm.", "g.topo.")))
 
 
 def test_the_budget_guard_counts_the_studys_allocation(clean_env, monkeypatch):
     run = StudyRun("main", "guard", offline=True, runs_root=clean_env / "runs")
     assert run_phases(run, "preflight") == {"preflight": "done"}
 
+    allocation = float(run_study.plan(run).budget["allocations"]["main"])
+    spent = allocation - 1.0  # the main study's allocation all but $1 spent; the program has plenty left
+
     def main_nearly_spent(budget_usd, *_a, **_k):
-        return dict.fromkeys(run_gate.SPEND_KEYS) | {"budget_usd": budget_usd, "spent_usd": 999.0, "remaining_usd": budget_usd - 999.0, "by_study": {"main-offline": 999.0}}
+        return dict.fromkeys(run_gate.SPEND_KEYS) | {"budget_usd": budget_usd, "spent_usd": spent, "remaining_usd": budget_usd - spent, "by_study": {"main-offline": spent}}
 
     monkeypatch.setattr(run_gate, "program_remaining", main_nearly_spent)
     with pytest.raises(BudgetError, match=r"phase micro-pilot \(main: the smaller of the program's and the study's allocation's remainder\): projected \$[\d.]+ exceeds the remaining \$1.00"):
         run_phases(run, "micro-pilot")
     m = json.loads(run.manifest_path("micro-pilot").read_text())
-    assert m["status"] == "failed" and m["spend_at_start"]["study_remaining_usd"] == 1.0 and m["spend_at_start"]["remaining_usd"] == 4001.0
+    assert m["status"] == "failed" and m["spend_at_start"]["study_remaining_usd"] == 1.0 and m["spend_at_start"]["remaining_usd"] == 5000.0 - spent
     assert not (run.work_dir / "worlds" / "pilot").exists(), "nothing was built"
 
 
@@ -611,8 +936,9 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
     _fake_current(run)
     monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: [])
 
-    # 1. The placeholder pre-registration (and no analysis module) blocks the live freeze; nothing is frozen.
-    with pytest.raises(PhaseError, match=r"(?s)unfilled item\(s\).*\[USER: main-study pre-registration.*analysis not implemented"):
+    # 1. The draft pre-registration (its [USER: ...] items) and the missing cap-hit gate block the live freeze;
+    #    nothing is frozen.
+    with pytest.raises(PhaseError, match=r"(?s)unfilled item\(s\).*\[USER: .*cap-hit gate \(D-039\) has not run"):
         run_phases(run, "freeze")
     assert read_freeze(run) is None and json.loads(run.manifest_path("freeze").read_text())["status"] == "failed"
 
@@ -621,11 +947,13 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
     start = run_gate.prereg_body_start(text)
     prereg.write_text(text[:start] + run_gate.PLACEHOLDER_ITEM.sub("filled", text[start:]))
     monkeypatch.setattr(run_study, "analysis_available", lambda r: True)
+    run_gate._write_json(run.cap_gate_path, {"multiple": 16, "base": 8, "max": 32, "threshold": 0.1, "rule": "rate", "passed": True, "over": {}, "rates": {"M7": {"F1-2": {"rate": 0.05}}}, "rounds": []})
     real = (ROOT / "PROVENANCE.md").read_bytes()
     assert run_phases(run, "freeze") == {"freeze": "done"}
     freeze = run_study.require_frozen(run)
     assert freeze["rehearsal"] is False and freeze["test_seeds"]["base"] == 13000 and freeze["kg"]["arm"] == "APG-q" and freeze["code_commit"]
-    assert {"PREREGISTRATION_MAIN.md", "config/tuning_grid_main.yaml", "config/token_caps.json", "config/s7_targets.json", "gate/selected.yaml", "gate/decision.json", "uv.lock"} <= set(freeze["files"])
+    assert {"PREREGISTRATION_MAIN.md", "config/tuning_grid_main.yaml", "config/token_caps.json", "config/cap_gate.json", "config/s7_targets.json", "gate/selected.yaml", "gate/decision.json", "uv.lock"} <= set(freeze["files"])
+    assert freeze["cap_multiple"] == 16 and freeze["token_caps"]["F1-2"] == 1600 and freeze["cap_gate"]["rates"] == {"M7": {"F1-2": {"rate": 0.05}}}, "D-039: the test's multiple"
     assert "<!-- ape:test-seeds study=main run=live-freeze base=13000 count=9 -->" in provenance.read_text() and (ROOT / "PROVENANCE.md").read_bytes() == real
     assert run_study.choose_test_seed_base(StudyRun("main", "next", **kw))[0] == 13100
     assert run_gate.choose_test_seed_base(GateRun("gate-next", runs_root=tmp / "runs", provenance_path=provenance))[0] == 3000, "the gate never counts main's block"
@@ -641,14 +969,15 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
         run_study.require_frozen(StudyRun("main", "live-freeze", **kw))
 
 
-def test_live_study_g_refuses_a_later_block_until_f8_session_can_select_it(clean_env, monkeypatch):
+def test_live_build_test_and_test_refuse_code_or_knobs_other_than_the_frozen_ones(clean_env, monkeypatch):
     run = StudyRun("study_g", "g2", runs_root=clean_env / "runs")
     monkeypatch.setattr(run_study, "require_frozen", lambda r: {"frozen_at": "t", "code_commit": "abc", "test_seeds": {"base": 23100, "count": 10}})
     monkeypatch.setattr(run_study, "read_freeze", lambda r: {"code_commit": "abc", "test_seeds": {"base": 23100, "count": 10}, "design_env": {}, "kg": {"needed": False}})
     monkeypatch.setattr(run_gate, "code_drift", lambda commit: [])
-    assert "f8_session cannot select a seed block yet" in run_study._refuse_unless_frozen("test")(run)
-    monkeypatch.setattr(run_study, "f8_takes_seed_base", lambda: True)
-    assert run_study._refuse_unless_frozen("test")(run) is None
+    assert run_study._refuse_unless_frozen("test")(run) is None, "a later block is fine: f8_session selects the run's own (B7)"
+    monkeypatch.setenv("APE_CM_PRUNE_KEEP", "5")
+    assert "design knob(s) differ from the frozen ones: APE_CM_PRUNE_KEEP" in run_study._refuse_unless_frozen("test")(run)
+    monkeypatch.delenv("APE_CM_PRUNE_KEEP")
     monkeypatch.setattr(run_gate, "code_drift", lambda commit: ["src/ape/agent/session.py"])
     assert "code changed since the freeze commit" in run_study._refuse_unless_frozen("build-test")(run)
 
@@ -675,12 +1004,25 @@ def test_a_live_study_preflight_needs_a_fresh_smoke_and_the_studys_own_checks(cl
     probe = clean_env / "openai_probe.json"
     probe.write_text(json.dumps({"models_available": ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "text-embedding-3-small"]}))
     kw = {"runs_root": clean_env / "runs", "probe_path": probe, "env_path": clean_env / "no.env", "smoke_dir": clean_env / "smoke"}
-    with pytest.raises(PreflightError, match="no live smoke record"):
+    with pytest.raises(PreflightError, match="no live smoke record") as e:
         run_phases(StudyRun("study_g", "g1", **kw), "preflight")
+    assert "g.pilot.luna: CM-native needs confirmed native compaction for openai/gpt-6-luna" in str(e.value)
     _write_smoke(clean_env / "smoke", ["effort", "orchestrator"])
+    with pytest.raises(PreflightError, match="g.cm.luna-high: CM-native needs confirmed native compaction") as e:
+        run_phases(StudyRun("study_g", "g1", **kw), "preflight")
+    assert "no live smoke record" not in str(e.value), "CM-native's support is checked at preflight, before any sample"
+    # The B11 probe records the support; then the preflight passes.
+    from ape.agent.cm_arms import NATIVE_RECORD_ENV, record_native_support
+
+    monkeypatch.setenv(NATIVE_RECORD_ENV, str(record_native_support("openai/gpt-6-luna", True, evidence="test", path=clean_env / "native.json")))
+    with pytest.raises(PreflightError, match="g.cm.sol-high: CM-native needs confirmed native compaction for openai/gpt-6-sol") as e:
+        run_phases(StudyRun("study_g", "g1", **kw), "preflight")
+    assert "g.cm.luna-high" not in str(e.value), "D-043: Sol's CM-native cell needs Sol's own support record"
+    record_native_support("openai/gpt-6-sol", True, evidence="test", path=clean_env / "native.json")
     assert run_phases(StudyRun("study_g", "g1", **kw), "preflight") == {"preflight": "done"}
     m = json.loads(StudyRun("study_g", "g1", **kw).manifest_path("preflight").read_text())
     assert m["checks"]["smoke"] == "ok" and m["checks"]["probe"]["missing"] == [] and set(m["profiles"]) == {"study_g_luna", "study_g_sol", "study_g_astra"}
+    assert m["checks"]["cm_native"] == {"g.pilot.luna": "provider", "g.cm.luna-high": "provider", "g.cm.sol-high": "provider"}
     # A study's own required checks (BUILD_PLAN B12 adds them) are held to the same conditions.
     monkeypatch.setitem(run_study.STUDIES, "study_g", replace(STUDIES["study_g"], smoke_checks=("g-sessions",)))
     with pytest.raises(PreflightError, match="smoke check 'g-sessions' has no live result"):
@@ -689,10 +1031,33 @@ def test_a_live_study_preflight_needs_a_fresh_smoke_and_the_studys_own_checks(cl
     assert run_phases(StudyRun("study_g", "g2", **kw), "preflight") == {"preflight": "done"}
 
 
-def test_a_live_analyze_refuses_without_the_analysis_module(clean_env):
-    run = StudyRun("study_g", "an", runs_root=clean_env / "runs")
-    with pytest.raises(PhaseError, match="analysis not implemented: ape.analyze_g does not exist yet"):
-        run_study._analyze(run, {"outputs": {}, "warnings": []})
+def test_without_its_analysis_module_a_live_analyze_refuses_and_an_offline_one_writes_a_stub(clean_env, monkeypatch):
+    """Both modules exist now (ape.analyze_main, ape.analyze_g): the missing-module path, as a study without one meets it."""
+    monkeypatch.setattr(run_study, "analysis_available", lambda r: False)
+    for study in ("main", "study_g"):
+        run = StudyRun(study, "an", runs_root=clean_env / "runs")
+        with pytest.raises(PhaseError, match=f"analysis not implemented: {run.spec.analysis} does not exist yet"):
+            run_study._analyze(run, {"outputs": {}, "warnings": []})
+        offline = StudyRun(study, "an-off", offline=True, runs_root=clean_env / "runs")
+        record: dict = {"outputs": {}, "warnings": []}
+        run_study._analyze(offline, record)
+        assert record["analysis"] == {"status": "not_implemented", "module": offline.spec.analysis} and any("analysis not implemented" in w for w in record["warnings"])
+        assert json.loads((offline.dir / "report" / "analysis.json").read_text())["status"] == "not_implemented"
+
+
+def test_log_paths_are_recorded_relative_to_the_run_and_old_absolute_ones_still_resolve(clean_env, tmp_path):
+    run = StudyRun("main", "rel", offline=True, runs_root=clean_env / "runs")
+    log = run.dir / "test" / "main.A.arms" / "selected-x" / "a.eval"
+    log.parent.mkdir(parents=True)
+    log.write_text("x")
+    assert run_study.run_relative(run, log) == "test/main.A.arms/selected-x/a.eval"
+    assert run_study.resolve_log(run.dir, "test/main.A.arms/selected-x/a.eval") == run.dir / "test/main.A.arms/selected-x/a.eval"
+    assert run_study.resolve_log(run.dir, str(log)) == log, "an absolute entry (older manifests) is read as it is"
+    # A run moved, or restored from a backup elsewhere, still finds its logs.
+    moved = tmp_path / "elsewhere" / "rel"
+    shutil.copytree(run.dir, moved)
+    assert run_study.resolve_log(moved, run_study.run_relative(run, log)).read_text() == "x"
+    assert run_study.resolve_log(moved, "src/ape/run_study.py") == ROOT / "src/ape/run_study.py", "a repo-relative entry (`_show`)"
 
 
 def test_the_world_set_builder_takes_a_studys_seed_base_and_f8_knobs(clean_env, monkeypatch):
@@ -753,8 +1118,6 @@ def test_a_short_budget_stops_the_test_after_the_primary_cells(offline, monkeypa
     m = _manifest(run, "test")
     assert m["status"] == "failed" and m["primary_complete"] is True
     statuses = {c: x["status"] for c, x in m["cells"].items()}
-    assert list(statuses)[:5] == ["main.A.s1-pool", "main.A.arms", "main.A.m1s", "main.B.s1-pool", "main.B.arms"], "the primary phases' cells first"
-    assert statuses == {
-        "main.A.s1-pool": "done", "main.A.arms": "skipped", "main.A.m1s": "skipped", "main.B.s1-pool": "done", "main.B.arms": "done",
-        "main.C.a": "stopped", "main.C.b": "stopped", "main.F.luna": "stopped", "main.F.luna-f7-100": "stopped", "main.F.sol": "stopped",
-    }  # fmt: skip
+    primary = ["main.A.s1-pool", "main.A.arms", "main.A.m1s", "main.B.s1-pool", "main.B.arms"]
+    assert list(statuses)[:5] == primary, "the primary phases' cells first"
+    assert statuses == dict.fromkeys(primary, "done") | dict.fromkeys(["main.C.a", "main.C.b", "main.C.s8", "main.F.luna", "main.F.luna-f7-100", "main.F.sol", "main.F.sol-m2"], "stopped")

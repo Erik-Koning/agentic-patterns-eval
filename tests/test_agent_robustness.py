@@ -216,6 +216,21 @@ def test_search_kb_empty_huge_and_failing_queries_are_tool_errors(env, monkeypat
     assert s.scores["task_success"].value == "C" and "lightrag exploded" in s.store["search_errors"][0]["error"]
 
 
+def test_a_sample_limit_hit_inside_search_kb_ends_the_sample_at_once(env):
+    """B2's finding: the kg call inside a pull compile can hit the sample's token limit. That is no retrieval failure
+    for the model to route around: the limit ends the sample there, with no further model call."""
+    from inspect_ai.util import LimitExceededError
+
+    t = _f7_task()
+    arm = StubArm(exc=LimitExceededError("token", value=1200, limit=1000, message="token limit (1,000) exceeded"))
+    script = Script([out(tc("search_kb", {"query": "refunds"})), out(tc("submit_decision", dict(t.gold)))])
+    log, s = _run(env, _stub_task(arm), script)
+    assert script.i == 1, "one model call: the limit ended the sample before the model saw a tool error"
+    assert s.limit is not None and s.limit.type == "token"
+    assert not s.store.get("search_errors") and not any(isinstance(m, ChatMessageTool) and m.function == "search_kb" for m in s.messages)
+    assert s.store["compile_log"] == [] and s.store["turns_used"] == 1, "the logs are still written"
+
+
 # --- L5 / L9: labels and normalization -----------------------------------------------------------------------
 
 

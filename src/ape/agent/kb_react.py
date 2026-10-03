@@ -17,7 +17,8 @@ step's push plus any pulls made during the previous turn.
 
 Robustness rules for real models:
 - `search_kb` strips its query and caps it at SEARCH_QUERY_MAX_TOKENS; an empty query or a failed
-  compile comes back to the model as a tool error and never kills the sample. Its output limit
+  compile comes back to the model as a tool error and never kills the sample, except a sample limit (tokens,
+  cost) that the compile's own kg call hits: that ends the sample at once, as anywhere else. Its output limit
   (`search_kb_max_output`) is sized from the largest configured context budget, so the model sees the
   whole delivery; the compile log records the bytes the model saw and any truncation.
 - A text-only reply gets one nudge per text-only streak (at most MAX_NUDGES per sample); a second
@@ -33,7 +34,7 @@ from collections.abc import Awaitable, Callable
 from inspect_ai.model import ChatMessage, ChatMessageSystem, ChatMessageTool, ChatMessageUser, ContentText, execute_tools, get_model
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.tool import ToolDef, ToolError, ToolParam, ToolParams
-from inspect_ai.util import store
+from inspect_ai.util import LimitExceededError, store
 
 from ..config import Config
 from ..kb.context import ContextResult, DeliveryArm
@@ -149,6 +150,7 @@ def kb_agent(
         steps: list[dict] = []
         pulled: list[ContextResult] = []
         errors: list[dict] = []
+        limit_hit: list[LimitExceededError] = []  # a sample limit a search_kb compile hit (its kg call), re-raised below
         turn = 0
         max_output = search_kb_max_output()
 
@@ -170,6 +172,9 @@ def kb_agent(
                     raise ToolError("Empty query: pass a non-empty search query.")
                 try:
                     ctx = await compile_(q, "pull")
+                except LimitExceededError as e:  # Inspect turns a tool's limit error into a tool error: the loop re-raises it
+                    limit_hit.append(e)
+                    raise
                 except Exception as e:  # a retrieval failure is the model's problem to route around, not a harness error
                     errors.append({"step": turn, "error": f"{type(e).__name__}: {e}"[:500]})
                     raise ToolError(f"search_kb failed ({type(e).__name__}); try a different query.") from e
@@ -206,6 +211,8 @@ def kb_agent(
                 if output.message.tool_calls:
                     streak = False
                     result = await execute_tools(messages, tools)
+                    if limit_hit:  # the sample's limit was reached inside a tool: end the sample, as Inspect does elsewhere
+                        raise limit_hit[0]
                     messages.extend(result.messages)
                     if store().get(ANSWER) is not None:
                         break

@@ -58,7 +58,7 @@ def test_the_analyze_phase_writes_the_report_and_the_decision(offline_main):
 
 def test_arms_carry_their_plan_names_and_tiers_their_profiles(offline_main):
     run = _run(offline_main["runs"], offline_main["config"])
-    frame, coverage = am.load_test_rows(json.loads(run.manifest_path("test").read_text()), require_cost=False, tiers=am.profile_tiers(run.models_path))
+    frame, coverage = am.load_test_rows(json.loads(run.manifest_path("test").read_text()), require_cost=False, tiers=am.profile_tiers(run.models_path), run_dir=run.dir)
     assert {"S1", "S5", "S7", "S3s", "M1", "M1k", "M2", "M7", "S9", "M1s", "S8k3"} <= set(frame["arm"])
     assert (frame["arm"] == frame["run_arm"]).all(), "the main study's tuned arms run under their own names; S5 is resolved by the task"
     sol = frame[frame["plan_cell"].str.startswith("main.F.sol")]

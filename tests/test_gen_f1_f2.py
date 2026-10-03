@@ -282,10 +282,10 @@ def test_faults_are_enabled_per_task_only_on_request(offline_env):
 
 
 def test_main_study_covers_the_gate_families_and_resolves_s5_to_the_kg_arm(offline_env, monkeypatch):
-    """F3 and F7 run through the same task; S5 is the gate-selected KG arm (APE_KG_ARM); multi-agent arms are refused
-    until their solver is registered (BUILD_PLAN B2)."""
+    """F3 and F7 run through the same task; S5 is the gate-selected KG arm (APE_KG_ARM); an unknown arm id is refused
+    (every planned multi-agent arm is registered since B2, so the old "refused until registered" branch is gone)."""
     from ape.agent import arms
-    from ape.agent.solvers import MULTI_AGENT_ARMS
+    from ape.agent.solvers import MULTI_AGENT_ARMS, PLANNED_MULTI_AGENT_ARMS
 
     asyncio.run(build("dev", "F7", ["10"], n_worlds=1, n_tasks=2, relational=True, embed=True))
     log = inspect_eval(
@@ -303,9 +303,15 @@ def test_main_study_covers_the_gate_families_and_resolves_s5_to_the_kg_arm(offli
     monkeypatch.setenv("APE_KG_ARM", "S5")
     with pytest.raises(ValueError, match="APG or LightRAG"):
         arms.kg_arm_name()
-    if "M1" not in MULTI_AGENT_ARMS:
-        with pytest.raises(NotImplementedError, match="B2"):
-            main_study(family="F7", level="10", split="dev", arm="M1")
+    assert set(PLANNED_MULTI_AGENT_ARMS) <= set(MULTI_AGENT_ARMS)
+    monkeypatch.delenv("APE_KG_ARM")
+    bad = inspect_eval(
+        main_study(family="F7", level="10", split="dev", arm="S99"),
+        model=get_model("mockllm/model", custom_outputs=mock_agent),
+        log_dir=str(offline_env / "logs"),
+        display="none",
+    )[0]
+    assert bad.status == "error" and "unknown arm S99" in bad.error.message, "an unknown arm id never runs as some default arm"
 
 
 @pytest.mark.parametrize("arm", ["S5o", "LGRo-s"])

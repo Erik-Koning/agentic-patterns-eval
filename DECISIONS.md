@@ -427,6 +427,33 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Completeness check** (`tuning.study_grid_problems`) before any dev run: candidate counts equal under `equal_budgets`, distinct ids, each candidate runs its own arm and sets only its own valid knobs, no knob shared across systems, and counts and dev cells match the run plan.
 - **Known limits:** with about 40 dev tasks per candidate the standard error of a difference between candidates is about 11 pp, so the tune catches broken variants, not small gains. The gate gave S5's systems 6 configurations and S3s 3, not 4. Sol cells reuse the Luna selections.
 
+**D-042 (2026-10-03, BUILD_PLAN B11: PREREGISTRATION_G.md drafted).** The Study G pre-registration is written; its hypothesis and design tables are generated from `analysis/g_hypotheses.py` and a test keeps them identical. Decisions made with it:
+- **T_abs is fixed at 20K for every arm** (run_plan `study_g.threshold`), not tuned. It defines when management fires, so tuning it per arm would let arms differ in a structural parameter; the runner never passes it as a candidate.
+- **Each tuned arm runs with exactly its own selection's knobs.** CM knobs share one namespace (D-037), and the runner applied every selection's env to every arm of a cell, so S-CM* would have run with CM-prune's and CM-sum's knobs; being fixed in the runner (per-arm env groups).
+- **Topology is a primary test group** (G-H3 has been confirmatory since D-033), so a budget stop cannot drop it first; being fixed in the runner.
+- **A missing planned capability point** makes a confirmatory row INCOMPLETE, never SUPPORTED (the claims are restricted to the planned points); being fixed in the analysis.
+- M1 and M2 are not tuned in Study G (they inherit the main study's protocol defaults), while S-CM* is tuned; the pre-registration states the asymmetry.
+- Study G's runner fills no `[PILOT: …]` items: tuned values come from the frozen `selected.yaml`.
+- **Open for the user** (`[USER: …]` in the pre-registration): CM-native tiers, S1+KG and S-subiso, the capability anchor, the go-ahead after the micro-pilot review, and the CM-arm owner, skeptic, analyst and independent prompt author.
+
+**D-043 (2026-10-03, user: Study G's open design questions; costs from the B11 probe/grid package).**
+- **CM-native at two tiers:** it replaces CM-prune in `g.cm.sol-high` (+$6), so native compaction is measured at Luna-high and Sol, which the provider-absorption question needs. It runs only with the probe's confirmed Sol support record; if the probe finds Sol unsupported, CM-prune goes back into that cell before the freeze (a plan change, not a deviation). Rejected: adding it at Sol beside CM-prune (+$125, over Study G's allocation) or at Sol and Astra (+$373, over $5,000).
+- **Capability anchor unchanged** (S1 on F7-10 + F3-5), with the **tier order (Luna-low < Luna-high < Sol < Astra) as a pre-registered sensitivity** for every analysis that uses measured capability (G-H1, G-H2b). Rejected: a harder anchor (F7-100 + F3-60, +$45). The anchor is near the ceiling (Sol and Astra about 1.1 SE apart under the priors), so the measured scale may not separate the top tiers; the sensitivity covers that.
+- **S1+KG and S-subiso are Tier B:** F8's knowledge base is already in the system prompt (~2.3K tokens), so a KG arm has nothing to retrieve, and S-subiso is the audit's Tier B CM-subiso. The pre-registration lists both as not run.
+- **Study G tuning grid** (`config/tuning_grid_study_g.yaml`): each candidate writes out its arm's complete `APE_CM_*` configuration, so an arm runs at test exactly as on dev; CM-prune keeps 3/6/12 tool results; CM-sum structured/plain and CM-todo extraction on/off (2 candidates each: with T_abs fixed that is their design space; `g.tune.luna` now prices 2, −$4); CM-reset every 5 cases with handoff, at T_abs only with handoff, every 5 with the todo list alone; S-CM* prune+todo+reset, prune+todo+sum, prune+sum. The skeptic owns S-CM* (audit §6.2), the CM-arm author the four CM arms. CM0, O-state, CM-trim, CM-native and the topology arms are untuned. Dev noise (SE ≥ 4 pp per candidate) catches broken configurations, not small gains.
+- **Probe** (`readiness/probe_openai.py --study study_g`): every Study G profile (Luna, Sol, Astra) is probed for honoured parameters; the API mode each model runs on in Inspect is recorded (a model on two modes is a problem); a native-compaction probe per agent model writes the CM-native support record. About $0.6 extra.
+- **Budget:** $4,712 conservative / $3,161 expected; contingency $288.
+
+**D-044 (2026-10-03, BUILD_PLAN B5: PREREGISTRATION_MAIN.md drafted).** The main pre-registration is written; its hypothesis table is generated from `analysis/main_hypotheses.py` and a test keeps them identical. Decisions made with it:
+- **No pre-registered extension** for the main study: any further data is a new pre-registration. `analyze_main` analyses an extension run alone as primary-only if one is ever frozen.
+- **The live S8k3 gets 5 runs** in its own Study C cell (`main.C.s8`, +$13): it runs only in Study C, so with 2 epochs its determinism metrics rested on 2 runs, against the brief's 5 per arm.
+- **Real sizes:** the runner builds whole worlds of 12 tasks, so "100 tasks" is 108 (9 worlds), M4's "n = 50" is 60 and Study C's 15 is 24; the pre-registration states the real sizes.
+- **Power figures:** the code table's (after D-033) are the ones that count: M3 0.87, M5 0.89 at Δ = 0 (±6 pp); K2's interaction 0.94 at −10 pp (0.82 at −8); K2-NI 0.78 at Δ = 0. D-033 quoted the earlier simulation's 0.84 / 0.87 / 0.86 / 0.79.
+- **Not implemented, stated in the pre-registration:** a per-run cache nonce (brief §6.2) and a wall-clock cap (brief §4.5). Both go to B12 (see BUILD_PLAN §6).
+- `HYPOTHESES.md` rows K1, M1, M2, M3, M5, K4, C1 and A1 were aligned with the code table; the GATE row now names the gate's actual test (cluster-t, D-023).
+- **Open for the user** (`[USER: …]`): the M-arm prompt author, the skeptic and the analyst. Two `[PILOT: …]` items are not yet written by the runner (`cap multiple`, `pilot σ and power`).
+- **Budget:** $4,725 conservative / $3,168 expected; contingency $275.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

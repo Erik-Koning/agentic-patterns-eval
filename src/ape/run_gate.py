@@ -39,7 +39,8 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
                 passes (or its failure is accepted with a diagnosis) and every phase it rests on is current
                 (`stale_upstream`: a re-run of build-dev, tune, anchor and pilot would each be a skip); offline: a
                 rehearsal on a filled copy, with warnings. Then the sha256 of the pre-registration, the
-                FROZEN_CONFIG files, the run's FROZEN_OUTPUTS and the FROZEN_CODE files, the commit (`code_commit`),
+                FROZEN_CONFIG files (run_plan, models and model_costs as the gate's slice: "Config slices" below),
+                the run's FROZEN_OUTPUTS and the FROZEN_CODE files, the commit (`code_commit`),
                 the APG pin, the design knobs tune and pilot ran with (`design_env`) and the run's test-seed block
                 (`choose_test_seed_base`) -> freeze.json, then PROVENANCE.md (a freeze interrupted between the two
                 is completed by the next `freeze`: `_complete_freeze`). `require_frozen` is the guard build-test
@@ -58,6 +59,14 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
                 runs it then too, before reporting the test's failure.
 
 `all` runs every phase through analyze.
+
+Config slices (`ape.freeze_scope`). config/run_plan.yaml, models.yaml and model_costs.yaml are shared with the main
+study and Study G, whose plans keep changing after the gate freezes (pilot recalibration, tuning grids, allocations).
+So the gate fingerprints and freezes only its own slice of each: run_plan's `studies.gate`, `budget.total_usd` and
+`sample_cost_limit`, and the cuts that edit a gate cell; the profiles the gate uses (`gate`, `anchor`, `anchor_luna`);
+and the prices of the models those call. tuning_grid.yaml, the pre-registration, the run's outputs and the frozen code
+are the gate's own and hashed whole. Manifests and freeze.json record a slice as `{path, slice, sha256, file_sha256}`:
+the whole file's hash is information only, never enforced (`frozen_changes` checks the slice).
 
 Freeze. A run is frozen once: after freeze.json exists, `tune`, `pilot` and `anchor` refuse to run (even with
 --force; they would rewrite frozen inputs or pc1.json), and `freeze` re-runs only as a skip. `build-test` and
@@ -215,9 +224,10 @@ from typing import Any
 
 import yaml
 
-from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, program_remaining, projected_cost, remaining, require_affordable
+from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, program_remaining, projected_cost, remaining, require_affordable, usage_ledgers
 from .build_quality import worlds_per_cell_note
 from .config import ROOT, Config, embedding_cache
+from .freeze_scope import ConfigSlice, config_input
 from .models import PreflightError, Profile, load_profile, preflight, storage_warnings
 from .runner import INDEX_NAME
 from .spend import LABEL_ENV, REGISTRY_ENV
@@ -434,7 +444,25 @@ def _now() -> str:
 
 
 def _sha256(path: Path) -> str | None:
+    """A file's sha256; for a shared config file taken as a study's slice (`freeze_scope.ConfigSlice`), the slice's."""
+    if isinstance(path, ConfigSlice):
+        return path.sha256()
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def _file_entry(path: Path) -> dict:
+    """How a manifest's inputs and freeze.json record a file: path and sha256; a slice adds its study and, for
+    information only (never enforced), the whole file's sha256."""
+    entry = {"path": _show(path), "sha256": _sha256(path)}
+    if isinstance(path, ConfigSlice):
+        entry |= {"slice": path.study, "file_sha256": _sha256(Path(path))}
+    return entry
+
+
+def _entry_path(entry: dict) -> Path:
+    """A recorded file entry (`_file_entry`) back as the path, or slice, it was hashed as."""
+    p = _resolve(entry["path"])
+    return ConfigSlice(p, study=entry["slice"]) if entry.get("slice") else p
 
 
 def _show(path: Path) -> str:
@@ -763,24 +791,30 @@ def run_log_files(run: GateRun) -> list[str]:
     return sorted(str(p) for p in run.dir.rglob("*.eval"))
 
 
-SPEND_KEYS = ("registry", "inspect_usd", "ledger_usd", "spent_usd", "by_study", "partial_logs", "unfinished_dirs", "missing", "unreadable")
+SPEND_KEYS = (
+    "registry", "inspect_usd", "unlogged_usd", "ledger_usd", "spent_usd", "by_study", "usage_ledger_usd", "final_attempt_diff_usd", "partial_logs",
+    "unfinished_dirs", "missing", "unreadable",
+)  # fmt: skip
 
 
 def spend(run: GateRun) -> dict:
     """The guard's view: the whole program's spend (`ape.budget.program_remaining` over the spend registry; offline
     runs have their own registry under work/) against the plan's budget, or a lower `run.budget_usd`. Also this
-    run's own spend (its logs plus the ledger it writes to): `run_spent_usd`."""
+    run's own spend (its logs, what their usage ledgers add, and the build ledger it writes to): `run_spent_usd`. Spend
+    counts what no Inspect log holds, from each log dir's usage ledger (`ape.usage_ledger`: errored attempts Inspect
+    retried, a killed run's in-flight samples; `unlogged_usd`)."""
     budget = float(plan(run).budget["total_usd"])
     if run.budget_usd is not None:
         budget = min(budget, run.budget_usd)  # an override may only lower the plan's budget, never raise it
     program = program_remaining(budget, None, run.costs_path)
-    mine = remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path)
+    mine = remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path, usage_ledgers(run.dir))
     return {
         "budget_usd": program["budget_usd"],
         "spent_usd": program["spent_usd"],
         "remaining_usd": program["remaining_usd"],
         "run_spent_usd": mine["spent_usd"],
         "run_inspect_usd": mine["inspect_usd"],
+        "run_unlogged_usd": mine["unlogged_usd"],
         "run_ledger_usd": mine["ledger_usd"],
         "program": {k: program[k] for k in SPEND_KEYS},
     }
@@ -790,11 +824,11 @@ def prior_attempt_spend(run: GateRun, name: str, old: dict | None, fingerprint: 
     """$ that earlier attempts of this phase with the same fingerprint already spent on its current work (a resume
     after a crash, a failure or a budget stop, or a --force re-run): `ape.runner` reuses their finished eval logs and
     `ape.artifacts` their current artifacts, so the guard should project only the rest. It is the Inspect spend of
-    the eval logs under the phase's directory written since the first such attempt, plus the build/embedding
-    ledger's entries since then. 0 for a first run or changed inputs (new work: new log dirs, new artifacts).
-    An approximation: a retried sample's first, wasted attempt is credited too, and a concurrent run's ledger
-    entries in that window would be."""
-    from .budget import ledger_spend, logs_spend
+    the eval logs under the phase's directory written since the first such attempt, what their usage ledgers add
+    since then (errored attempts), plus the build/embedding ledger's entries since then. 0 for a first run or
+    changed inputs (new work: new log dirs, new artifacts). An approximation: a concurrent run's ledger entries in
+    that window would be credited too."""
+    from .budget import ledger_spend, logs_spend, unlogged_spend
 
     if not old or old.get("fingerprint") != fingerprint:
         return 0.0
@@ -804,18 +838,22 @@ def prior_attempt_spend(run: GateRun, name: str, old: dict | None, fingerprint: 
         return 0.0
     t0 = datetime.fromisoformat(since).timestamp()
     logs = [p for p in run.phase_dir(name).rglob("*.eval") if p.stat().st_mtime >= t0]
-    return logs_spend(logs)["inspect_usd"] + ledger_spend(Config().ledger_path, run.costs_path, since=t0)
+    unlogged = unlogged_spend(logs, usage_ledgers(run.phase_dir(name)), since=t0)["unlogged_usd"]
+    return logs_spend(logs)["inspect_usd"] + unlogged + ledger_spend(Config().ledger_path, run.costs_path, since=t0)
 
 
 def verify_offline(run: GateRun) -> dict:
-    """Offline runs must not have called any real model: every log's models mockllm, the ledger empty."""
+    """Offline runs must not have called any real model: every log's models, and every call the usage ledgers
+    recorded, mockllm; the build ledger empty."""
     from .llm.ledger import Ledger
+    from .usage_ledger import read_entries
 
     models: set[str] = set()
     for index in run.dir.rglob(INDEX_NAME):
         for entry in json.loads(index.read_text()).get("tasks", {}).values():
             models.add(str(entry.get("model")))
             models.update(str(m) for m in (entry.get("model_roles") or {}).values())
+    models.update(str(e.get("model")) for e in read_entries(usage_ledgers(run.dir)))
     ledger = Config().ledger_path
     entries = Ledger(ledger).read() if ledger.is_file() else []
     problems = [f"eval logs used non-mock model(s) {sorted(m for m in models if not m.startswith('mockllm/'))}"] if any(not m.startswith("mockllm/") for m in models) else []
@@ -946,7 +984,8 @@ class Phase:
 
 
 def _cfg_inputs(run: GateRun, *names: str) -> dict[str, Path]:
-    return {f"config/{n}": run.config(n) for n in names}
+    """Config inputs; the shared files (run_plan, models, model_costs) as the gate's slice (`freeze_scope`)."""
+    return {f"config/{n}": config_input(run.config(n), STUDY) for n in names}
 
 
 # preflight -----------------------------------------------------------------------------------------
@@ -2139,22 +2178,24 @@ def prereg_placeholders(text: str) -> list[dict]:
 
 
 def frozen_files(run: GateRun, prereg: Path) -> dict[str, Path]:
-    """What the freeze hashes: the pre-registration as frozen, the config inputs and the tune/pilot outputs."""
+    """What the freeze hashes: the pre-registration as frozen, the config inputs (the shared run_plan, models and
+    model_costs files as the gate's slice, `freeze_scope`) and the tune/pilot outputs."""
     return (
         {"GATE_PREREG.md": prereg}
-        | {f"config/{n}": run.config(n) for n in FROZEN_CONFIG}
+        | {f"config/{n}": config_input(run.config(n), STUDY) for n in FROZEN_CONFIG}
         | {f"config/{n}": run.out_config_dir / n for n in FROZEN_OUTPUTS}
         | {n: ROOT / n for n in FROZEN_CODE}
     )
 
 
 def frozen_changes(record: dict) -> list[str]:
-    """The frozen files that are missing or no longer match their hash, as `key (path): what`."""
+    """The frozen files that are missing or no longer match their hash, as `key (path): what` (a slice: the study's
+    slice of the file, `_entry_path`; the whole file's `file_sha256` is information only)."""
     out = []
     for key, f in record["files"].items():
-        now = _sha256(_resolve(f["path"]))
+        now = _sha256(_entry_path(f))
         if now != f["sha256"]:
-            out.append(f"{key} ({f['path']}): {'missing' if now is None else 'changed'}")
+            out.append(f"{key} ({f['path']}{', ' + f['slice'] + ' slice' if f.get('slice') else ''}): {'missing' if now is None else 'changed'}")
     return out
 
 
@@ -2323,7 +2364,7 @@ def _freeze_provenance_lines(run: GateRun, freeze: dict) -> list[str]:
         f"\n## Gate freeze: run `{run.run_id}` ({freeze['frozen_at']}){' (OFFLINE REHEARSAL)' if run.offline else ''}\n",
         f"- **Commit:** `{git['commit']}`; analysis code (`src/ape/analysis/`, `src/ape/analyze_gate.py`) at `{freeze['analysis_commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{APG_PIN}`).",
         "- **Frozen files** (sha256):",
-        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
+        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}{' (the gate slice)' if f.get('slice') else ''}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         f"- **Design knobs** (APE_* set when tune and pilot ran; build-test and test refuse others): {_fmt_env(freeze.get('design_env'))}.",
         *([f"- **PC1 failed and was accepted at the freeze:** {pc1_accepted['reason']}"] if pc1_accepted else []),
         *(
@@ -2441,7 +2482,7 @@ def _freeze(run: GateRun, record: dict) -> None:
         "offline": run.offline,
         "rehearsal": rehearsal is not None,
         "placeholders_replaced": rehearsal or [],
-        "files": {k: {"path": _show(p), "sha256": _sha256(p)} for k, p in files.items()},
+        "files": {k: _file_entry(p) for k, p in files.items()},
         "git": git,
         "analysis_commit": _git("log", "-1", "--format=%H", "--", "src/ape/analysis/", "src/ape/analyze_gate.py"),
         "apg_core": {"installed_commit": _apg_installed_commit(), "pinned_commit": APG_PIN},
@@ -2479,7 +2520,7 @@ def _frozen_inputs(run: GateRun) -> dict[str, Path]:
     """The files freeze.json froze, as a phase's inputs: an edit changes the fingerprint, so the phase is not
     skipped and its freeze check (`_refuse_unless_frozen`) names the file."""
     record = read_freeze(run) or {}
-    return {k: _resolve(f["path"]) for k, f in (record.get("files") or {}).items()}
+    return {k: _entry_path(f) for k, f in (record.get("files") or {}).items()}
 
 
 def frozen_code_drift(run: GateRun) -> list[str] | None:
@@ -2728,10 +2769,13 @@ def group_done(log_dir: Path, g: dict) -> bool:
 
 
 def group_spent(log_dir: Path) -> float:
-    """Inspect $ the group's eval logs already hold (each sample once)."""
-    from .budget import logs_spend
+    """$ the group's eval set already spent: its logs (each sample once) and what its usage ledger adds."""
+    from .budget import logs_spend, unlogged_spend
 
-    return logs_spend(sorted(log_dir.rglob("*.eval")))["inspect_usd"] if log_dir.is_dir() else 0.0
+    if not log_dir.is_dir():
+        return 0.0
+    logs = sorted(log_dir.rglob("*.eval"))
+    return logs_spend(logs)["inspect_usd"] + unlogged_spend(logs, usage_ledgers(log_dir))["unlogged_usd"]
 
 
 def group_remaining(run: GateRun, g: dict, projected: float) -> float:
@@ -2890,8 +2934,8 @@ def _analyze_inputs(run: GateRun) -> dict[str, Path]:
         "build-test/worlds.json": run.phase_dir("build-test") / "worlds.json",
         "config/selected.yaml": run.selected_path,
         "config/tuning_grid.yaml": run.config("tuning_grid.yaml"),
-        "config/run_plan.yaml": run.config("run_plan.yaml"),
-        "config/model_costs.yaml": run.costs_path,
+        "config/run_plan.yaml": config_input(run.config("run_plan.yaml"), STUDY),
+        "config/model_costs.yaml": config_input(run.costs_path, STUDY),
         "ledger": Config().ledger_path,
     }
 
@@ -3032,7 +3076,7 @@ def phase_state(run: GateRun, name: str) -> dict:
     """A phase's inputs (hashed), params, upstream fingerprints and fingerprint, as they are now. `run_phase` skips a
     complete phase whose recorded fingerprint equals this one; the freeze requires that of what it rests on."""
     phase = PHASE_DEFS[name]
-    inputs = {k: {"path": _show(p), "sha256": _sha256(p)} for k, p in phase.inputs(run).items()}
+    inputs = {k: _file_entry(p) for k, p in phase.inputs(run).items()}
     params = json.loads(json.dumps(phase.params(run), default=str))  # as a manifest stores them
     upstream = {u: (read_manifest(run, u) or {}).get("fingerprint") for u in phase.upstream}
     return {"inputs": inputs, "params": params, "upstream": upstream, "fingerprint": _fingerprint(inputs, params, upstream)}

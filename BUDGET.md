@@ -7,16 +7,16 @@
 | Study | Phases (conservative $) | Conservative | Expected | Allocation (D-035) |
 |---|---|---|---|---|
 | Gate | smoke 3 · anchor 11 · builds 57 · tuning 8 · pilot 13 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **214** | 188 | ≤ 300 |
-| Main study | builds 5 · micro-pilot 10 · tuning 35 · pilot 15 · A 141 · B 136 · C 27 · F 642 | **1,012** | 776 | ≤ 1,100 |
-| Study G | micro-pilot 11 · tuning 26 · capability anchor 51 · context management 1,758 · topology 1,638 | **3,483** | 2,195 | ≤ 3,600 |
-| **Total** | | **4,710** | **3,159** | ≤ 5,000 |
-| Contingency | $5,000 − conservative total | 290 | | ≥ 280 |
+| Main study | builds 5 · micro-pilot 10 · tuning 35 · pilot 15 · A 141 · B 136 · C 40 · F 642 | **1,025** | 783 | ≤ 1,100 |
+| Study G | micro-pilot 11 · tuning 22 · capability anchor 51 · context management 1,764 · topology 1,638 | **3,486** | 2,196 | ≤ 3,600 |
+| **Total** | | **4,725** | **3,168** | ≤ 5,000 |
+| Contingency | $5,000 − conservative total | 275 | | ≥ 270 |
 
-- **By tier** (conservative / expected): Astra-high 1,966 / 1,230 · Sol-high 1,840 / 1,276 · Luna-high 801 / 596 · Luna-low 89 / 45 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
+- **By tier** (conservative / expected): Astra-high 1,966 / 1,230 · Sol-high 1,846 / 1,280 · Luna-high 810 / 600 · Luna-low 89 / 45 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
 - **Pilot σ cell (D-026, 2026-10-02):** +$8 conservative. The pilot builds 8 worlds per cell (was 4; +$6.19) and runs APG* and LGR* on the 4 new ones (`gate.pilot.sigma`, +$2.17), so σ is estimated from 8 worlds per cell.
 - **PC1 fidelity (D-025, 2026-10-02):** the anchor grew about $5: answer contexts mapped to LightRAG 1.2.5's caps (26.5K tokens) and a second scorer's judge calls; its bge embeddings run locally ($0).
 - **The total fits.** Each study is within its allocation (D-035: allocations reset to the right-sized plan plus headroom; the FX-5 targets were 700 / 1,000 / 2,700, and Study G's topology cells would have been stopped by the guard). The gate's underspend covers part of that. The conservative scenario prices every cached token at the full input price, so expected spend is ≈ $3.2K. The orchestrator's budget check (FX-6) stops any phase whose projected cost exceeds what remains.
-- **Biggest drivers:** Study G on Astra ($1,966), Study G on Sol ($1,214), and Study F on Sol ($626).
+- **Biggest drivers:** Study G on Astra ($1,966), Study G on Sol ($1,220), and Study F on Sol ($626).
 - **D-017's Sol build path** would add **$1,074** (was $957; the 16 extra pilot worlds of D-026 are built by the same builder). That needs approval.
 - **F1/F2 measured (2026-10-01).** The registry generators (`worlds/gen_registry.py`) replaced the assumed F1/F2 sizes: corpus 3,337 tokens (was 2,000) and 20 chunks per world at every level (`readiness/measure_registry.py`). Main study +$50.
 - **Not yet priced: bulky F1/F2 tool results.** Each supplier record is ~400 tokens and stays in the history. The measured per-call history (F1-32: 1,258 tokens per prior call, against the 250 prior) is in `readiness/measure_registry.py`. Priced through `history_per_prior_call_by_cell` (commented out in `config/budget_assumptions.yaml`), it adds about $320, almost all of it Study F on Sol over F1-32, for a total of $5,062. That needs a decision; cut C5 (Study F Sol 100 → 60 tasks) would cover it.
@@ -70,3 +70,5 @@ FX-6 calls `projected_cost()` and `remaining()` before each phase. It refuses th
 - **D-033 / D-034 (2026-10-03):** −$84 net. Study G's topology gets a Luna-low cell and 16 Luna sessions per point (+$73, for G-H3's power); M7 is priced at its measured 5× a single agent (was 3×; +$33); M2 is dropped from F1-32 in Study F, where specialization is undefined (−$190). Contingency $238 → $322.
 - **B8 overheads (2026-10-03):** +$32. CM-todo, CM-reset and S-CM* are priced at their measured management overhead including `todo_write` traffic (0.20, 0.25, 0.25 of agent calls; were 0.15, 0.05, 0.15). Contingency $322 → $290.
 - **D-041 (2026-10-03):** −$0.8. S3s is no longer re-tuned in the main study (`main.tune.b`): S3s and S5 inherit the gate's selections.
+- **D-043 (2026-10-03):** +$2. CM-native replaces CM-prune at Sol (+$6); the Study G tune prices CM-sum and CM-todo at their 2 real candidates (−$4).
+- **D-044 (2026-10-03):** +$13. The live S8k3 gets all 5 Study C runs in its own cell (`main.C.s8`), as the brief's Study C specifies; it had 2. Contingency target lowered to 270.

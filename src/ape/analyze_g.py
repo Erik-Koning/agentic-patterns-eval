@@ -22,12 +22,13 @@ and returns a compact JSON-able summary, which the phase records under `analysis
 **What it does.** Session cells (`g.cm.*`, `g.topo.*`) and the capability-anchor cells (`g.cap.*`) go to
 `g_report.report_from_cells`-equivalent loading (`g_load.load_g_cells` with the plan, the points and the prices).
 Arms are relabelled from the arm that ran to the arm the plan declares, per cell (the logs record the run arm, and the
-analysis compares plan arms). `g_report.g_report` then computes every hypothesis. On top of that the report adds:
+analysis compares plan arms). `g_report.g_report` then computes every hypothesis, the confirmatory rows over the run
+plan's points: a planned point without data makes G-H2a or the G-H3 sequence INCOMPLETE (never SUPPORTED), as
+PREREGISTRATION_G.md requires. On top of that the report adds:
 - the run: freeze, role, seed block and test status;
 - the selections and tuning summary;
-- a **coverage table** per plan cell and arm: planned, run, skipped (with the runner's reason; S1, M1 and M2 session
-  arms are BUILD_PLAN B9's and are skipped offline until it lands), missing (planned and not skipped, but no data),
-  and sessions present against planned.
+- a **coverage table** per plan cell and arm: planned, run, skipped (with the runner's reason, e.g. an arm whose solver
+  is not registered), missing (planned and not skipped, but no data), and sessions present against planned.
 
 The summary's `status` is `ok` (every planned arm of every test cell has data), `partial` (some cells or arms are
 missing, failed, stopped or skipped) or `no_data` (no session was analysed).
@@ -273,7 +274,10 @@ def analyze(run, **report_kw) -> dict:
     cells, labels, points = collect(run, test, plan, problems)
     data = load_g_cells(cells, plan=plan, points=points, prices=prices)
     items, sessions = relabel(data.items, labels), relabel(data.sessions, labels)
-    d = g_report(items, sessions, data.capability, cells=data.cells, problems=[*problems, *data.problems], **report_kw)
+    # The run's plan fixes the points each confirmatory family must cover; an unreadable plan (already reported) leaves
+    # the decisions over the points present.
+    planned = {"planned": {}} if plan is None else {"plan": plan}
+    d = g_report(items, sessions, data.capability, cells=data.cells, problems=[*problems, *data.problems], **planned, **report_kw)
     cov = coverage(plan, test, sessions, data.capability, points)
     sel = selections(run, problems)
     d["run"] = _clean({
@@ -307,7 +311,7 @@ def render_run(d: dict) -> str:
     if d.get("problems"):
         L += ["**Inputs and runs:**", ""] + [f"- {p}" for p in d["problems"]] + [""]
     scale = " Offline runs are scaled down (one session or world per cell, one epoch): *Present* is against the live plan's *Planned*." if r["offline"] else ""
-    L += ["## Coverage", "", f"Per plan test cell and arm. *skipped*: the runner skipped an arm not built yet (S1, M1 and M2 session arms are BUILD_PLAN B9's); *missing*: planned and run, but no data; *not run*: the cell is not in the test manifest.{scale}", ""]
+    L += ["## Coverage", "", f"Per plan test cell and arm. *skipped*: the runner skipped an arm whose solver is not registered; *missing*: planned and run, but no data; *not run*: the cell is not in the test manifest.{scale}", ""]
     L += [_table(["Cell", "Point", "Arm", "Cell status", "State", "Present", "Planned", "Reason"], [[c["cell"], c["point"] or "–", c["arm"], c["cell_status"], c["state"], f"{c['present']} {c['unit']}", c["planned"], c["reason"] or ""] for c in d["coverage"]])]
     sel = d.get("selections") or {}
     if sel.get("selected"):
