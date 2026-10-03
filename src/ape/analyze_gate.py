@@ -22,8 +22,9 @@ Contents:
   the gate run's familywise α (`gate_stats.holm_modes`; D-023), then one label (`gate_stats.combine_modes`): GO,
   GO_PUSH_ONLY, GO_PULL_ONLY, GO_WITH_COST_FLAG, INCONCLUSIVE, NO_GO or PRECONDITION_FAIL. Errored samples count as
   failures (§2); a sensitivity analysis excludes them.
-- The one pre-registered extension (§8): `--extension-of <stage-1 run>` marks this run as the extension of an
-  INCONCLUSIVE gate run; its fresh worlds are analysed alone at the extension's α (`extension_context`).
+- The one pre-registered extension (§8): a run frozen with `run_gate freeze --extension-of <stage-1 run>` is the
+  extension of an INCONCLUSIVE gate run; its role in freeze.json (D-027), not a flag here, makes its fresh worlds
+  analysed alone at the extension's α (`extension_context`). `--extension-of` here only checks that role.
 - The NO-GO diagnosis (§8), always computed: S5o against LGR* on their shared tasks, and every failed
   sample's pipeline miss (`gate_stats.pipeline_miss`).
 - Tables: per-cell Δ with 95% CIs; per arm success, partial credit, evidence recall, error labels; cost per
@@ -59,14 +60,18 @@ from .analysis.gate_stats import (
     HEALTH_COLUMNS,
     INVARIANT_TOL,
     MARGIN,
+    MAX_CAP_HIT_RATE,
+    MAX_ERROR_RATE,
     MIN_WORLDS_PER_CELL,
     MISS_LABELS,
+    PC5_CONFIDENCE,
     STAGE_ALPHA,
     Decision,
     combine_modes,
     decide,
     delta_ci,
     epoch_agreement,
+    harness_rates,
     holm_modes,
     invariants,
     load_results,
@@ -89,14 +94,12 @@ APG, LGR, S3S, PLACEBO, NAIVE = "APG*", "LGR*", "S3s", "S7", "LGR-naive"
 CHAIN = ("S6", "S5o", APG, PLACEBO)  # PC3, best to worst
 CAPPED = (LGR, S3S)  # PC4: the arms the matched-budget calibration caps (APG fills instead)
 F5_CELLS = ("F5-1hop", "F5-2hop")
-MAX_ERROR_RATE = 0.02  # PC5
-MAX_CAP_HIT_RATE = 0.10  # PC5
 CONTEXT_FACTOR = 4.0  # PC4 (descriptive): median realized context vs 4x the configured budget
 MATCHED_TOLERANCE = 0.25  # PC4: capped arms within ±25% of the matched budget
 ALPHA = 0.025  # one-sided level of the reported 95% intervals and of the PC2 / PC3 violation tests
 GATE_ALPHA = STAGE_ALPHA["stage1"]  # the gate run's familywise one-sided α across delivery modes (§2, D-023)
 EXTENSION_ALPHA = STAGE_ALPHA["extension"]  # the one pre-registered extension's α (§8)
-EXTENSION_FILE = "extension.json"  # in a run dir: this run is the extension of the named stage-1 run
+FREEZE_FILE = "freeze.json"  # in a run dir: its `role` says whether the run is the primary gate run or the extension (§8, D-027)
 HEALTH_WARN = 0.05  # harness health: a rate above this is a report warning (GATE_PREREG sets no threshold; never gated)
 MATCHED_CELL = "gate.sec.matched-300"
 REPS = 10_000  # bootstrap and sign-flip resamples (§2)
@@ -119,7 +122,9 @@ CHOICES = (
     "§7's conditions must be shown, not assumed.",
     "PC5 is gated on the cells the verdict uses (gate.test.f7, gate.test.f3, gate.diag.s7), per arm and delivery "
     "mode; every other cell's rates are reported. The S7 placebo is gated on errors only: its cap hits are reported, "
-    "since a random context that leaves the agent searching until the turn cap is the placebo working (D-023).",
+    "since a random context that leaves the agent searching until the turn cap is the placebo working (D-023). "
+    "A rate fails only on evidence: its one-sided 97.5% Clopper–Pearson lower bound exceeds the limit, samples treated "
+    "as independent; a point estimate at or over a limit without that evidence is a caveat on the verdict (D-027).",
     "PC6 counts every configuration in the current and archived tuning logs against budget_per_system, requires "
     "a record for every candidate this run's grid declares, and a selection per system that matches selected.yaml.",
     "The pull verdict compares APG* (pull) with S7 (push): S7 is a placebo context and has no pull mode.",
@@ -430,28 +435,37 @@ def pc4(rows: pd.DataFrame, matched_cell: str, context: int | None, matched_pres
 
 
 def pc5(rows: pd.DataFrame) -> dict:
-    thr = f"harness error rate < {MAX_ERROR_RATE:.0%} and cap-hit rate < {MAX_CAP_HIT_RATE:.0%}, per arm and mode, in the verdict's cells (S7: errors only)"
+    """PC5 on evidence (D-027): an arm and mode fails when the one-sided 97.5% lower bound of its harness-error rate
+    exceeds 2%, or of its cap-hit rate exceeds 10% (Clopper–Pearson, `gate_stats.harness_rates`). A point estimate at
+    or over a limit without that evidence is a warning (`details.warnings`), which the report shows as a caveat."""
+    conf = f"{PC5_CONFIDENCE:.1%}"
+    thr = (
+        f"fails when the one-sided {conf} lower bound of an arm and mode's harness-error rate exceeds {MAX_ERROR_RATE:.0%} or of its cap-hit "
+        f"rate exceeds {MAX_CAP_HIT_RATE:.0%}, in the verdict's cells (S7: errors only); a point estimate over a limit is a warning"
+    )
     if rows.empty:
         return _pc("PC5", False, None, thr, "no test results")
-    rates = (
-        rows.assign(cap_hit=rows["cap_hit"].astype(bool), error=rows["error"].astype(bool))
-        .groupby(["plan_cell", "label", "delivery"])
-        .agg(samples=("success", "size"), error_rate=("error", "mean"), cap_hit_rate=("cap_hit", "mean"))
-        .reset_index()
-    )
-    table = []
-    reasons = []
-    for r in rates.itertuples():
-        gated = r.plan_cell in (F7_CELL, F3_CELL, PLACEBO_CELL)
-        cap_gated = r.label != PLACEBO  # the placebo's cap hits are the placebo working: reported, not gated (D-023)
-        ok = r.error_rate < MAX_ERROR_RATE and (r.cap_hit_rate < MAX_CAP_HIT_RATE or not cap_gated)
-        table.append({"plan_cell": r.plan_cell, "arm": _arm_key(r.label, r.delivery), "samples": r.samples, "error_rate": r.error_rate, "cap_hit_rate": r.cap_hit_rate, "gated": gated, "cap_hits_gated": cap_gated, "pass": ok})
-        if gated and not ok:
-            reasons.append(f"{r.plan_cell} {_arm_key(r.label, r.delivery)}: errors {r.error_rate:.1%}, cap hits {r.cap_hit_rate:.1%}")
+    table, reasons, warnings = [], [], []
+    for r in harness_rates(rows, by=("plan_cell", "label", "delivery"), cap_exempt=(PLACEBO,)):  # the placebo's cap hits are the placebo working (D-023)
+        gated = r["plan_cell"] in (F7_CELL, F3_CELL, PLACEBO_CELL)
+        arm = _arm_key(r["label"], r["delivery"])
+        fails = r["error_fails"] or r["cap_hit_fails"]
+        table.append(
+            {"plan_cell": r["plan_cell"], "arm": arm}
+            | {k: r[k] for k in ("samples", "error_rate", "error_lower", "cap_hit_rate", "cap_hit_lower", "cap_hits_gated")}
+            | {"gated": gated, "pass": not fails, "over_limit": r["error_over"] or r["cap_hit_over"]}
+        )
+        if not gated:
+            continue
+        what = f"{r['plan_cell']} {arm}: errors {r['error_rate']:.1%}, cap hits {r['cap_hit_rate']:.1%} (n = {r['samples']}; {conf} lower bounds {r['error_lower']:.1%}, {r['cap_hit_lower']:.1%})"
+        if fails:
+            reasons.append(what)
+        elif r["error_over"] or r["cap_hit_over"]:
+            warnings.append(f"{what}: a point estimate at or over its limit ({MAX_ERROR_RATE:.0%} errors, {MAX_CAP_HIT_RATE:.0%} cap hits), not yet evidence of a violation")
     if not any(t["gated"] for t in table):
         reasons.append("no results in the verdict's cells")
     worst = max((t["error_rate"] for t in table if t["gated"]), default=None), max((t["cap_hit_rate"] for t in table if t["gated"]), default=None)
-    return _pc("PC5", not reasons, {"max_error_rate": worst[0], "max_cap_hit_rate": worst[1]}, thr, "; ".join(reasons) or None, rates=table)
+    return _pc("PC5", not reasons, {"max_error_rate": worst[0], "max_cap_hit_rate": worst[1]}, thr, "; ".join(reasons) or None, rates=table, warnings=warnings)
 
 
 def pc6(tune_dir: Path, grid: dict | None, full_grid: dict | None, selected: dict | None, systems: Sequence[tuple[str, str]]) -> dict:
@@ -574,7 +588,10 @@ def verdict(rows: pd.DataFrame, pcs: list[dict], modes: Sequence[str], reps: int
         reasons = [f"{p['id']}: {p['reason']}" for p in pcs if not (p["pass"] or p.get("accepted"))] + [r for v in per_mode.values() for r in v["reasons"] if r.startswith("primary data missing")]
     notes = [f"{stage}: familywise one-sided α = {alpha} across delivery modes (Holm); per-mode levels {', '.join(f'{m} {lvl:g}' for m, lvl in holm['levels'].items()) or 'n/a'}."]
     if label == "INCONCLUSIVE" and stage == "gate run":
-        notes.append(f"§8 allows ONE pre-registered extension on fresh test worlds, analysed alone at α = {EXTENSION_ALPHA} (Holm across modes): `python -m ape.analyze_gate --run-id <extension run> --extension-of <this run>`.")
+        notes.append(
+            f"§8 allows ONE pre-registered extension on fresh test worlds, analysed alone at α = {EXTENSION_ALPHA} (Holm across modes): "
+            "a new run frozen with `python -m ape.run_gate freeze --run-id <extension run> --extension-of <this run>`."
+        )
     if label in ("GO_PUSH_ONLY", "GO_PULL_ONLY", "GO_WITH_COST_FLAG"):
         notes.append("§8: the user decides.")
     sup = [m for m, v in per_mode.items() if v.get("superiority")]
@@ -831,17 +848,29 @@ def _world_ids(run_dir: Path) -> set[str]:
     return {w["world_id"] for w in json.loads(f.read_text())["worlds"]} if f.is_file() else set()
 
 
+def frozen_role(run_dir: Path) -> dict:
+    """The role this run was frozen with (`run_gate.run_role`, freeze.json; D-027): {kind: primary | extension |
+    fix_cycle, of}. A run without a freeze record, or frozen before roles were recorded, is a primary run."""
+    f = Path(run_dir) / FREEZE_FILE
+    role = (json.loads(f.read_text()).get("role") if f.is_file() else None) or {}
+    return {"kind": role.get("kind", "primary"), "of": role.get("of")}
+
+
 def extension_context(run) -> dict | None:
-    """If `run` is the one pre-registered extension (§8; `extension.json` in its run dir, written by
-    `analyze_gate --extension-of`), the stage-1 facts it rests on, with `problems` when it is not admissible:
-    stage 1 must be analysed and INCONCLUSIVE, and the two runs' test worlds (`build-test/worlds.json`) must
-    be disjoint, so the extension's worlds are fresh (no seed arithmetic is assumed)."""
-    f = run.dir / EXTENSION_FILE
-    if not f.is_file():
+    """If `run` was frozen as the one pre-registered extension (§8; `role` in its freeze.json, D-027), the stage-1
+    facts it rests on, with `problems` when it is not admissible: stage 1 must be analysed and INCONCLUSIVE, no
+    other frozen run may be its extension too, and the two runs' test worlds (`build-test/worlds.json`) must be
+    disjoint, so the extension's worlds are fresh (no seed arithmetic is assumed). The α and stage follow from the
+    frozen role alone: no command-line flag can make a run an extension after its freeze."""
+    role = frozen_role(run.dir)
+    if role["kind"] != "extension":
         return None
-    spec = json.loads(f.read_text())
-    stage1_dir = Path(spec["stage1_dir"])
+    spec = {"stage1_run_id": role["of"]}
+    stage1_dir = run.dir.parent / role["of"]
     problems = []
+    for path in sorted(run.dir.parent.glob(f"*/{FREEZE_FILE}")):
+        if path.parent != run.dir and frozen_role(path.parent) == role:
+            problems.append(f"run {path.parent.name!r} is also frozen as the extension of {role['of']!r}: §8 allows ONE extension")
     dec_path = stage1_dir / REPORT_DIR / "decision.json"
     stage1 = json.loads(dec_path.read_text()) if dec_path.is_file() else None
     if stage1 is None:
@@ -922,6 +951,8 @@ def analyze(run) -> dict:
     if (acc := freeze.get("pc1_accepted")) and not pcs[0]["pass"]:
         pcs[0]["accepted"] = acc
         caveats.append(f"PC1 (the LightRAG anchor) failed and was accepted at the freeze: {acc['reason']}. The LightRAG setup is not validated by the anchor; PC2 is the remaining competence check.")
+    pc5_result = next(p for p in pcs if p["id"] == "PC5")
+    caveats += [f"PC5 warning: {w}" for w in (pc5_result.get("details") or {}).get("warnings") or []]
     f7_groups = [g for g in ((test or {}).get("cells", {}).get(F7_CELL, {}) or {}).get("groups", [])]
     modes = tuple(dict.fromkeys(d for g in f7_groups for d in g.get("deliveries", []))) or ("push", "pull")
     ext = extension_context(run)
@@ -1070,7 +1101,9 @@ def render(d: dict) -> str:
         sec = det.get("secondary") or {}
         sens = x.get("sensitivity_excluding_errors") or {}
         rows.append([
-            m, x["verdict"], x.get("unadjusted_verdict") or "–", _pp(x["delta"]), _f(inf.get("holm_level"), 4) if inf.get("holm_level") else "–", _ci(*x["ci"]), _ci(*(inf.get("ci95") or [None, None])),
+            m, x["verdict"], x.get("unadjusted_verdict") or "–", _pp(x["delta"]),
+            (_f(inf.get("holm_level"), 4) + (" (not tested)" if inf.get("holm_tested") is False else "")) if inf.get("holm_level") else "–",
+            _ci(*x["ci"]), _ci(*(inf.get("ci95") or [None, None])),
             _f(inf.get("p_noninferiority"), 4), _f(x.get("superiority")) if x.get("superiority") is not None else "–",
             _pp(sec.get("f7_1000_delta")), _f(sec.get("p_apg_gt_s7")), _f(x["cost_ratio"], 2), f"{sens.get('verdict') or '–'} ({_pp(sens.get('delta'))})",
         ])  # fmt: skip
@@ -1216,8 +1249,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--runs-dir", type=Path, default=ROOT / "runs")
     ap.add_argument("--config-dir", type=Path, help="default: the config dir the run was created with (run.json)")
     ap.add_argument("--force", action="store_true", help="re-analyze even when the inputs are unchanged")
-    ap.add_argument("--extension-of", metavar="STAGE1_RUN_ID", help=f"§8: this run is the one extension of an INCONCLUSIVE gate run; analysed alone at α = {EXTENSION_ALPHA}")
-    ap.add_argument("--stage1-runs-dir", type=Path, help="where the stage-1 run lives (default: --runs-dir)")
+    ap.add_argument(
+        "--extension-of", metavar="STAGE1_RUN_ID",
+        help="a consistency check only: the run must have been frozen as the extension of this run (run_gate freeze --extension-of); the α comes from freeze.json",
+    )  # fmt: skip
     a = ap.parse_args(argv)
     info_path = a.runs_dir / a.run_id / "run.json"
     if not info_path.is_file():
@@ -1226,12 +1261,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     info = json.loads(info_path.read_text())
     config_dir = a.config_dir or rg._resolve(info.get("config_dir", "config"))
     if a.extension_of:
-        stage1_dir = (a.stage1_runs_dir or a.runs_dir) / a.extension_of
-        if a.extension_of == a.run_id or not (stage1_dir / "run.json").is_file():
-            print(f"analyze_gate: --extension-of {a.extension_of}: no such stage-1 run, or it is this run", file=sys.stderr)
+        role = frozen_role(a.runs_dir / a.run_id)
+        if role != {"kind": "extension", "of": a.extension_of}:
+            print(
+                f"analyze_gate: --extension-of {a.extension_of} does not match the run's frozen role ({role['kind']}{' of ' + role['of'] if role['of'] else ''}); "
+                f"a run becomes an extension only at its freeze: python -m ape.run_gate freeze --run-id {a.run_id} --extension-of <stage-1 run>",
+                file=sys.stderr,
+            )
             return 1
-        (a.runs_dir / a.run_id / EXTENSION_FILE).write_text(json.dumps({"stage1_run_id": a.extension_of, "stage1_dir": str(stage1_dir.resolve())}, indent=1))
-        a.force = True  # the analysis changes with the extension record
     try:
         run = rg.GateRun(a.run_id, offline=bool(info.get("offline")), force=a.force, runs_root=a.runs_dir, config_dir=config_dir)
         rg.run_phases(run, "analyze")

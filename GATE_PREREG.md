@@ -46,7 +46,9 @@ Is APG (Adaptive Prompt Graph), with graphs built by the authoring pipeline `ape
   - **Delivery modes (§3).** The push and pull hypotheses are tested with **Holm** at the stage's α:
     - the mode with the smaller p-value is tested at α/2;
     - the other at α, only if the first is rejected.
+    - If the first is not rejected, Holm stops: the other mode is **not tested**. It is reported as "not tested", and classified and shown at α/2, the level where Holm stopped, never as GO (D-027).
   - **Minimum data.** Every cell needs at least 4 **paired** APG*/LGR* worlds: worlds where both arms ran a task. Other arms' worlds never count.
+    - A mode with a cell under that minimum is INCONCLUSIVE and leaves the Holm family, so the other mode is tested alone at the stage's full α. The familywise error is still controlled, since only one test is run (D-027).
   - **Implementation.** `ape.analysis.gate_stats.decide` and `holm_modes` at the frozen commit.
 - **Secondary conditions (all required for GO; computed and reported whatever the verdict):**
   - F7-1000 cell point Δ > −10 pp.
@@ -84,7 +86,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
   - **Multiplicity** (D-023). The two modes' NI hypotheses are tested with Holm at the stage's familywise α (§2), and each mode's verdict uses its interval at its Holm level.
     - In simulation at the margin (both modes at Δ = −5 pp; 20,000 gates), separate per-mode tests at 0.025 would issue some GO-type label 4.3% of the time.
     - With Holm the rate is 2.2% at 0.025 and **1.8% at 0.020**.
-    - With push at the margin and pull clearly non-inferior, the false push claim stays at 2.0% (α = 0.020).
+    - **The worst case for Holm** (D-027) is one mode at the margin and the other clearly non-inferior: Holm then gives the marginal mode the full 0.020. In 20,000 simulated gates per scenario, the false claim for that mode was **2.1% at stage 1** (2.08–2.12%, Monte Carlo SE 0.10 pp) and **2.2–2.3% overall** with the extension (2.4% at 12 worlds, 5,000 gates). The per-mode t test runs 5–15% over its nominal level, as §2 reports. The procedure's total one-sided α of 0.025 still holds, so no α change is needed; stage 1 alone can exceed 0.020 by about 0.1 pp in this configuration.
 - **F3 cells:** push only (tool procedures carry no cross-references to follow).
 - **Cost:** the F7 half of the gate runs twice, about 1.5× the push-only cost.
 
@@ -117,11 +119,12 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
       - In 300 simulated 4-world pilots, the new estimator recovered σ_g of 0.30 / 0.80 as 0.28 / 0.77 (the old one: 0.50 for 0.80), and σ_w of 1.0 as 0.99. Interval coverage was 0.73–0.82.
       - **8 worlds per cell** (D-026). The pilot builds 8 worlds per cell. The main pilot cells use worlds 1–4; the σ cell (`gate.pilot.sigma`) runs APG* and LGR* (push, 1 epoch) on worlds 5–8, and σ is estimated from all 8. S7 targets and the matched-budget calibration still come from worlds 1–4.
       - When the worlds vary less than the model predicts even at σ = 0, the interval has no upper end. It is then reported as max(estimate, prior), flagged as not informative, and can never support "suffices" (D-026).
-    - **Recommendation** (D-026). Two-sided, at the planned size, from the ends of the 80% intervals:
-      - **suffices**: the power at the upper ends reaches 0.8 (both upper ends informative);
-      - **insufficient**: even the power at the lower ends misses 0.8. Add test worlds within the budget, or rethink; `power.json` reports 20 and 24 worlds;
+    - **Recommendation** (D-026, D-027). Two-sided, at the planned size, from the four corners of the 80% σ_w × σ_g intervals. Power falls with σ_g but rises with σ_w (a world effect moves both arms alike), so the least favourable corner is usually σ_w low with σ_g high, not both upper ends:
+      - **suffices**: the power at the least favourable corner reaches 0.8 (both upper ends informative);
+      - **insufficient**: even the power at the most favourable corner misses 0.8. Add test worlds within the budget, or rethink; `power.json` reports 20 and 24 worlds;
       - **ambiguous**: otherwise, or σ not estimable. Proceed with the planned 16 and rely on the pre-registered extension (§8).
-      - In 300 simulated pilots per scenario, at a true power of about 0.4 (σ_g = 0.8), 8 worlds called "insufficient" 75–83% of the time and "suffices" never (4 worlds: 55–61% and 2–4%). At a true power of about 0.85, they said "suffices" 11–12%, "insufficient" 11–12% (the 80% intervals' expected misfires near the threshold) and "ambiguous" otherwise.
+      - The earlier rule took both upper ends as the conservative case, which overstated power by 2–6 pp and changed 3.5–9% of decisions in simulation.
+      - With the corner rule (200 simulated 8-world pilots per scenario, D-027): at a true power of about 0.4 (σ_g = 0.8), "insufficient" 70–81% of the time and "suffices" never. At a true power of about 0.85 (σ_g = 0.3), "suffices" 6–6.5%, "insufficient" 6.5–9% (the 80% intervals' expected misfires near the threshold) and "ambiguous" otherwise. Under the earlier upper-ends rule (D-026) the same pilots gave 75–83% / 0% and 11–12% / 11–12%.
     - Where σ cannot be estimated, the priors are used, and the recommendation is "ambiguous".
 - **Models** (D-015; exact IDs confirmed at E3):
   - agent: GPT-6 Luna, effort high
@@ -171,7 +174,7 @@ A failure here means fix and re-pilot, not NO-GO.
 | PC2 | On F5, no evidence that LGR* is worse than LightRAG naive mode by more than 3 pp (D-023). PC2 fails when the one-sided 97.5% upper bound of LGR* − naive is below −3 pp, with F5-1hop and F5-2hop equally weighted and the world-clustered t-interval. A true tie fails at most 2.5% of the time (simulated: 0.2%); the earlier point-estimate rule failed 18%. |
 | PC3 | Invariants: S6 ≥ S5o ≥ APG* ≥ S7 (D-023). Each adjacent pair fails only on evidence of a shortfall larger than 3 pp: its one-sided upper bound at 0.025 / 3 per pair, world-clustered t on the shared tasks, is below −3 pp. And S6 > S7 by a world-level sign-flip test, p < 0.05. A chain of ties fails at most 2.5% of the time (simulated: 0 of 1,000); the earlier rule failed 16%. |
 | PC4 | **Reported, not gated** (D-023). This is the median realized context against 4× each arm's configured budget. The bound holds by construction: LightRAG's `max_total_tokens` is 4× its budget, S7's budget is its own target, and APG and S3s pack under theirs. An arm over it is flagged as an anomaly. Also reported, not gated: in the matched-budget secondary every capped arm's median should land within ±25% of the budget. A miss or a missing secondary marks that secondary "not matched" in the report and never blocks the verdict (D-022). (This replaces the earlier APG/LightRAG parity ratio, which APG's design makes unattainable: EXPERIMENT_AUDIT B1.) |
-| PC5 | Harness errors < 2%, and every arm's cap-hit rate < 10%. A cap hit is a sample that ran out of turns without answering, or that a sample limit cut short (including the runner's per-sample cost guard). The S7 placebo is gated on errors only; its cap hits are reported (D-023), since a random context that keeps the agent searching until the cap is the placebo working. The runner's abort threshold (`fail_on_error`: 2% of a task's samples, or a count of at least 3 for tasks under 150 samples) is only a circuit breaker; PC5 is judged from the logs. |
+| PC5 | Harness errors < 2%, and every arm's cap-hit rate < 10%, per arm and delivery mode in the verdict's cells. **Failed only on evidence** (D-027): PC5 fails when the one-sided 97.5% Clopper–Pearson lower bound of an arm's error rate exceeds 2%, or of its cap-hit rate exceeds 10% (samples treated as independent). A point estimate at or over a limit without that evidence is a **warning**, shown as a caveat on the verdict. In simulation, a true error rate of 1.5% fails 0% of gates (the earlier point rule: 50%) and a true cap-hit rate of 8.5% fails 0% (was 26%); one arm at 4% errors fails 95%, and at 15% cap hits 100%. The pilot reports the same rates as an early warning (`pilot.json` `harness`), before the test phase. A cap hit is a sample that ran out of turns without answering, or that a sample limit cut short (including the runner's per-sample cost guard). The S7 placebo is gated on errors only; its cap hits are reported (D-023), since a random context that keeps the agent searching until the cap is the placebo working. The runner's abort threshold (`fail_on_error`: 2% of a task's samples, or a count of at least 3 for tasks under 150 samples) is only a circuit breaker; PC5 is judged from the logs. |
 | PC6 | The tuning log is complete for every system. |
 
 ## 8. Decision
@@ -189,9 +192,10 @@ A failure here means fix and re-pilot, not NO-GO.
 - **Test.** The extension's worlds are analysed **alone**, at one-sided α = **0.005**, with Holm across the modes. Its label is the gate's final verdict.
 - **Total α.** The gate run's 0.020 plus 0.005 keeps the total one-sided α at 0.025 (Bonferroni over disjoint data).
 - **Simulated** (20,000 gates):
-  - At the margin, stage 1 issues some GO-type label 1.77% of the time, it is INCONCLUSIVE 23.9% of the time, and the extension adds 0.11%, for **1.88% overall**.
+  - At the margin, stage 1 issues some GO-type label 1.77% of the time, it is INCONCLUSIVE 23.9% of the time, and the extension adds 0.11%, for **1.88% overall**. In Holm's worst case (one mode at the margin, §3) the overall rate is 2.2–2.3%.
   - At Δ = 0, P(unqualified GO) is 0.837 at stage 1 and 0.885 with the extension.
-- **Command.** `python -m ape.analyze_gate --run-id <extension run> --extension-of <stage-1 run>`.
+- **Role, fixed at the freeze** (D-027). A run becomes the extension only at its freeze: `python -m ape.run_gate freeze --run-id <extension run> --extension-of <stage-1 run>`. `freeze.json` records `role: {kind: extension, of: <stage-1 run>}`, and `analyze_gate` takes the stage and α from that record, never from a command-line flag. The freeze refuses unless the named run is a frozen primary gate run analysed as INCONCLUSIVE, and refuses a second extension of the same run. `analyze_gate --extension-of` is only a consistency check against the frozen role.
+- **Fix cycle.** Likewise frozen as `--fix-cycle-of <run>` (role `fix_cycle`), only after a NO_GO verdict, at most one per run. It is a new gate run at the gate run's α with a new APG pin and a fresh seed block.
 
 **NO-GO diagnosis:**
 - If S5o is non-inferior to LGR*, the problem is **extraction**: fix `apg/author.py`.

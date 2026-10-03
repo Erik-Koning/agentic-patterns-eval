@@ -18,12 +18,14 @@ gatekeeping), again with Holm.
 
 import json
 import math
+import warnings
 from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import beta as beta_dist
 from scipy.stats import t as student_t
 
 GATE_CELLS = ("F7-10", "F7-1000", "F3-5", "F3-60")
@@ -40,6 +42,55 @@ ALPHA_TOTAL = 0.025
 STAGE_ALPHA = {"stage1": 0.020, "extension": 0.005}
 DEFAULT_MAX_TURNS = 12  # Config.max_turns without APE_MAX_TURNS
 DEFAULT_BUDGET = 2000  # config.DEFAULT_CONTEXT_BUDGET
+# PC5 (GATE_PREREG §7, D-027): harness errors < 2% and cap hits < 10% per arm and mode. A rate fails only on evidence:
+# its one-sided 97.5% Clopper–Pearson lower bound exceeds the limit. A point estimate at or over the limit is a warning.
+MAX_ERROR_RATE = 0.02
+MAX_CAP_HIT_RATE = 0.10
+PC5_CONFIDENCE = 0.975
+
+
+def rate_lower_bound(k: int, n: int, conf: float = PC5_CONFIDENCE) -> float:
+    """One-sided Clopper–Pearson lower confidence bound for a binomial rate k / n (0 when k = 0 or n = 0).
+
+    Samples are treated as independent; harness errors that cluster by world would make this bound slightly too
+    high, so a failure is still strong evidence of a rate over the limit."""
+    k, n = int(k), int(n)
+    if n <= 0 or k <= 0:
+        return 0.0
+    return float(beta_dist.ppf(1 - conf, k, n - k + 1))
+
+
+def harness_rates(rows: pd.DataFrame, by: tuple[str, ...] = ("label", "delivery"), cap_exempt: tuple[str, ...] = ()) -> list[dict]:
+    """Harness-error and cap-hit rates per group of `rows` (`load_results` rows), with their one-sided lower bounds,
+    whether the rate fails on evidence (`*_fails`: lower bound > limit) and whether its point estimate is at or over
+    the limit (`*_over`, a warning). Labels or arms in `cap_exempt` (the S7 placebo) never fail or warn on cap hits.
+    Group by `label` (the declared arm, analyze_gate's rows) or `arm` (the run arm, raw `load_results` rows)."""
+    if rows.empty:
+        return []
+    g = rows.assign(cap_hit=rows["cap_hit"].astype(bool), error=rows["error"].astype(bool)).groupby(list(by))
+    agg = g.agg(samples=("success", "size"), errors=("error", "sum"), cap_hits=("cap_hit", "sum")).reset_index()
+    out = []
+    for r in agg.to_dict("records"):
+        n, ke, kc = int(r["samples"]), int(r["errors"]), int(r["cap_hits"])
+        cap_gated = r.get("label", r.get("arm")) not in cap_exempt
+        e_rate, c_rate = ke / n, kc / n
+        e_lo, c_lo = rate_lower_bound(ke, n), rate_lower_bound(kc, n)
+        out.append(
+            {k: r[k] for k in by}
+            | {
+                "samples": n,
+                "error_rate": e_rate,
+                "error_lower": e_lo,
+                "error_fails": e_lo > MAX_ERROR_RATE,
+                "error_over": e_rate >= MAX_ERROR_RATE,
+                "cap_hit_rate": c_rate,
+                "cap_hit_lower": c_lo,
+                "cap_hits_gated": cap_gated,
+                "cap_hit_fails": cap_gated and c_lo > MAX_CAP_HIT_RATE,
+                "cap_hit_over": cap_gated and c_rate >= MAX_CAP_HIT_RATE,
+            }
+        )
+    return out
 
 
 # ---------- loading ----------
@@ -249,7 +300,16 @@ def task_means(df: pd.DataFrame, value: str = "success") -> pd.DataFrame:
         modes = df.groupby(["arm", "cell"])["delivery"].nunique()
         if (mixed := modes[modes > 1]).size:
             raise ValueError(f"task_means would mix delivery modes for {sorted(map(tuple, mixed.index))}: select one mode per arm and cell")
+    if value in df.columns and (missing := df[value].isna()).any():
+        # load_results never produces these (an errored sample is a failure, 0), so NaN means rows built elsewhere
+        # lost their outcome: averaging would silently drop them, so say so.
+        by = df.loc[missing].groupby(["arm", "cell"]).size().to_dict()
+        warnings.warn(f"task_means: {int(missing.sum())} row(s) with NaN {value} are left out of the task means, by (arm, cell): {by}", NaNOutcomeWarning, stacklevel=2)
     return df.groupby(["cell", "world", "task", "arm"])[value].mean().unstack("arm")
+
+
+class NaNOutcomeWarning(UserWarning):
+    """Rows reached the analysis without an outcome (NaN success); they are excluded, and counted in the warning."""
 
 
 # ---------- estimation ----------
@@ -489,18 +549,33 @@ def decide(
     return Decision(verdict, st["est"], ci, reasons, superiority=superior, details=details | {"_stats": st})
 
 
-def holm_levels(pvalues: dict[str, float | None], alpha: float) -> tuple[dict[str, float], dict[str, bool]]:
-    """Holm across hypotheses at familywise one-sided `alpha`: each hypothesis's level and whether it is rejected.
+def holm_test(pvalues: dict[str, float | None], alpha: float) -> tuple[dict[str, float], dict[str, bool], dict[str, bool]]:
+    """Holm across hypotheses at familywise one-sided `alpha`: each hypothesis's level, whether it is rejected, and
+    whether Holm reached it at all.
 
-    Sorted by p-value, the i-th (0-based) of k is tested at alpha / (k − i) while every earlier one was rejected;
-    after the first non-rejection the rest keep the level they would have been tested at and are not rejected.
-    A None p-value (not testable) sorts last and is never rejected."""
+    Sorted by p-value, the i-th (0-based) of k is tested at alpha / (k − i) while every earlier one was rejected.
+    Holm stops at the first non-rejection: the hypotheses after it are *not tested*, never rejected, and reported at
+    the level where Holm stopped (alpha / k when it stops at the first step), not at the larger level they would
+    have reached (batch W, D-027). A None p-value (not testable) sorts last and is never rejected."""
     order = sorted(pvalues, key=lambda m: (pvalues[m] is None, pvalues[m] if pvalues[m] is not None else 1.0))
-    k, levels, rejected, going = len(order), {}, {}, True
+    k, levels, rejected, tested = len(order), {}, {}, {}
+    stop: float | None = None
     for i, m in enumerate(order):
+        if stop is not None:
+            levels[m], rejected[m], tested[m] = stop, False, False
+            continue
         levels[m] = alpha / (k - i)
-        rejected[m] = going and pvalues[m] is not None and pvalues[m] <= levels[m]
-        going = rejected[m]
+        tested[m] = pvalues[m] is not None
+        rejected[m] = tested[m] and pvalues[m] <= levels[m]
+        if not rejected[m]:
+            stop = levels[m]
+    return levels, rejected, tested
+
+
+def holm_levels(pvalues: dict[str, float | None], alpha: float) -> tuple[dict[str, float], dict[str, bool]]:
+    """`holm_test` without the tested flags: each hypothesis's level (untested ones at Holm's stopping level) and
+    whether it is rejected."""
+    levels, rejected, _ = holm_test(pvalues, alpha)
     return levels, rejected
 
 
@@ -510,10 +585,14 @@ def holm_modes(decisions: dict[str, Decision], alpha: float) -> tuple[dict[str, 
 
     Each testable mode (a `decide` result that reached the t-interval) is re-classified at its Holm level: GO needs
     Holm's rejection plus the secondary conditions; a mode Holm does not reject is INCONCLUSIVE or NO_GO by its
-    interval at that level. PRECONDITION_FAIL and few-worlds INCONCLUSIVE modes are kept as they are."""
+    interval at that level. A mode Holm never reached (it stopped at the first mode) is "not tested": it is
+    classified, and its interval reported, at the level where Holm stopped (α/2 for two modes), never GO.
+    PRECONDITION_FAIL and few-worlds INCONCLUSIVE modes are kept as they are; such a mode leaves the family, so the
+    remaining mode is tested at the full `alpha` (familywise error still controlled: one test; GATE_PREREG §3)."""
     testable = {m: d for m, d in decisions.items() if "_stats" in d.details}
     p_ni = {m: d.details["inference"]["p_noninferiority"] for m, d in testable.items()}
-    levels, rejected = holm_levels(p_ni, alpha) if testable else ({}, {})
+    levels, rejected, tested = holm_test(p_ni, alpha) if testable else ({}, {}, {})
+    stopped_at = next((m for m in sorted(p_ni, key=lambda x: (p_ni[x] is None, p_ni[x] if p_ni[x] is not None else 1.0)) if not rejected[m]), None)
     out: dict[str, Decision] = {}
     for m, d in decisions.items():
         if m not in testable:
@@ -521,9 +600,12 @@ def holm_modes(decisions: dict[str, Decision], alpha: float) -> tuple[dict[str, 
             continue
         lvl = levels[m]
         verdict, reasons, ci = classify(d.details["_stats"], lvl, d.details["secondary"], d.details["cost_ratio"], "APG*")
-        if verdict in GO_VERDICTS and not rejected[m]:  # GO at lvl means p <= lvl, so Holm rejects; kept as a guard
+        if not tested[m]:
+            note = f"not tested: Holm stopped at {stopped_at} (not rejected at {lvl:g}); classified at that level"
+            verdict, reasons = ("INCONCLUSIVE", [note]) if verdict in GO_VERDICTS else (verdict, [note, *reasons])
+        elif verdict in GO_VERDICTS and not rejected[m]:  # for a tested mode, GO at lvl means p <= lvl: a guard only
             verdict, reasons = "INCONCLUSIVE", [f"not rejected by Holm at {lvl:g}"]
-        info = d.details["inference"] | {"holm_level": lvl, "holm_rejected": bool(rejected[m])}
+        info = d.details["inference"] | {"holm_level": lvl, "holm_rejected": bool(rejected[m]), "holm_tested": bool(tested[m])}
         out[m] = replace(d, verdict=verdict, reasons=reasons, ci=ci, superiority=False, details={**d.details, "inference": info})
     all_go = bool(out) and all(x.verdict in GO_VERDICTS for x in out.values())
     sup: dict = {"rule": f"serial gatekeeping: tested only after GO in every mode, Holm at {alpha:g}", "tested": all_go}

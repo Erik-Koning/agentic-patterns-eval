@@ -346,6 +346,11 @@ class GateRun:
     anchor_data_dir: Path | None = None  # GraphRAG-Bench data; default <cache>/graphragbench (smoke: the repo's cache/)
     accept_pc1_failure: str | None = None  # freeze only: the analyst's recorded reason for freezing despite a failed PC1 (GATE_PREREG §7)
     test_seed_base: int | None = None  # freeze only: the test-seed block to freeze (default 3000, else the next unused block)
+    # freeze only: what this gate run is (GATE_PREREG §8, D-027): the primary gate run, the one extension of an
+    # INCONCLUSIVE run, or the one fix cycle of a NO-GO run. Recorded in freeze.json, from which analyze_gate derives
+    # the α and stage; never part of a fingerprint (like --accept-pc1-failure).
+    extension_of: str | None = None
+    fix_cycle_of: str | None = None
     smoke_dir: Path = SMOKE_ROOT / "live"  # live preflight: the live smoke's report.json and checks.json (`check_live_smoke`)
     smoke_max_age_days: float = SMOKE_MAX_AGE_DAYS
     skip_smoke_check: str | None = None  # live preflight: the recorded reason for running without a fresh live smoke
@@ -1939,17 +1944,41 @@ def _pilot(run: GateRun, record: dict) -> None:
     # 6. The cost model, recalibrated from the pilot's arm runs (not the calibration iterations, which run off-plan budgets).
     measured = calibrate(logs, out_path=run.measured_out_path)
     record["outputs"] |= {"power": _show(pdir / "power.json"), "measured": _show(run.measured_out_path)}
+    # 6b. PC5 early warning (D-027): the pilot's arm runs' harness-error and cap-hit rates, so a broken harness shows
+    #     before the test phase (where PC5 fails a run only on evidence). Warnings only; the pilot never fails on them.
+    from .analysis.gate_stats import MAX_CAP_HIT_RATE, MAX_ERROR_RATE, harness_rates, load_results
+
+    harness = harness_rates(load_results(logs, require_cost=not run.offline), by=("arm", "delivery"), cap_exempt=("S7",))
+    harness_warnings = [
+        f"PC5 early warning: {h['arm']} ({h['delivery']}) errors {h['error_rate']:.1%}, cap hits {h['cap_hit_rate']:.1%} over {h['samples']} pilot samples "
+        f"(limits {MAX_ERROR_RATE:.0%} and {MAX_CAP_HIT_RATE:.0%}): fix the harness before the test phase"
+        for h in harness
+        if h["error_over"] or h["cap_hit_over"]
+    ]
+    record["warnings"] += harness_warnings
     # 7. pilot.json: everything the analyst transcribes into GATE_PREREG.md, keyed by its placeholder labels.
     success = {a: {c: float(v) for c, v in tm[a].dropna().groupby(level="cell").mean().items()} for a in tm.columns}
     realized = {a: _medians(tokens, a, main["cells"])[1] for a in sorted({a for a, _ in tokens})}
     pw = power["scenarios"]["pilot"]
     rec = power["recommended_worlds_per_cell"]
     bq = read_build_quality(run)  # D-017, measured on the dev builds
+    ci80, informative = vc.get("ci80") or {}, vc.get("ci80_upper_informative") or {}
+
+    def _sigma(key: str) -> str:
+        """A σ point estimate with its 80% interval and, when flagged, that its upper end is not informative."""
+        if key not in ci80:
+            return f"{pw[key]:.2f}"
+        flag = "" if informative.get(key, True) else "; upper end not informative"
+        return f"{pw[key]:.2f} (80% {ci80[key][0]:.2f}–{ci80[key][1]:.2f}{flag})"
+
+    cons = power["scenarios"]["conservative"]
     items = {
         "test worlds per cell": f"{rec if rec is not None else 'analyst decides'} ({power['recommendation']}; {worlds_per_cell_note(bq)})",
         "builder": bq["recommendation"] if bq else "D-017 build check not recorded (build-dev/build_quality.json missing): re-run build-dev",
-        "pilot σ_w, σ_g and power": f"σ_w {pw['sigma_w']:.2f}, σ_g {pw['sigma_g']:.2f} ({'pilot estimates' if vc['estimable'] else 'priors: not estimable'}); power at Δ = 0: "
-        + ", ".join(f"{n} worlds {p:.2f}" for n, p in pw["power"].items()),
+        "pilot σ_w, σ_g and power": f"σ_w {_sigma('sigma_w')}, σ_g {_sigma('sigma_g')} ({'pilot estimates' if vc['estimable'] else 'priors: not estimable'}); power at Δ = 0: "
+        + ", ".join(f"{n} worlds {p:.2f}" for n, p in pw["power"].items())
+        + f"; at the least favourable corner of the intervals ({cons.get('corner', 'priors')}): "
+        + ", ".join(f"{n} worlds {p:.2f}" for n, p in cons["power"].items()),
         "S7 targets per cell": ", ".join(f"{c} {t}" for c, t in targets.items()) + " tokens",
         "APG* matched-budget settings": _fmt_env(calibration["arms"]["APG*"]["env"]),
         "LGR* matched-budget caps": _cap_item(caps, "LGR*"),
@@ -1968,6 +1997,7 @@ def _pilot(run: GateRun, record: dict) -> None:
         "s7_delivery": "per step (APG* is per-step)" if s7_env(selected)["APE_S7_PER_STEP"] == "1" else "once per task (APG* is per-query)",
         "power": {k: power[k] for k in ("decision", "recommended_worlds_per_cell", "recommendation")}
         | {"pilot": pw, "conservative": power["scenarios"]["conservative"], "optimistic": power["scenarios"]["optimistic"], "sigma_worlds_per_cell": vc.get("worlds_per_cell")},
+        "harness": {"rates": harness, "warnings": harness_warnings},
         "cost_model_entries": len(measured["entries"]),
         "build_quality": {"verdict": bq["verdict"], "offline": bq["offline"], "path": _show(build_quality_path(run))} if bq else None,
         "prereg_items": items,
@@ -2187,6 +2217,64 @@ def stale_upstream(run: GateRun) -> list[str]:
     return out
 
 
+ROLE_KINDS = ("primary", "extension", "fix_cycle")
+ROLE_STAGE1_LABEL = {"extension": "INCONCLUSIVE", "fix_cycle": "NO_GO"}  # what the referenced run's verdict must be (§8)
+
+
+def run_role(run: GateRun) -> dict:
+    """The role this run asks to freeze with: {kind: primary | extension | fix_cycle, of: <run id> | None}."""
+    if run.extension_of and run.fix_cycle_of:
+        raise PhaseError("a gate run is an extension or a fix cycle, not both: pass one of --extension-of and --fix-cycle-of")
+    if run.extension_of:
+        return {"kind": "extension", "of": run.extension_of}
+    if run.fix_cycle_of:
+        return {"kind": "fix_cycle", "of": run.fix_cycle_of}
+    return {"kind": "primary", "of": None}
+
+
+def frozen_role(record: dict | None) -> dict:
+    """A freeze record's role; a freeze from before roles were recorded was a primary gate run."""
+    role = (record or {}).get("role") or {}
+    return {"kind": role.get("kind", "primary"), "of": role.get("of")}
+
+
+def role_problems(run: GateRun, role: dict) -> list[str]:
+    """Why `run` may not freeze with `role` (§8; D-027): an extension or fix cycle names a frozen, analysed run of the
+    right verdict that is itself a primary run, and is the only one of its kind for that run (two extensions would
+    spend the extension α twice). Other runs are found by scanning runs_root/*/freeze.json."""
+    if role["kind"] == "primary":
+        return []
+    of, kind, problems = role["of"], role["kind"], []
+    if of == run.run_id:
+        return [f"--{kind.replace('_', '-')}-of names this run itself"]
+    ref = run.runs_root / of
+    ref_freeze = json.loads((ref / "freeze.json").read_text()) if (ref / "freeze.json").is_file() else None
+    if ref_freeze is None:
+        problems.append(f"{kind} of {of!r}: {_show(ref / 'freeze.json')} missing; the run it extends or fixes must be a frozen gate run in {_show(run.runs_root)}")
+    else:
+        if (ref_kind := frozen_role(ref_freeze)["kind"]) != "primary":
+            article = "an" if ref_kind == "extension" else "a"
+            problems.append(f"{kind} of {of!r}: that run is itself {article} {ref_kind.replace('_', ' ')}; §8 allows one extension or fix cycle of the primary gate run")
+        if bool(ref_freeze.get("offline")) != run.offline:
+            problems.append(f"{kind} of {of!r}: that run is {'offline' if ref_freeze.get('offline') else 'live'} and this one is not")
+    decision = ref / "report" / "decision.json"
+    label = json.loads(decision.read_text())["verdict"]["label"] if decision.is_file() else None
+    if label is None:
+        problems.append(f"{kind} of {of!r}: it has no decision report ({_show(decision)}); analyse it first")
+    elif label != ROLE_STAGE1_LABEL[kind]:
+        problems.append(f"{kind} of {of!r}: its verdict is {label}; §8 allows a{'n' if kind == 'extension' else ''} {kind.replace('_', ' ')} only after {ROLE_STAGE1_LABEL[kind]}")
+    for path in sorted(run.runs_root.glob("*/freeze.json")):
+        if path.parent.name == run.run_id:
+            continue
+        try:
+            other = frozen_role(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            continue
+        if other == role:
+            problems.append(f"{path.parent.name!r} is already the {kind.replace('_', ' ')} of {of!r} ({_show(path)}); §8 allows one")
+    return problems
+
+
 def _freeze_inputs(run: GateRun) -> dict[str, Path]:
     return {"GATE_PREREG.md": run.prereg_path} | {k: p for k, p in frozen_files(run, run.prereg_path).items() if k != "GATE_PREREG.md"}
 
@@ -2201,6 +2289,11 @@ def _freeze_provenance_lines(run: GateRun, freeze: dict) -> list[str]:
         *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         f"- **Design knobs** (APE_* set when tune and pilot ran; build-test and test refuse others): {_fmt_env(freeze.get('design_env'))}.",
         *([f"- **PC1 failed and was accepted at the freeze:** {pc1_accepted['reason']}"] if pc1_accepted else []),
+        *(
+            [f"- **Role:** the {r['kind'].replace('_', ' ')} of run `{r['of']}` (GATE_PREREG §8); analysed at that stage's α."]
+            if (r := frozen_role(freeze))["kind"] != "primary"
+            else []
+        ),
         f"- **Test seeds:** {seed_base}-{freeze['test_seeds']['last']} (block base {seed_base}). A later gate run (an extension or a fix cycle) freezes a fresh block. "
         f"<!-- ape:test-seeds run={run.run_id} base={seed_base} count={freeze['test_seeds']['count']} -->",
         f"- **Code:** build-test and test run only at `{git['commit']}` ({', '.join(CODE_PATHS)} unchanged).",
@@ -2225,7 +2318,7 @@ def _write_freeze_provenance(run: GateRun, freeze: dict) -> Path:
 
 def _record_freeze(run: GateRun, record: dict, freeze: dict, provenance: Path) -> None:
     record["outputs"] |= {"freeze": _show(run.freeze_path), "provenance": _show(provenance)}
-    record["frozen"] = {k: freeze.get(k) for k in ("files", "rehearsal", "analysis_commit", "code_commit", "test_seeds", "design_env")}
+    record["frozen"] = {k: freeze.get(k) for k in ("files", "rehearsal", "analysis_commit", "code_commit", "test_seeds", "design_env")} | {"role": frozen_role(freeze)}
     if not run.offline:
         record["warnings"].append(f"commit {_show(run.provenance_path)} (the freeze record) before build-test")
 
@@ -2279,6 +2372,8 @@ def _freeze(run: GateRun, record: dict) -> None:
         (record["warnings"] if run.offline else problems).append("not current, so the frozen design would not be what ran: " + "; ".join(stale))
     seed_base, seed_problems = choose_test_seed_base(run)
     problems += seed_problems
+    role = run_role(run)
+    problems += role_problems(run, role)
     anchor = read_manifest(run, "anchor") or {}
     pc1 = anchor.get("pc1_pass")
     pc1_accepted = None
@@ -2321,6 +2416,8 @@ def _freeze(run: GateRun, record: dict) -> None:
         "code_commit": git["commit"],
         "test_seeds": {"base": seed_base, "count": test_seed_count(run), "block": SEED_BLOCK, "last": seed_base + test_seed_count(run) - 1},
         "pc1_accepted": pc1_accepted,
+        # What this run is (§8, D-027): analyze_gate derives the stage and α from this record, not from a CLI flag.
+        "role": role,
         # The design knobs tune and pilot ran with (stale_upstream checked they still apply): build-test and test refuse
         # any other value (`_refuse_unless_frozen`), since freeze.json would not otherwise say what design ran.
         "design_env": _env_knobs(),
@@ -2839,7 +2936,8 @@ PHASE_DEFS: dict[str, Phase] = {
         "freeze",
         _freeze,
         inputs=_freeze_inputs,
-        # --accept-pc1-failure is recorded by the freeze, not part of its fingerprint (O4): `all` without it skips.
+        # --accept-pc1-failure and the role (--extension-of / --fix-cycle-of) are recorded by the freeze, not part of its
+        # fingerprint (O4, D-027): a later `all` without them still skips.
         params=lambda r: {"scale": scale(r), "frozen": list(frozen_files(r, r.prereg_path)), "rehearsal": r.offline},
         projected=lambda r: 0.0,
         profile=gate_profile,
@@ -3047,6 +3145,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--test-seed-base", type=int, metavar="SEED",
         help=f"freeze only: the first test seed (a block of {SEED_BLOCK}); default {FIRST_TEST_SEED_BASE}, or the next block no other frozen run used",
     )  # fmt: skip
+    role = ap.add_mutually_exclusive_group()
+    role.add_argument("--extension-of", metavar="RUN_ID", help="freeze only: this run is the one pre-registered extension of an INCONCLUSIVE gate run (GATE_PREREG §8)")
+    role.add_argument("--fix-cycle-of", metavar="RUN_ID", help="freeze only: this run is the one fix cycle after a NO-GO gate run (GATE_PREREG §8)")
     ap.add_argument(
         "--skip-smoke-check", metavar="REASON",
         help="live runs: run without a fresh passing live smoke (readiness/smoke.py), recording why in the preflight manifest",
@@ -3059,11 +3160,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ap.error("--accept-pc1-failure applies to the freeze phase")
     if a.test_seed_base is not None and a.phase not in ("freeze", "all"):
         ap.error("--test-seed-base applies to the freeze phase (build-test and test use the frozen base)")
+    if (a.extension_of or a.fix_cycle_of) and a.phase not in ("freeze", "all"):
+        ap.error("--extension-of / --fix-cycle-of apply to the freeze phase (the role is recorded in freeze.json)")
     a.runs_dir = a.runs_dir or ((SMOKE_DRY_RUNS if a.offline else SMOKE_RUNS) if a.smoke else ROOT / "runs")
     try:
         run = GateRun(
             a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd,
-            accept_pc1_failure=a.accept_pc1_failure, test_seed_base=a.test_seed_base,
+            accept_pc1_failure=a.accept_pc1_failure, test_seed_base=a.test_seed_base, extension_of=a.extension_of, fix_cycle_of=a.fix_cycle_of,
             skip_smoke_check=a.skip_smoke_check, smoke_max_age_days=a.smoke_max_age_days,
         )  # fmt: skip
         statuses = run_phases(run, a.phase)

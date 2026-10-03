@@ -168,7 +168,8 @@ def test_holm_levels_and_modes():
     lv, rej = holm_levels({"push": 0.004, "pull": 0.015}, 0.02)
     assert lv == {"push": 0.01, "pull": 0.02} and rej == {"push": True, "pull": True}
     lv, rej = holm_levels({"push": 0.012, "pull": 0.015}, 0.02)
-    assert rej == {"push": False, "pull": False} and lv["pull"] == 0.02
+    # Holm stops at push (0.012 > 0.01): pull is never tested and is reported at the stopping level, not at 0.02 (D-027).
+    assert rej == {"push": False, "pull": False} and lv["pull"] == 0.01
 
     def dec(est, se):
         st = {"est": est, "se": se, "df": 60.0, "cells": {}}
@@ -188,6 +189,43 @@ def test_holm_levels_and_modes():
     # One mode GO: no superiority test (gatekeeping), whatever its p-value.
     out, info = holm_modes({"push": dec(0.06, 0.01), "pull": dec(-0.08, 0.02)}, 0.02)
     assert out["push"].verdict == "GO" and not out["push"].superiority and not info["superiority"]["tested"]
+
+
+def test_a_mode_holm_never_reached_is_not_tested_and_classified_at_the_stopping_level():
+    """Batch W (review edge case 10): pull p ≈ 0.012 is not rejected at α/2 = 0.010, so Holm stops; push (p ≈ 0.015)
+    was never tested. It used to be shown at level 0.02 with an interval that excluded −5 pp, labelled
+    INCONCLUSIVE "not rejected by Holm at 0.02". It is now "not tested", with its interval at 0.010."""
+    from scipy.stats import t as T
+
+    from ape.analysis.gate_stats import Decision, holm_modes, holm_test, t_p_greater
+
+    def dec(p: float, se: float = 0.02, df: float = 50.0) -> Decision:
+        st = {"est": -0.05 + T.isf(p, df) * se, "se": se, "df": df, "cells": {}}
+        sec = {"f7_1000_ok": True, "f7_1000_delta": 0.0, "s7_ok": True, "p_apg_gt_s7": 0.001}
+        inf = {"p_noninferiority": t_p_greater(st, -0.05), "p_superiority": t_p_greater(st, 0.0)}
+        return Decision("X", st["est"], (None, None), details={"_stats": st, "secondary": sec, "cost_ratio": 1.0, "inference": inf})
+
+    levels, rejected, tested = holm_test({"push": 0.015, "pull": 0.012}, 0.02)
+    assert tested == {"pull": True, "push": False} and rejected == {"pull": False, "push": False} and levels == {"pull": 0.01, "push": 0.01}
+    out, info = holm_modes({"push": dec(0.015), "pull": dec(0.012)}, 0.02)
+    push = out["push"]
+    assert push.verdict == "INCONCLUSIVE" and push.reasons[0].startswith("not tested: Holm stopped at pull")
+    assert push.details["inference"]["holm_tested"] is False and push.details["inference"]["holm_level"] == 0.01
+    assert push.ci[0] <= -0.05, "the interval is at the stopping level 0.010, where push's p ≈ 0.015 does not exclude −5 pp"
+    assert out["pull"].details["inference"]["holm_tested"] is True and out["pull"].verdict != "GO"
+    # Both rejected: both tested, no "not tested" note.
+    out, _ = holm_modes({"push": dec(0.004), "pull": dec(0.015)}, 0.02)
+    assert all(x.details["inference"]["holm_tested"] for x in out.values()) and [x.verdict for x in out.values()] == ["GO", "GO"]
+
+
+def test_task_means_warns_about_rows_without_an_outcome():
+    """Batch W: rows with NaN success were dropped from the task means silently; they now raise a counted warning."""
+    from ape.analysis.gate_stats import NaNOutcomeWarning, task_means
+
+    df = pd.DataFrame([{"cell": "F7-10", "world": "w0", "task": f"t{i}", "arm": "APG*", "epoch": 1, "success": (np.nan if i < 2 else 1.0)} for i in range(5)])
+    with pytest.warns(NaNOutcomeWarning, match=r"2 row\(s\) with NaN success"):
+        tm = task_means(df)
+    assert int(tm["APG*"].notna().sum()) == 3
 
 
 def test_violation_test_fails_only_on_evidence():
