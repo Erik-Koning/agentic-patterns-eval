@@ -47,7 +47,9 @@ def test_the_offline_study_g_run_is_analysed_end_to_end(offline_g):
     test = _manifest(run, "test")
     skipped = {(s["cell"], s["declared"]) for s in test["skipped_arms"]}
     cov = {(r["cell"], r["arm"]): r for r in d["coverage"]}
-    assert skipped and all(cov[k]["state"] == "skipped" and cov[k]["reason"] for k in skipped)
+    # Since B9 every planned session arm is built, so an offline run may skip nothing; any skip must be reported.
+    assert all(cov[k]["state"] == "skipped" and cov[k]["reason"] for k in skipped)
+    assert not {a for _, a in skipped} & {"S1", "M1", "M2"}, "B9 built the topology arms"
     ran = {(c, a["declared"]) for c, x in test["cells"].items() for g in x["groups"] if g["status"] == "done" for a in g["arms"]}
     assert ran and all(cov[k]["state"] == "present" and cov[k]["present"] > 0 for k in ran)
     # Arms carry their plan names; capability comes from the anchor cells, one point per profile and effort.

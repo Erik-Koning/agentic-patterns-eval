@@ -106,7 +106,7 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | B8 | ✅ merged b45f316 | D-037; overheads priced (D-035) |
 | B10 | ✅ statistics core merged f413dd2; run-dir glue after B1 | D-029, D-032; power gaps P-2 |
 | B3 | 🔄 building | |
-| B9 | 🔄 building | |
+| B9 | ✅ merged 83172ed | D-040 (incl. a B7 checkpoint fix) |
 | Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
 | B5 | 🔄 building (PREREGISTRATION_MAIN.md) | |
 | B11 | 🔄 G tuning grid + probe extension building; PREREGISTRATION_G.md after B9 | |
