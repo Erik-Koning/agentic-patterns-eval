@@ -359,8 +359,8 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
             assert args["group"] == "s7" and md["knobs"]["APE_S7_PER_STEP"] == "1", "S7 mirrors the per-step KG arm"
         seen.add((args["plan_cell"], args["arm"]))
     assert {("main.B.arms", "S5"), ("main.B.arms", "S7"), ("main.F.sol", "S1"), ("main.F.luna-f7-100", "S5")} <= seen
-    sol = next(f for f in (run.dir / "test" / "main.F.sol").rglob("*.eval"))
-    assert read_eval_log(str(sol), header_only=True).eval.metadata["arm"] in ("S1", "S5")
+    sol = {read_eval_log(str(f), header_only=True).eval.metadata["arm"] for f in (run.dir / "test" / "main.F.sol").rglob("*.eval")}
+    assert sol == {"S1", "S5", "M1"}, "main.F.sol's arms (M1 is built since B2)"
     # B6: the KG builds and their build-quality check, F1 included, in the one KG system built.
     bq = json.loads((run.phase_dir("micro-pilot") / "build_quality.json").read_text())
     assert bq["systems"] == ["apg"] and bq["verdict"] == "builder_passes" and {"F1-2", "F1-32", "F7-10", "F7-1000", "F3-5", "F3-60"} <= set(bq["cells"])
