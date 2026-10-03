@@ -52,6 +52,33 @@ def test_lincomb_reproduces_the_gates_cluster_t():
     assert not st["shared"]
 
 
+def test_shared_world_variance_and_effective_clusters():
+    """The pairwise variance equals the ψ form for distinct worlds and for full balanced overlap, and stays unbiased
+    with partial overlap; the df cap is G − 1 for balanced designs and G_eff − 1 < G − 1 when worlds contribute unequally
+    (16 worlds at two points, 8 of them at a third: D-033's topology design)."""
+    rng = np.random.default_rng(13)
+    w3 = {"a": 1 / 3, "b": 1 / 3, "c": 1 / 3}
+    for sizes, shared in (({"a": 8, "b": 6, "c": 5}, False), ({"a": 8, "b": 8, "c": 8}, True)):
+        v = _values(rng, sizes, sd=0.2, shared=shared, world_sd=0.3)
+        _, _, D, a = gs._matrix(v, w3)
+        M = ~np.isnan(D)
+        _, V, *_, psi = gs._core(D, M, a)
+        assert float(V) == pytest.approx(float((psi**2).sum()))
+    balanced = gs.lincomb(_values(rng, {"a": 8, "b": 8, "c": 8}, sd=0.2, shared=True), w3)
+    assert balanced["effective_clusters"] == pytest.approx(8, rel=0.25) and balanced["df"] <= 7
+    # Partial overlap: Var(L) by simulation vs the mean estimate, and a smaller df cap.
+    ests, Vs, dfs, geffs = [], [], [], []
+    for _ in range(3000):
+        v = _values(rng, {"a": 16, "b": 16, "c": 8}, sd=0.2, shared=True, world_sd=0.3)
+        st = gs.lincomb(v, w3)
+        ests.append(st["est"])
+        Vs.append(st["se"] ** 2)
+        dfs.append(st["df"])
+        geffs.append(st["effective_clusters"])
+    assert np.mean(Vs) == pytest.approx(np.var(ests), rel=0.06)
+    assert 10 < np.mean(geffs) < 15.5 and np.mean(dfs) < 15
+
+
 @pytest.mark.parametrize("shared", [False, True])
 def test_interval_coverage_is_nominal(shared):
     """95% intervals of a pooled mean and of a slope on capability cover the truth about 95% of the time, with distinct
@@ -252,9 +279,11 @@ def test_hypothesis_table_is_complete():
     ids = [h.id for h in gh.HYPOTHESES]
     assert len(ids) == len(set(ids))
     conf = gh.confirmatory()
-    assert {h.id for h in conf} == {"G-H1", "G-H2a", "G-H2b", "G-H3-pre", "G-H3a", "G-H3b"}
+    assert {h.id for h in conf} == {"G-H2a", "G-H3-pre", "G-H3a", "G-H3b"}  # D-033: G-H1 and G-H2b descriptive
+    assert gh.by_id("G-H1").role == gh.by_id("G-H2b").role == "descriptive" and gh.DEFAULT_REFERENCE == "S-CM*"
     assert all(h.family and h.test and h.estimand and h.alpha == gh.ALPHA for h in conf)
     assert [h.step for h in conf if h.family == "G-H3"] == [1, 2, 3]
+    assert "g.topo.luna-low" in gh.by_id("G-H3a").cells and "g.topo.luna-low" in gh.TOPO_CELLS
     md = gh.markdown()
     assert md.count("\n") == len(gh.HYPOTHESES) + 2 and "G-H2b" in md
     json.dumps(gh.table())
@@ -272,7 +301,12 @@ def test_report_on_simulated_data_is_json_and_renders():
     assert gs.glmm(gp.to_items(sessions[sessions["block"] == "topo"]).head(0), cap)["status"] == "no items"
     dec = {r["id"]: r["decision"] for r in d["decisions"]}
     assert dec["G-H2a"] == "SUPPORTED" and dec["G-H3-pre"] == "SUPPORTED"
-    assert dec["G-H1"] in ("SUPPORTED", "NOT_SUPPORTED") and dec["G-H2b[CM-sum]"] in ("EQUIVALENT", "NOT_SHOWN")
+    assert dec["G-H1"] == dec["G-H2b[CM-sum]"] == dec["G-H2b[CM-todo]"] == "descriptive"
+    g1 = next(r for r in d["decisions"] if r["id"] == "G-H1")
+    assert g1["reference"] == "S-CM*" and g1["ci_span"][0] < g1["estimate_span"] < g1["ci_span"][1] and g1["sensitivity_S1_pre"]["ci_span"][0] is not None
+    assert "p" not in g1 and "p" not in next(r for r in d["decisions"] if r["id"] == "G-H2b[CM-sum]")
+    # D-033's design: G-H1 with S-CM* spans the three points where it ran; G-H3 pools them.
+    assert d["gh1"]["primary"]["points_used"] == ["luna-low", "luna-high", "sol-high"] and d["gh3"]["points"] == ["luna-high", "luna-low", "sol-high"]
     assert set(d["gh1"]["references"]) == set(gh.REFERENCES)
     lo, hi = d["gh1"]["primary"]["boot_ci_span"]
     assert lo < hi and d["gh1"]["primary"]["ci_span"][0] < d["gh1"]["primary"]["est_span"] < d["gh1"]["primary"]["ci_span"][1]
@@ -280,15 +314,16 @@ def test_report_on_simulated_data_is_json_and_renders():
     assert cost["ratio_boot_ci"][0] < cost["ratio"] < cost["ratio_boot_ci"][1] and cost["ratio_ci"][0] < cost["ratio"] < cost["ratio_ci"][1]
     assert any("astra-high" in c and "sign-flip" in c for c in d["caveats"])
     md = gr.render(d)
-    assert "## Decisions" in md and "G-H3b" in md
+    assert "## Decisions" in md and "G-H3b" in md and "Descriptive estimates (D-033" in md and "G-H1 (M2 − S-CM*)" in md
 
 
 def test_report_on_partial_data_never_raises():
     # Only the context-management block at one point, no capability, no topology arms.
     s = _session_rows({("luna-high", a): [0.4, 0.5, 0.45] for a in ("CM0", "O-state")}, block="cm", N=40)
     d = gr.g_report(None, s, {}, reps=200, boot=0, glmm=False)
-    dec = {r["id"]: r["decision"] for r in d["decisions"]}
-    assert dec["G-H1"] == "NOT_TESTABLE" and dec["G-H3-pre"] == "NOT_TESTABLE" and dec["G-H2b[CM-sum]"] == "NOT_TESTABLE"
+    dec = {r["id"]: r for r in d["decisions"]}
+    assert dec["G-H3-pre"]["decision"] == "NOT_TESTABLE" and dec["G-H1"]["decision"] == dec["G-H2b[CM-sum]"]["decision"] == "descriptive"
+    assert dec["G-H1"]["estimate_span"] is None and dec["G-H1"]["reason"] and dec["G-H2b[CM-sum]"]["reason"]  # why there is no estimate
     assert d["capability"]["missing"] == ["luna-high"]
     gr.render(d)
     d0 = gr.g_report(pd.DataFrame(), pd.DataFrame(), None, reps=200, boot=0)
@@ -327,19 +362,38 @@ def test_mixture_arms_hit_their_target_shares():
 
 
 def test_type_one_error_at_the_null_through_the_real_path():
-    """At the planned sizes, every confirmatory topology test at its null rejects at most about α (MC tolerance)."""
+    """At the planned (D-033) sizes, every confirmatory topology test at its null rejects at most about α (MC
+    tolerance), and the descriptive G-H1 intervals cover the true 0 about 95% of the time."""
+    tol = lambda n: 3 * math.sqrt(0.025 * 0.975 / n)  # noqa: E731
     r = gp.run(gp.scenarios()["topo-null"], 150, seed=11, reps=199)
-    for test in ("G-H1[S-CM*]", "G-H1[S1]", "G-H1[S1-pre]", "G-H3a", "G-H3b.recovery", "G-H3b.cost"):
-        assert r["tests"][test]["t"] <= 0.025 + 3 * math.sqrt(0.025 * 0.975 / 150), (test, r["tests"][test])
+    for test in ("G-H3a", "G-H3b.recovery", "G-H3b.cost"):
+        assert r["tests"][test]["t"] <= 0.025 + tol(150), (test, r["tests"][test])
+    for ref in ("S-CM*", "S1", "S1-pre"):
+        assert r["tests"][f"G-H1[{ref}]"]["covers_0"] >= 0.95 - 3 * math.sqrt(0.05 * 0.95 / 150) and "t" not in r["tests"][f"G-H1[{ref}]"]
     g = gp.run(gp.scenarios()["cm-null-gap"], 100, seed=12, reps=199)
     for c in ("luna-low", "luna-high", "sol-high", "astra-high"):
-        assert g["tests"][f"G-H2a[{c}]"]["t"] <= 0.025 + 3 * math.sqrt(0.025 * 0.975 / 100)
+        assert g["tests"][f"G-H2a[{c}]"]["t"] <= 0.025 + tol(100)
     assert g["tests"]["G-H2a[astra-high]"]["flip"] == 0.0  # 4 sessions: the exact flip cannot reach α
+
+
+def test_planned_designs_follow_d033_and_the_run_plan():
+    topo = {c.point: c for c in gp.PLANNED_TOPO}
+    assert {p: (c.sessions, c.epochs, c.N) for p, c in topo.items()} == {"luna-low": (16, 2, 20), "luna-high": (16, 2, 20), "sol-high": (8, 2, 20), "astra-high": (5, 2, 20)}
+    assert set(topo["luna-low"].arms) == set(gs.TOPO_ARMS) and topo["astra-high"].arms == ("S1", "M2")
+    from ape.budget import load_plan
+
+    plan = load_plan()
+    if "g.topo.luna-low" not in {c.id for c in plan.cells}:
+        pytest.skip("config/run_plan.yaml does not carry D-033's g.topo.luna-low cell yet")
+    for cell in (*gp.PLANNED_TOPO, *gp.PLANNED_CM):
+        spec = plan.cell(cell.plan_cell).spec
+        assert (int(spec["sessions"]), int(spec["epochs"]), int(spec["N"])) == (cell.sessions, cell.epochs, cell.N), cell.plan_cell
+        assert set(cell.arms) <= set(spec["arms"]), cell.plan_cell
 
 
 def test_flip_floor_flags_astra():
     rows = {r["test"]: r for r in gp.flip_floor()}
     assert rows["G-H2a [astra-high]"]["reachable"] is False and rows["G-H2a [astra-high]"]["min_p"] == 0.0625
     assert "≥ 6" in rows["G-H2a [astra-high]"]["fix"]
-    assert rows["G-H2a [sol-high]"]["reachable"] and rows["G-H1 [S-CM*]"]["reachable"]
-    assert {r["test"]: r for r in gp.flip_floor(shared=False)}["G-H1 [S-CM*]"]["clusters"] == 16
+    assert rows["G-H2a [sol-high]"]["reachable"] and not any(r.startswith(("G-H1", "G-H2b")) for r in rows)  # descriptive
+    assert rows["G-H3 (pre, a, b)"]["clusters"] == 16 and {r["test"]: r for r in gp.flip_floor(shared=False)}["G-H3 (pre, a, b)"]["clusters"] == 40

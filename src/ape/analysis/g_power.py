@@ -6,7 +6,12 @@
 
 Each simulated study is a session table in `g_load`'s schema (the outcome columns `g_load.sessions_from_items`
 produces from item rows; a test checks the two agree), analysed by the same `g_stats` functions `g_report` calls:
-`gh1` (every single-agent reference), `gap_iut`, `tost` with Holm, and `gh3`.
+`gap_iut` (G-H2a) and `gh3` (G-H3-pre, G-H3a, G-H3b), the confirmatory rows since D-033, and `gh1` (every
+single-agent reference) and `tost` (G-H2b's estimate), which D-033 made descriptive: for those the run reports the
+estimate's precision and how often its 95% interval covers 0.
+
+The planned design is D-033's: topology cells at Luna-low and Luna-high with 16 sessions each, Sol-high 8, Astra-high
+5 (S1 and M2 only), N = 20, 2 epochs; G-H3 pools the three points with all four topology arms.
 
 **Generative model** (logit scale; per capability point c, world w, arm a, epoch e, item position i):
 
@@ -35,11 +40,11 @@ produces from item rows; a test checks the two agree), analysed by the same `g_s
 calibrates them; every function takes them as arguments.
 
 **Outputs** (`power_report`): per confirmatory test, the rejection rate at its null (type I; ≤ nominal) and at the
-plausible effects (power), each with its Monte Carlo standard error, for the t-test and the sign-flip; the minimum
-attainable p of an exact session-level sign-flip per test and cluster count (`flip_floor`), with what would fix a
-test that cannot reach its level; the TOST at several margins; alternative designs (a Luna-low topology cell, 16 or
-24 Luna topology sessions per point, S-CM* at Astra, 6 Astra CM sessions); and sensitivities (no capability noise,
-distinct worlds per point, σ_arm 0.6).
+plausible effects (power), each with its Monte Carlo standard error, for the t-test and the sign-flip; for the
+descriptive rows, the estimate's mean, SD and interval coverage of 0; the minimum attainable p of an exact
+session-level sign-flip per confirmatory test (`flip_floor`), with what would fix a test that cannot reach its level;
+alternative designs (the design before D-033, 24 Luna sessions per point, 12 Sol sessions, 6 Astra CM sessions); and
+sensitivities (distinct worlds per point, σ_arm 0.6, no capability noise).
 """
 
 import argparse
@@ -55,7 +60,7 @@ import pandas as pd
 from scipy.special import expit, logit
 
 from . import g_stats as gs
-from .g_hypotheses import ALPHA, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE, TOST_MARGIN
+from .g_hypotheses import ALPHA, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE
 
 _GH_X, _GH_W = np.polynomial.hermite_e.hermegauss(40)
 _GH_W = _GH_W / _GH_W.sum()
@@ -82,11 +87,14 @@ PLANNED_CM = (
     Cell("astra-high", 4, 2, 24, CM_ARMS, "n24", "g.cm.astra-high"),
     Cell("luna-high", 10, 3, 10, ("CM0", "O-state"), "n10", "g.cm.luna-n10"),
 )
+# D-033: a Luna-low topology cell and 16 Luna sessions per point (was Luna-high 8, Sol 8, Astra 5).
 PLANNED_TOPO = (
-    Cell("luna-high", 8, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.luna"),
+    Cell("luna-low", 16, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.luna-low"),
+    Cell("luna-high", 16, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.luna"),
     Cell("sol-high", 8, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.sol"),
     Cell("astra-high", 5, 2, 20, ("S1", "M2"), "n20", "g.topo.astra"),
 )
+PREVIOUS_TOPO =(replace(PLANNED_TOPO[1], sessions=8), *PLANNED_TOPO[2:])  # before D-033, for comparison
 LOW = {"topo": "S1", "cm": "CM0"}
 HIGH = {"topo": "M2", "cm": "O-state"}
 
@@ -282,8 +290,6 @@ def measured_capability(sc: Scenario, var: Variance, rng: np.random.Generator, n
 
 # ---------- scenarios ----------
 
-TOPO_POINTS = ("luna-high", "sol-high", "astra-high")
-
 
 def topo_scenario(name: str, *, base=None, shift=None, iso=None, rec=None, cps=None, note: str = "") -> Scenario:
     return Scenario(
@@ -309,37 +315,43 @@ def _linear_in_capability(r0: float, theta: float, points: Sequence[str], cap: M
     return {c: r0 + theta * (cap[c] - xbar) / span for c in points}
 
 
-def scenarios(margin: float = TOST_MARGIN["R"]) -> dict[str, Scenario]:
+def scenarios(change: float = 0.2) -> dict[str, Scenario]:
+    """The named scenarios. `change` is the fall in R_x over the capability span in `cm-falling` (G-H2b, descriptive)."""
     cm_pts = ("luna-low", "luna-high", "sol-high", "astra-high")
     return {
         # topology block
         "topo-null": topo_scenario("topo-null", base=_const(0.80), shift=_const(0.4), iso=_const(ISOLATION_SHARE), rec=_const(RECOVERY_SHARE), cps=COST_RATIO,
                                    note="every point identical (G-H1 slope 0 for every reference); H3a, H3b recovery and cost exactly at their margins"),
         "topo-converge": topo_scenario("topo-converge", shift={"luna-low": 0.9, "luna-high": 0.6, "sol-high": 0.3, "astra-high": 0.0}, rec={"luna-low": 0.5, "luna-high": 0.6, "sol-high": 0.8, "astra-high": 0.9}, cps=0.5,
-                                       note="M2's logit advantage falls 0.6 → 0.3 → 0 (Luna-high → Sol → Astra; 0.9 at Luna-low) and S-CM*'s recovery rises 0.6 → 0.8 → 0.9 (0.5 at Luna-low)"),
+                                       note="M2's logit advantage falls 0.9 → 0.6 → 0.3 → 0 (Luna-low → Astra) and S-CM*'s recovery rises 0.5 → 0.6 → 0.8 → 0.9; isolation share 0.75"),
         "topo-constant": topo_scenario("topo-constant", shift=_const(0.3), rec=_const(0.7), cps=0.5,
-                                       note="no topology × capability interaction in the mechanism (constant logit advantage and recovery); base success rises with capability"),
+                                       note="no topology × capability interaction in the mechanism (constant logit advantage, recovery 0.7); base success rises with capability"),
         "topo-h3": topo_scenario("topo-h3", iso=_const(0.8), rec=_const(0.95), cps=0.45, note="isolation share 0.8, recovery 0.95, cost ratio 0.45"),
         "topo-h3-mid": topo_scenario("topo-h3-mid", iso=_const(0.7), rec=_const(0.9), cps=0.5, note="isolation share 0.7, recovery 0.9, cost ratio 0.5"),
+        "topo-h3-low": topo_scenario("topo-h3-low", iso=_const(0.65), rec=_const(0.85), cps=0.55, note="isolation share 0.65, recovery 0.85, cost ratio 0.55"),
         # context-management block
         "cm-null-gap": cm_scenario("cm-null-gap", shift=_const(0.0), overflow=False, note="O-state ≡ CM0 (no overflow, no shift): Gap_T = 0 at every point"),
         "cm-equiv": cm_scenario("cm-equiv", note="R_x constant across capability (CM-sum 0.6, CM-todo 0.5); CM0 overflows at 0.70"),
-        "cm-margin": cm_scenario("cm-margin", r_sum=_linear_in_capability(0.6, -margin, cm_pts), r_todo=_linear_in_capability(0.5, -margin, cm_pts),
-                                 note=f"R_x falls by exactly the margin ({margin}) over the capability span: TOST at its null"),
-        "cm-margin-up": cm_scenario("cm-margin-up", r_sum=_linear_in_capability(0.6, margin, cm_pts), r_todo=_linear_in_capability(0.5, margin, cm_pts),
-                                    note=f"R_x rises by exactly the margin ({margin}): the TOST's other null"),
+        "cm-falling": cm_scenario("cm-falling", r_sum=_linear_in_capability(0.6, -change, cm_pts), r_todo=_linear_in_capability(0.5, -change, cm_pts),
+                                  note=f"R_x falls by {change} over the capability span (G-H2b's estimate, descriptive)"),
     }
 
 
 # ---------- one simulated study through the analysis ----------
 
 
+def _covers(ci, value: float = 0.0) -> bool | None:
+    return None if not ci or ci[0] is None or ci[1] is None else bool(ci[0] <= value <= ci[1])
+
+
 def analyse_topo(sessions: pd.DataFrame, cap: Mapping[str, float], *, references: Sequence[str] = ("S-CM*", "S1", "S1-pre"), alpha: float = ALPHA, reps: int = 999, seed: int = 0, flip: bool = True) -> dict:
+    """G-H1 (descriptive, D-033: the change over the capability span, its standard error and whether its 95% interval
+    covers 0) for every reference, and G-H3's confirmatory tests (rejections by t and sign-flip)."""
     out = {}
     for ref in references:
-        r = gs.gh1(sessions, cap, reference=ref, alpha=alpha, reps=reps, seed=seed, flip=flip)
+        r = gs.gh1(sessions, cap, reference=ref, alpha=alpha, reps=reps, seed=seed, flip=False)
         se = None if r.get("se") is None or r.get("span") is None else r["se"] * r["span"]
-        out[f"G-H1[{ref}]"] = {"t": _rej(r.get("p_t"), alpha), "flip": _rej(r.get("p_flip"), alpha), "est": r.get("est_span"), "se": se, "testable": r.get("testable", False)}
+        out[f"G-H1[{ref}]"] = {"est": r.get("est_span"), "se": se, "covers_0": _covers(r.get("ci_span")), "testable": r.get("testable", False)}
     h = gs.gh3(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, boot=0, meters=())
     if h.get("testable"):
         pre, a, rec, cost = h["pre"], h["h3a"], h["h3b"]["recovery"], h["h3b"]["cost"]
@@ -351,22 +363,17 @@ def analyse_topo(sessions: pd.DataFrame, cap: Mapping[str, float], *, references
     return out
 
 
-def analyse_cm(sessions: pd.DataFrame, cap: Mapping[str, float], *, estimand: str = "R", margin: float | None = None, alpha: float = ALPHA, reps: int = 999, seed: int = 0, flip: bool = True) -> dict:
+def analyse_cm(sessions: pd.DataFrame, cap: Mapping[str, float], *, estimand: str = "R", alpha: float = ALPHA, reps: int = 999, seed: int = 0, flip: bool = True) -> dict:
+    """G-H2a's confirmatory tests (per point and the intersection-union decision), and G-H2b (descriptive, D-033): the
+    change in R_x over the capability span, its standard error and whether its 95% interval covers 0."""
     out = {}
     g = gs.gap_iut(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip)
     for c, r in g["points"].items():
         out[f"G-H2a[{c}]"] = {"t": bool(r["reject"]), "flip": _rej(r["p_flip"], alpha), "est": r["est"], "se": r["se"]}
     out["G-H2a"] = {"t": g["all_positive"], "flip": g["all_positive_flip"]}
-    tosts = {}
     for s in ("CM-sum", "CM-todo"):
-        r = gs.tost(sessions, cap, s, estimand=estimand, margin=margin, alpha=alpha, reps=reps, seed=seed, flip=flip)
-        tosts[s] = r
-        out[f"G-H2b[{s}]"] = {"t": _rej(r.get("p_t"), alpha), "flip": _rej(r.get("p_flip"), alpha), "est": r.get("est"), "se": r.get("se")}
-    for test in ("t", "flip"):
-        p = {s: r.get("p_t" if test == "t" else "p_flip") if r["testable"] else None for s, r in tosts.items()}
-        _, rej, _ = gs.holm_test(p, alpha)
-        for s in tosts:
-            out[f"G-H2b[{s}]"][f"holm_{test}"] = bool(rej.get(s))
+        r = gs.tost(sessions, cap, s, estimand=estimand, alpha=alpha, reps=reps, seed=seed, flip=False)
+        out[f"G-H2b[{s}]"] = {"est": r.get("est"), "se": r.get("se"), "covers_0": _covers(r.get("ci"))}
     return out
 
 
@@ -375,7 +382,8 @@ def _rej(p, alpha) -> bool:
 
 
 def run(sc: Scenario, n_sims: int, *, design: Sequence[Cell] | None = None, var: Variance = Variance(), alpha: float = ALPHA, reps: int = 999, seed: int = 0, shared_worlds: bool = True, capability_noise: bool = True, flip: bool = True, **analysis) -> dict:
-    """Rejection rates (and mean estimates) of every test of the scenario's block over `n_sims` simulated studies."""
+    """Rejection rates (confirmatory rows), interval coverage of 0 (descriptive rows) and the estimates' mean and SD
+    over `n_sims` simulated studies of the scenario's block."""
     design = design or (PLANNED_TOPO if sc.block == "topo" else PLANNED_CM)
     rng = np.random.default_rng(seed)
     acc: dict[str, dict[str, list]] = {}
@@ -401,9 +409,10 @@ def run(sc: Scenario, n_sims: int, *, design: Sequence[Cell] | None = None, var:
             elif k == "testable":
                 row["testable_rate"] = float(np.mean(vals))
             else:
-                r = float(np.mean([bool(v) for v in vals]))
+                known = [bool(v) for v in vals if v is not None]
+                r = float(np.mean(known)) if known else None
                 row[k] = r
-                row[f"{k}_mcse"] = float(math.sqrt(r * (1 - r) / n_sims))
+                row[f"{k}_mcse"] = None if r is None else float(math.sqrt(r * (1 - r) / len(known)))
         out["tests"][test] = row
     return out
 
@@ -423,7 +432,7 @@ def _clusters(design: Sequence[Cell], points: Sequence[str], shared: bool, arms:
 
 def flip_floor(alpha: float = ALPHA, *, cm: Sequence[Cell] = PLANNED_CM, topo: Sequence[Cell] = PLANNED_TOPO, shared: bool = True) -> list[dict]:
     """Per confirmatory test: the clusters its sign-flip enumerates, the smallest p it can give (2^−G), the level it
-    must reach (Holm's first step for a family of k: α / k), whether it can, and what would fix it."""
+    must reach, whether it can, and what would fix it. (G-H1 and G-H2b are descriptive since D-033.)"""
     rows = []
 
     def add(test: str, G: int, level: float, note: str = "") -> None:
@@ -433,14 +442,9 @@ def flip_floor(alpha: float = ALPHA, *, cm: Sequence[Cell] = PLANNED_CM, topo: S
         fix = "" if ok else f"≥ {need} independent sessions (2^−{need} = {2.0 ** -need:.4f} ≤ {level:g}), or decide on the t-test"
         rows.append({"test": test, "clusters": G, "min_p": mp, "level": level, "reachable": ok, "fix": fix, "note": note})
 
-    tp = [c.point for c in topo]
-    scm_pts = [c.point for c in topo if "S-CM*" in c.arms]
-    add("G-H1 [S-CM*]", _clusters(topo, scm_pts, shared, ("S-CM*",)), alpha, f"points {scm_pts}")
-    add("G-H1 [S1, S1-pre]", _clusters(topo, tp, shared, ("S1",)), alpha, f"points {tp}")
     for c in cm:
         if c.N > gs.SHORT_N:
             add(f"G-H2a [{c.point}]", c.sessions, alpha, "each point of the intersection-union test at α")
-    add("G-H2b (TOST, Holm over 2)", _clusters(cm, [c.point for c in cm], shared), alpha / 2, "Holm's first step")
     h3 = [c.point for c in topo if set(gs.TOPO_ARMS) <= set(c.arms)]
     add("G-H3 (pre, a, b)", _clusters(topo, h3, shared), alpha, f"points {h3}; fixed sequence at α")
     return rows
@@ -448,24 +452,18 @@ def flip_floor(alpha: float = ALPHA, *, cm: Sequence[Cell] = PLANNED_CM, topo: S
 
 # ---------- the report ----------
 
-TOPO_LUNA_LOW = Cell("luna-low", 8, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.luna-low")
-
 
 def designs() -> dict[str, tuple[str, tuple[Cell, ...]]]:
-    """Alternative designs `power_report` simulates: what would fix an underpowered or unreachable test."""
+    """Alternative designs `power_report` simulates: the design before D-033 for comparison, and what would improve the
+    remaining confirmatory rows further."""
     astra6 = tuple(replace(c, sessions=6) if c.point == "astra-high" and c.N > gs.SHORT_N else c for c in PLANNED_CM)
-    scm_astra = tuple(replace(c, arms=("S1", "M2", "S-CM*")) if c.point == "astra-high" else c for c in PLANNED_TOPO)
-    luna_low = (TOPO_LUNA_LOW, *PLANNED_TOPO)
-    luna_low_x2 = tuple(replace(c, sessions=16) if c.point.startswith("luna") else c for c in luna_low)
-    luna_low_x3 = tuple(replace(c, sessions=24) if c.point.startswith("luna") else c for c in luna_low)
-    with_scm = lambda cells: tuple(replace(c, arms=("S1", "M2", "S-CM*")) if c.point == "astra-high" else c for c in cells)  # noqa: E731
+    luna24 = tuple(replace(c, sessions=24) if c.point.startswith("luna") else c for c in PLANNED_TOPO)
+    sol12 = tuple(replace(c, sessions=12) if c.point == "sol-high" else c for c in PLANNED_TOPO)
     return {
         "cm-astra6": ("cm", astra6),
-        "topo-scm-at-astra": ("topo", scm_astra),
-        "topo+luna-low": ("topo", luna_low),
-        "topo+luna-low,luna-x2": ("topo", luna_low_x2),
-        "topo+luna-low,luna-x3": ("topo", luna_low_x3),
-        "topo+luna-low,luna-x2,scm-at-astra": ("topo", with_scm(luna_low_x2)),
+        "topo-before-D-033": ("topo", PREVIOUS_TOPO),
+        "topo-luna-24": ("topo", luna24),
+        "topo-sol-12": ("topo", sol12),
     }
 
 
@@ -474,35 +472,32 @@ def _job(args: tuple) -> tuple[tuple, dict]:
     return key, run(sc, n_sims, **kw)
 
 
-def mde(sd: float | None, alpha: float = ALPHA, power: float = 0.8, tost: bool = False) -> float | None:
+def mde(sd: float | None, alpha: float = ALPHA, power: float = 0.8) -> float | None:
     """Normal-approximation minimum detectable effect of a one-sided test at `alpha` with `power`, from the estimate's
-    sampling SD; with `tost`, the smallest equivalence margin with `power` at a true value of 0."""
+    sampling SD (for a descriptive estimate: (z_0.975 + z_0.8) × SD, the effect its 95% interval excludes 0 for 80%
+    of the time)."""
     from scipy.stats import norm
 
     if sd is None:
         return None
-    return float((norm.ppf(1 - alpha) + norm.ppf(1 - (1 - power) / 2 if tost else power)) * sd)
+    return float((norm.ppf(1 - alpha) + norm.ppf(power)) * sd)
 
 
-def power_report(n_sims: int = 2000, *, n_other: int | None = None, seed: int = 20261003, reps: int = 999, var: Variance = Variance(), margins: Sequence[float] = (0.2, 0.3, 0.5), quick: bool = False, workers: int = 1) -> dict:
+def power_report(n_sims: int = 2000, *, n_other: int | None = None, seed: int = 20261003, reps: int = 999, var: Variance = Variance(), quick: bool = False, workers: int = 1) -> dict:
     """Every scenario at the planned sizes (`n_sims` each); unless `quick`, with `n_other` each (default n_sims / 4) the
-    TOST at several margins, the alternative designs and the sensitivities. Plus the sign-flip floors and
-    normal-approximation MDEs. `workers` > 1 runs the simulations in processes."""
+    alternative designs and the sensitivities. Plus the sign-flip floors and normal-approximation MDEs. `workers` > 1
+    runs the simulations in processes."""
     n_other = n_other or max(n_sims // 4, 50)
     sc = scenarios()
     base = {"var": var, "reps": reps}
     jobs: list[tuple] = [(("planned", name), s, n_sims, base | {"seed": seed + 100 * i}) for i, (name, s) in enumerate(sc.items())]
     if not quick:
-        for m in margins:
-            ms = scenarios(m)
-            jobs += [(("tost_margins", f"R±{m}", k), ms[k], n_other, base | {"seed": seed + 7, "margin": m}) for k in ("cm-equiv", "cm-margin")]
-        jobs += [(("tost_margins", f"gain-logit±{TOST_MARGIN['gain']}", "cm-equiv"), sc["cm-equiv"], n_other, base | {"seed": seed + 8, "estimand": "gain", "margin": TOST_MARGIN["gain"]})]
         for name, (block, design) in designs().items():
-            keys = ("cm-null-gap", "cm-equiv") if block == "cm" else ("topo-null", "topo-converge", "topo-constant", "topo-h3")
+            keys = ("cm-null-gap", "cm-equiv") if block == "cm" else ("topo-null", "topo-converge", "topo-h3", "topo-h3-mid", "topo-h3-low")
             jobs += [(("alternatives", name, k), sc[k], n_other, base | {"seed": seed + 11, "design": design}) for k in keys]
-        jobs += [(("sensitivity", "no-capability-noise", k), sc[k], n_other, base | {"seed": seed + 13, "capability_noise": False}) for k in ("topo-converge", "cm-margin")]
-        jobs += [(("sensitivity", "distinct-worlds", k), sc[k], n_other, base | {"seed": seed + 17, "shared_worlds": False}) for k in ("topo-null", "topo-converge", "cm-margin")]
-        jobs += [(("sensitivity", "sigma_arm-0.6", k), sc[k], n_other, base | {"seed": seed + 19, "var": replace(var, arm=0.6)}) for k in ("topo-null", "topo-converge", "topo-h3", "cm-equiv", "cm-margin")]
+        jobs += [(("sensitivity", "distinct-worlds", k), sc[k], n_other, base | {"seed": seed + 17, "shared_worlds": False}) for k in ("topo-null", "topo-h3", "topo-h3-mid", "cm-null-gap")]
+        jobs += [(("sensitivity", "sigma_arm-0.6", k), sc[k], n_other, base | {"seed": seed + 19, "var": replace(var, arm=0.6)}) for k in ("topo-null", "topo-h3", "topo-h3-mid", "topo-converge", "cm-null-gap", "cm-equiv")]
+        jobs += [(("sensitivity", "no-capability-noise", k), sc[k], n_other, base | {"seed": seed + 13, "capability_noise": False}) for k in ("topo-converge", "cm-falling")]
     if workers > 1:
         from concurrent.futures import ProcessPoolExecutor
 
@@ -516,14 +511,13 @@ def power_report(n_sims: int = 2000, *, n_other: int | None = None, seed: int = 
         for k in key[:-1]:
             node = node.setdefault(k, {})
         node[key[-1]] = r
-    for block in ("planned", "tost_margins", "alternatives", "sensitivity"):
+    for block in ("planned", "alternatives", "sensitivity"):
         for r in _walk(out.get(block, {})):
-            for test, t in r["tests"].items():
+            for t in r["tests"].values():
                 if t.get("sd_est") is not None:
-                    t["mde80"] = mde(t["sd_est"], tost=test.startswith("G-H2b"))
+                    t["mde80"] = mde(t["sd_est"])
     out["flip_floor"] = flip_floor()
     out["flip_floor_distinct_worlds"] = flip_floor(shared=False)
-    out["flip_floor_alternatives"] = {name: flip_floor(cm=d if b == "cm" else PLANNED_CM, topo=d if b == "topo" else PLANNED_TOPO) for name, (b, d) in designs().items()}
     return out
 
 
@@ -539,29 +533,30 @@ def _walk(node: dict):
 def render(d: dict) -> str:
     L = [f"# Study G power and type I error (one-sided α = {d['alpha']}; {d['sims']} simulated studies per planned row, {d.get('sims_other', '–')} otherwise)", ""]
     L += [
-        "Rates are P(reject) by the session-clustered t ('t') and the wild sign-flip ('flip'), ± Monte Carlo SE. sd: the "
-        "estimate's sampling SD across simulated studies; MDE80: (z_0.975 + z_0.8) × sd (for a TOST, the margin with 80% "
-        "power at a true 0: (z_0.975 + z_0.9) × sd).",
+        "Confirmatory rows (G-H2a, G-H3-pre, G-H3a, G-H3b): P(reject) by the session-clustered t ('t') and the wild sign-flip "
+        "('flip'), ± Monte Carlo SE. Descriptive rows (G-H1, G-H2b; D-033): 'covers 0' is the share of 95% intervals that "
+        "include 0. sd: the estimate's sampling SD across simulated studies; MDE80: (z_0.975 + z_0.8) × sd.",
         "",
     ]
     L += ["Scenarios:", ""] + [f"- **{k}**: {v}" for k, v in d.get("scenarios", {}).items()] + [""]
 
     def table(block: dict) -> None:
-        L.append("| scenario | test | t | flip | mean estimate | sd | MDE80 |")
-        L.append("|---|---|---|---|---|---|---|")
+        L.append("| scenario | row | t | flip | covers 0 | mean estimate | sd | MDE80 |")
+        L.append("|---|---|---|---|---|---|---|---|")
         for r in _walk(block):
             for test, x in r["tests"].items():
-                t = "–" if "t" not in x else f"{x['t']:.3f} ± {x['t_mcse']:.3f}"
-                f = "–" if "flip" not in x else f"{x['flip']:.3f}"
+                t = "–" if x.get("t") is None else f"{x['t']:.3f} ± {x['t_mcse']:.3f}"
+                f = "–" if x.get("flip") is None else f"{x['flip']:.3f}"
+                c = "–" if x.get("covers_0") is None else f"{x['covers_0']:.3f}"
                 e = "–" if x.get("mean_est") is None else f"{x['mean_est']:+.3f}"
                 sd = "–" if x.get("sd_est") is None else f"{x['sd_est']:.3f}"
                 m = "–" if x.get("mde80") is None else f"{x['mde80']:.3f}"
-                L.append(f"| {r['scenario']} | {test} | {t} | {f} | {e} | {sd} | {m} |")
+                L.append(f"| {r['scenario']} | {test} | {t} | {f} | {c} | {e} | {sd} | {m} |")
         L.append("")
 
     L += ["## Planned sizes", ""]
     table(d["planned"])
-    for key, title in (("tost_margins", "TOST margins"), ("alternatives", "Alternative designs"), ("sensitivity", "Sensitivity")):
+    for key, title in (("alternatives", "Alternative designs"), ("sensitivity", "Sensitivity")):
         for name, block in d.get(key, {}).items():
             L += [f"## {title}: {name}", ""]
             table(block)
@@ -573,7 +568,7 @@ def render(d: dict) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--sims", type=int, default=2000)
-    ap.add_argument("--sims-other", type=int, default=None, help="per row for margins, alternatives and sensitivities (default sims / 4)")
+    ap.add_argument("--sims-other", type=int, default=None, help="per row for alternatives and sensitivities (default sims / 4)")
     ap.add_argument("--reps", type=int, default=999, help="sign-flip resamples above the exact-enumeration limit")
     ap.add_argument("--seed", type=int, default=20261003)
     ap.add_argument("--workers", type=int, default=1)

@@ -128,7 +128,7 @@ def test_report_end_to_end_from_cells(g_logs):
     cm0 = ss[(ss["arm"] == "CM0") & (ss["point"] == "luna-high")].groupby("session")["item_success"].mean().mean()
     assert d["gh2"]["gap"]["points"]["luna-high"]["est"] == pytest.approx(1.0 - cm0)
     assert d["capability"]["points"][0]["source"] == "override"
-    assert dec["G-H1"]["decision"] == "NOT_TESTABLE" and dec["G-H3-pre"]["decision"] == "NOT_TESTABLE"
+    assert dec["G-H1"]["decision"] == "descriptive" and dec["G-H1"]["estimate_span"] is None and dec["G-H3-pre"]["decision"] == "NOT_TESTABLE"
     assert {c["arm"] for c in d["costs"]} == {"CM0", "O-state"} and all(c["cost_usd_per_solved"] is None or c["cost_usd_per_solved"] > 0 for c in d["costs"])
     assert {p["k"] for p in d["probes"]["by_checkpoint"]} == {5, 10}
     assert {t["arm"] for t in d["taxonomy"]} == {"CM0", "O-state"}
@@ -168,6 +168,8 @@ def test_loader_reads_b7_usage_by_kind_and_resumes():
         "f8_resume": {"resumes": [{"resume": 1, "after_item": 1}], "count": 1, "after_items": [1], "failures": [], "unlogged": {"calls": 3, "by_kind": {"agent": _usage(500, 50)}, "by_model": {LUNA: _usage(500, 50)}}, "logged_elsewhere": None},
         "f8_overflow_at": None,
         "arm": {"checkpoints": [1, 3]},
+        # B2's per-agent accounting (B9 topology sessions will carry it; worker calls are kind "agent"): ignored here.
+        "mas_accounting": {"agents": {"orchestrator": {"calls": 2}, "worker-1": {"calls": 3}}, "error": None},
     }
     items, row = sample_rows(_sample(store, model_usage={LUNA: _usage(1000, 100)}), {"arm": "CM-sum"}, prices=LUNA_PRICE)
     assert row["tokens_total"] == 1940 and row["tokens_cm"] == 350 and row["tokens_probe"] == 220 and row["tokens"] == 1720
@@ -207,6 +209,23 @@ def test_loader_falls_back_without_b7_usage_and_tolerates_missing_scores():
     bare = SimpleNamespace(id="w", epoch=2, metadata={"world_id": "w", "N": 4}, store={}, scores={}, model_usage={}, role_usage={}, error=None, total_time=None, working_time=None, limit=None)
     items, row = sample_rows(bare, {"arm": "CM0"})
     assert len(items) == 4 and not any(i["success"] for i in items) and row["tokens"] == 0 and row["probes"] == {}
+
+
+def test_cell_info_resolves_the_d033_luna_low_topology_cell():
+    """D-033's g.topo.luna-low (effort low on the Luna profile) maps to block topo and point luna-low, from the plan the
+    caller passes (the repo's run_plan.yaml carries it once the config change lands)."""
+    from dataclasses import replace
+
+    from ape.analysis.g_load import cell_info
+    from ape.budget import PlanCell, load_plan
+
+    plan = load_plan()
+    luna = plan.cell("g.topo.luna").spec
+    new = PlanCell("g.topo.luna-low", "study_g", "topology", {**luna, "id": "g.topo.luna-low", "effort": "low", "sessions": 16})
+    plan = replace(plan, cells=(*(c for c in plan.cells if c.id != "g.topo.luna-low"), new))
+    ci = cell_info("g.topo.luna-low", plan)
+    assert (ci["block"], ci["point"], ci["effort"], ci["sessions"], ci["N"]) == ("topo", "luna-low", "low", 16, 20)
+    assert cell_info("g.topo.luna", plan)["point"] == "luna-high"
 
 
 def test_report_from_tables_matches_report_from_cells(g_logs):
