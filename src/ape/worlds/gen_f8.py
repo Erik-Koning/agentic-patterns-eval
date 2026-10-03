@@ -190,8 +190,10 @@ def calls_key(calls: list[dict]) -> list[str]:
 # --- Generation ----------------------------------------------------------------------------------------------
 
 
-def _variant_tag(knobs: dict) -> str:
-    diff = {k: v for k, v in knobs.items() if v != DEFAULT_KNOBS[k]}
+def variant_tag(knobs: dict | None) -> str:
+    """The world-ID tag of a knob setting ("" at the defaults, e.g. "o2250"): `tasks.study_g` selects a run_plan
+    session cell's worlds by it. Unknown knobs raise KeyError."""
+    diff = {k: v for k, v in (knobs or {}).items() if v != DEFAULT_KNOBS[k]}
     short = {"memo_density": "m", "dependency_density": "d", "output_tokens": "o"}
     return "".join(f"{short[k]}{v:g}" for k, v in sorted(diff.items()))
 
@@ -449,7 +451,7 @@ def generate(level: str, split: str, seed: int, n_tasks: int = 0, *, memo_densit
         "dependency_density": DEFAULT_KNOBS["dependency_density"] if dependency_density is None else float(dependency_density),
         "output_tokens": DEFAULT_KNOBS["output_tokens"] if output_tokens is None else int(output_tokens),
     }
-    tag = _variant_tag(knobs)
+    tag = variant_tag(knobs)
     world = World(id=f"F8-{n}{'-' + tag if tag else ''}-{split}-s{seed}", family="F8", level=str(n), seed=seed, split=split)
     _merge_kb(world, gen_f7.generate(kb_levels[0], True, split, seed, 0, "descriptive"), gen_f3.generate(kb_levels[1], split, seed, 0))
     for attempt in range(200):

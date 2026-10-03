@@ -359,3 +359,16 @@ def test_plan_knobs_make_short_sessions_cross_the_window_like_long_ones():
         make_world("F7", "10", "dev", 0, 2, knobs={"output_tokens": 2000})
     with pytest.raises(ValueError, match="unknown F8 knobs"):
         make_world("F8", "10", "dev", 0, 0, knobs={"tokens": 2000})
+
+
+def test_build_passes_knobs_and_seed_base_to_the_generator(session_env):
+    """`ape.build` (and its --knob/--seed-base flags) reach make_world; the world ID carries the variant tag that
+    `tasks.study_g` selects worlds by."""
+    import asyncio
+
+    from ape.build import build
+    from ape.worlds.gen_f8 import variant_tag
+
+    assert variant_tag(None) == "" and variant_tag({"output_tokens": 1000}) == "" and variant_tag({"output_tokens": 2250}) == "o2250"
+    ids = asyncio.run(build("dev", "F8", ["20"], n_worlds=1, n_tasks=0, relational=True, embed=False, seed_base=1500, knobs={"output_tokens": 2250}))
+    assert ids == ["F8-20-o2250-dev-s1500"]
