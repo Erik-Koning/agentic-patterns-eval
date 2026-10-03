@@ -10,15 +10,17 @@ JSON-serialisable dict and as markdown, in the style of `ape.analyze_gate`.
 belongs to the study runner, which calls `report_from_cells`.
 
 Contents:
-- **Decisions** per hypothesis (G-H1, G-H2a, G-H2b per strategy, G-H3-pre → G-H3a → G-H3b in fixed sequence):
-  SUPPORTED, NOT_SUPPORTED, EQUIVALENT / NOT_SHOWN (TOST), NOT_TESTED (an earlier step of the sequence failed) or
-  NOT_TESTABLE (with the reason: missing arms, points, capability or sessions). Descriptive rows are never decided.
-- **G-H1** for the chosen single-agent reference and for every other (S-CM*, S1, S1-pre), on the logit and the
+- **Decisions** per confirmatory hypothesis (G-H2a; G-H3-pre → G-H3a → G-H3b in fixed sequence): SUPPORTED,
+  NOT_SUPPORTED, NOT_TESTED (an earlier step of the sequence failed) or NOT_TESTABLE (with the reason: missing arms,
+  points, capability or sessions). Descriptive rows are never decided; G-H1 and G-H2b (descriptive since D-033)
+  carry their estimate and 95% interval in the decision rows and a table of their own.
+- **G-H1** (descriptive) for the reference S-CM*, the sensitivity S1-pre and S1 as scored, on the logit and the
   probability scale, M1 alongside M2, with the per-point gaps.
-- **G-H2:** Gap_T per point (the IUT), R_x per strategy and point with three intervals, the TOST per strategy with
-  Holm, the gain-on-logit TOST as a sensitivity, degradation slopes, the gain before and after the W crossing, and
-  the N = 10 control.
-- **G-H3:** the gatekeeper, H3a, H3b, the shares with Fieller and bootstrap intervals, the cost ratio per meter.
+- **G-H2:** Gap_T per point (the IUT), R_x per strategy and point with three intervals, the change in R_x over the
+  capability span per strategy (descriptive) with the gain on the logit scale as a sensitivity, degradation slopes,
+  the gain before and after the W crossing, and the N = 10 control.
+- **G-H3:** the gatekeeper, H3a, H3b pooled over every point where all four topology arms ran (Luna-low, Luna-high
+  and Sol-high in the D-033 design), the shares with Fieller and bootstrap intervals, the cost ratio per meter.
 - **Descriptive:** outcomes per arm × point (item, dependency, report, session success and pass^k, overflow), cost per
   solved item per meter, probe F1 per checkpoint and the probe-to-behaviour correlation, the failure taxonomy, and the
   mixed models (D-029).
@@ -42,9 +44,10 @@ from .g_hypotheses import ALPHA, DEFAULT_REFERENCE, HYPOTHESES, OPEN_CHOICES, RE
 CHOICES = (
     "Sessions are the clusters (D-029): epochs of a session are pooled before any statistic; a world run at several "
     "capability points is one cluster across them.",
-    "The primary test of every confirmatory row is the session-clustered t (Satterthwaite df; capped at clusters − 1 "
-    "when worlds are shared across points). The wild sign-flip (exact up to 16 clusters) is reported beside it; where "
-    "it cannot reach α (fewer than 6 sessions at α = 0.025) the report says so.",
+    "The primary test of every confirmatory row is the session-clustered t (unbiased variance with shared worlds as one "
+    "cluster; Satterthwaite df, capped at the effective number of clusters − 1 when worlds are shared across points). "
+    "The wild sign-flip (exact up to 16 clusters) is reported beside it; where it cannot reach α (fewer than 6 sessions "
+    "at α = 0.025) the report says so.",
     "A session's outcome is its item success rate; overflowed and never-reached items fail, and an errored sample's "
     "unscored items fail (as in the gate). The binary all-items-and-report session success is reported with pass^k.",
     "G-H1's slope is on the empirical-logit scale of the epoch-pooled item success (log((k + 0.5) / (n − k + 0.5))); "
@@ -54,6 +57,9 @@ CHOICES = (
     "Cost per solved item is Σ cost / Σ items solved over the sessions and epochs of an arm and point; probe calls are "
     "excluded from every meter, management (cm) calls included. Wall-clock includes probe time.",
     "Degradation slopes leave out items lost to overflow (the harness failed them) and items with no view tokens.",
+    "D-033: G-H1 (reference S-CM*, sensitivity S1-pre, S1 descriptive only) and G-H2b (the change in R_x over the "
+    "capability span) are estimates with 95% intervals; no decision rests on them. The confirmatory rows are G-H2a and "
+    "G-H3-pre → G-H3a → G-H3b.",
 )
 
 
@@ -160,24 +166,42 @@ def _label(test: dict, *, claim_key: str = "reject") -> str:
 
 
 def decisions(d: dict, hypotheses: Sequence[GHypothesis]) -> list[dict]:
-    """One row per hypothesis: its decision (confirmatory) or `descriptive`, with the numbers behind it."""
+    """One row per hypothesis: its decision (confirmatory) or `descriptive`, with the numbers behind it. G-H1 and
+    G-H2b (descriptive since D-033) carry their estimate and 95% interval; were a table to make them confirmatory again,
+    they would be decided here as before."""
     out = []
     g1, g2, g3 = d["gh1"]["primary"], d["gh2"], d["gh3"]
     for h in hypotheses:
         row = {"id": h.id, "role": h.role, "family": h.family, "step": h.step}
-        if h.role != "confirmatory":
+        conf = h.role == "confirmatory"
+        if h.id == "G-H1":
+            sens = d["gh1"]["references"].get("S1-pre", {})
+            row |= {
+                "decision": _label(g1) if conf else "descriptive",
+                "reference": g1.get("reference"),
+                "estimate_span": g1.get("est_span"),
+                "ci_span": g1.get("ci_span"),
+                "estimate": g1.get("est"),
+                "ci": g1.get("ci"),
+                "sensitivity_S1_pre": {"estimate_span": sens.get("est_span"), "ci_span": sens.get("ci_span")},
+                "reason": g1.get("reason"),
+            }
+            if conf:
+                row |= {"p": g1.get("p_t"), "p_flip": g1.get("p_flip")}
+            out.append(row)
+            continue
+        if h.id == "G-H2b":
+            for s, r in g2["tost"].items():
+                label = ("NOT_TESTABLE" if not r["testable"] else ("EQUIVALENT" if r.get("holm_equivalent") else "NOT_SHOWN")) if conf else "descriptive"
+                out.append(row | {"id": f"G-H2b[{s}]", "decision": label, "estimate": r.get("est"), "ci": r.get("ci"), "reason": r.get("reason"), **({"margin": r.get("margin"), "p": r.get("p_t"), "holm_level": r.get("holm_level")} if conf else {})})
+            continue
+        if not conf:
             out.append(row | {"decision": "descriptive"})
             continue
-        if h.id == "G-H1":
-            row |= {"decision": _label(g1), "estimate": g1.get("est"), "estimate_span": g1.get("est_span"), "ci": g1.get("ci"), "p": g1.get("p_t"), "p_flip": g1.get("p_flip"), "reference": g1.get("reference"), "reason": g1.get("reason")}
-        elif h.id == "G-H2a":
+        if h.id == "G-H2a":
             gap = g2["gap"]
             failed = [c for c, r in gap["points"].items() if not r.get("reject")]
             row |= {"decision": "NOT_TESTABLE" if not gap["testable"] else ("SUPPORTED" if gap["all_positive"] else "NOT_SUPPORTED"), "points_not_shown": failed, "flip_unreachable": gap["flip_unreachable"], "reason": gap.get("reason")}
-        elif h.id == "G-H2b":
-            for s, r in g2["tost"].items():
-                out.append(row | {"id": f"G-H2b[{s}]", "decision": "NOT_TESTABLE" if not r["testable"] else ("EQUIVALENT" if r.get("holm_equivalent") else "NOT_SHOWN"), "estimate": r.get("est"), "ci": r.get("ci"), "margin": r.get("margin"), "p": r.get("p_t"), "holm_level": r.get("holm_level"), "reason": r.get("reason")})
-            continue
         elif h.id.startswith("G-H3"):
             if not g3.get("testable"):
                 row |= {"decision": "NOT_TESTABLE", "reason": g3.get("reason")}
@@ -301,6 +325,18 @@ def render(d: dict) -> str:
             extra = f"not shown at {r.get('points_not_shown')}" if r.get("points_not_shown") else ""
         rows.append([r["id"], f"**{r['decision']}**", _f(est), _ci(r.get("ci")), _p(r.get("p")), extra or (r.get("reason") or "")])
     L += [_table(["Hypothesis", "Decision", "Estimate", "Interval", "p (t)", "Notes"], rows)]
+    rows = []
+    for r in d["decisions"]:
+        if r["role"] == "confirmatory":
+            continue
+        if r["id"] == "G-H1":
+            s = r.get("sensitivity_S1_pre") or {}
+            rows.append([f"G-H1 (M2 − {r.get('reference')})", "change in the logit gap over the capability span", _f(r.get("estimate_span")), _ci(r.get("ci_span")), r.get("reason") or ""])
+            rows.append(["G-H1 (M2 − S1-pre, sensitivity)", "same, on items before S1's overflow", _f(s.get("estimate_span")), _ci(s.get("ci_span")), ""])
+        elif r["id"].startswith("G-H2b"):
+            rows.append([r["id"], "change in R_x over the capability span", _f(r.get("estimate")), _ci(r.get("ci")), r.get("reason") or ""])
+    if rows:
+        L += ["Descriptive estimates (D-033; 95% intervals, no decision):", "", _table(["Row", "Estimand", "Estimate", "Interval", "Note"], rows)]
 
     cap = d["capability"]
     L += ["## Capability (S1 on F7-10 + F3-5)", ""]
@@ -311,11 +347,22 @@ def render(d: dict) -> str:
                  [[o["block"], o["point"], o["arm"], o["N"], o["sessions"], _f(o["item_success"]), _ci(o["item_success_ci"]), _f(o["dependency_success"]), _f(o["report_exact"]), _f(o["session_success"]), _f(o["pass_k"]), _f(o["overflow_rate"]), o["errors"]] for o in d["outcomes"]])]
 
     g1 = d["gh1"]
-    L += ["## G-H1: topology gap vs capability", "", f"Primary reference: **{g1['primary'].get('reference')}**. Slope per unit measured capability (logit scale); H1: slope < 0.", ""]
-    rows = [_test_row(f"M2 − {r} (logit)", x) + [_f(x.get("est_span")), _ci(x.get("ci_span")), _ci(x.get("boot_ci_span"))] for r, x in g1["references"].items()]
-    rows += [_test_row(f"M2 − {r} (prob)", x) + [_f(x.get("est_span")), _ci(x.get("ci_span")), "–"] for r, x in g1["references_prob"].items()]
-    rows += [_test_row(f"M1 − {g1['M1'].get('reference')} (logit)", g1["M1"]) + [_f(g1["M1"].get("est_span")), _ci(g1["M1"].get("ci_span")), "–"]]
-    L += [_table(["Contrast", "Slope", "Interval", "p (t)", "p (flip)", "min flip p", "Reason", "Change over span", "Interval", "Bootstrap"], rows)]
+    L += [
+        "## G-H1: topology gap vs capability (descriptive, D-033)",
+        "",
+        f"Reference **{g1['primary'].get('reference')}**; S1-pre (both arms on items before S1's overflow) is the sensitivity analysis; S1 as scored is "
+        "reported only descriptively (its gap carries the overflow rule, which drifts with capability). Slope per unit measured capability and the "
+        "change along the fitted line over the capability span, with 95% session-clustered and bootstrap intervals.",
+        "",
+    ]
+
+    def g1_row(name: str, x: dict, boot: bool = True) -> list:
+        return [name, _f(x.get("est")), _ci(x.get("ci")), _f(x.get("est_span")), _ci(x.get("ci_span")), _ci(x.get("boot_ci_span")) if boot else "–", ", ".join(x.get("points_used") or []), x.get("reason") or ""]
+
+    rows = [g1_row(f"M2 − {r} (logit)", x) for r, x in g1["references"].items()]
+    rows += [g1_row(f"M2 − {r} (prob)", x, boot=False) for r, x in g1["references_prob"].items()]
+    rows += [g1_row(f"M1 − {g1['M1'].get('reference')} (logit)", g1["M1"], boot=False)]
+    L += [_table(["Contrast", "Slope", "Interval", "Change over span", "Interval", "Bootstrap", "Points", "Note"], rows)]
     gap_rows = [[r, c, _f(x["est"]), _ci(x["ci"]), x["n"]] for r, xx in g1["references"].items() for c, x in xx.get("gaps", {}).items()]
     L += ["Per-point gaps (logit):", "", _table(["Reference", "Point", "Gap", "Interval", "Sessions"], gap_rows)]
 
@@ -328,10 +375,10 @@ def render(d: dict) -> str:
         for c, r in hh["points"].items():
             rows.append([s, c, _f(r.get("est")), _ci(r.get("ci_delta")), _ci(r.get("ci_fieller")) if r.get("fieller_bounded") else ("unbounded" if r.get("testable") else "–"), _ci(r.get("ci_boot")), r.get("reason") or ""])
     L += [_table(["Strategy", "Point", "R", "Delta CI", "Fieller CI", "Bootstrap CI", "Note"], rows)]
-    L += ["### Persistence across capability (G-H2b, TOST with Holm)", ""]
-    rows = [[s, r.get("estimand"), _f(r.get("est")), _ci(r.get("ci")), f"±{_f(r.get('margin'))}", _p(r.get("p_t")), _f(r.get("holm_level"), 4), "EQUIVALENT" if r.get("holm_equivalent") else ("NOT_SHOWN" if r.get("testable") else "NOT_TESTABLE"), r.get("reason") or ""] for s, r in g2["tost"].items()]
-    rows += [[f"{s} (sensitivity)", r.get("estimand"), _f(r.get("est")), _ci(r.get("ci")), f"±{_f(r.get('margin'))}", _p(r.get("p_t")), "–", "equivalent" if r.get("equivalent") else "–", r.get("reason") or ""] for s, r in g2.get("tost_sensitivity", {}).items()]
-    L += [_table(["Strategy", "Estimand", "Change over span", "Interval", "Margin", "p (TOST)", "Holm level", "Decision", "Note"], rows)]
+    L += ["### Persistence across capability (G-H2b, descriptive, D-033)", "", "The change in each strategy's headroom recovered R_x along the fitted line over the capability span, with its 95% session-clustered interval; the audit's gain on the logit scale is shown as a sensitivity (it drifts with capability under CM0's overflow rule).", ""]
+    rows = [[s, r.get("estimand"), _f(r.get("est")), _ci(r.get("ci")), ", ".join(r.get("points_used") or []), r.get("reason") or ""] for s, r in g2["tost"].items()]
+    rows += [[f"{s} (sensitivity)", r.get("estimand"), _f(r.get("est")), _ci(r.get("ci")), ", ".join(r.get("points_used") or []), r.get("reason") or ""] for s, r in g2.get("tost_sensitivity", {}).items()]
+    L += [_table(["Strategy", "Estimand", "Change over span", "Interval", "Points", "Note"], rows)]
     sc = g2.get("short_control") or {}
     if sc.get("testable"):
         L += ["### Short-session control (N = 10)", "", f"At {sc['point']}: Gap(N long) {_pp(sc['gap_long']['est'])} vs Gap(N = 10) {_pp(sc['gap_short']['est'])}; difference {_pp(sc['difference']['est'])} {_ci(sc['difference']['ci'], _pp)}.", ""]
