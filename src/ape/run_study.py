@@ -29,10 +29,12 @@ Phases (`all` runs a study's in order and stops at the first failure; a failed o
     pilot        main only: the run_plan `pilot` cells with the selections and caps; S7 last, sized per cell by the KG
                  arm's median realized context (the run's config/s7_targets.json, as the gate sizes S7 by APG*); B0 of
                  the cells the micro-pilot did not measure -> the run's config/token_caps_pilot.json; pilot/pilot.json.
-                 Then the cap-hit gate (D-039, `_cap_gate`): each arm's cap-hit rate per task cell; while an arm is over
-                 10% (PC5), the multiple doubles for every arm (8 -> 16 -> 32) and that arm's pilot cells re-run under
-                 the new caps (its projection includes both re-runs for every arm) -> config/cap_gate.json, whose final
-                 multiple the test applies. Offline, only token-cap hits count (the mocks' turn-cap runs are reported).
+                 Then the cap-hit gate (D-039, D-045, `_cap_gate`): each arm's token-cap-hit rate per task cell at the
+                 test's caps (projected for M1s, S8k3, unpiloted and Sol cells); while one is over 10% (PC5), the
+                 multiple doubles for every arm (8 -> 16 -> 32) and the measured arms over it re-run their pilot cells
+                 under the new caps (the projection includes both re-runs for every arm) -> config/cap_gate.json, whose
+                 final multiple the test applies. Turn-cap hits are reported, never re-run; the freeze refuses while
+                 an arm's turn-cap rate is over 10%.
                  Then the power re-simulation at the gate pilot's σ (PREREGISTRATION_MAIN §2.6, `_pilot_power`) ->
                  pilot/power.json; pilot.json's `prereg_items` give the token caps, the cap multiple, the S7 targets,
                  the KG arm and "pilot σ and power".
@@ -1721,15 +1723,16 @@ def _pilot(run: StudyRun, record: dict) -> None:
             g["dir"] = f"{g['cell']}/s7-{rg._digest({k: v for k, v in g.items() if k not in ('primary', 'skipped', 'plan_phase', 'dir')})}"
         logs += run_phase_groups(run, record, "pilot", s7)
     summary: dict[str, Any] = {"run_id": run.run_id, "offline": run.offline, "study": run.study, "skipped_arms": record["skipped_arms"], "s7_targets": targets, "success": _summary(logs)}
-    # D-039: the cap-hit gate (may re-run arms under a larger multiple); the calibration reads every arm's latest logs.
-    if run.spec.caps:
-        summary["cap_gate"], latest = _cap_gate(run, record, groups)
-        logs = latest + [f for f in logs if f not in set(agent_logs(groups))]
-    # B0 for the cells the micro-pilot did not measure (its caps stand where it did).
+    # B0 for the cells the micro-pilot did not measure (its caps stand where it did), before the gate, which reads the
+    # test's caps.
     measured = set(json.loads(run.token_caps_path.read_text()).get("cells") or {}) if run.token_caps_path.is_file() else set()
     b0 = {c: v for c, v in b0_from_logs(agent_logs(groups)).items() if c not in measured}
     caps = write_caps(run.pilot_caps_path, b0, "pilot")
     record["outputs"] |= {"token_caps_pilot": _show(run.pilot_caps_path)}
+    # D-039/D-045: the cap-hit gate (may re-run arms under a larger multiple); the calibration reads every arm's latest logs.
+    if run.spec.caps:
+        summary["cap_gate"], latest = _cap_gate(run, record, groups)
+        logs = latest + [f for f in logs if f not in set(agent_logs(groups))]
     record["token_caps"] = {c: v["cap"] for c, v in token_caps(run).items()}
     if uncapped := uncapped_cells(run):
         record["warnings"].append(f"no token cap for {uncapped}: no {CAP_ARM} B0 in the family; they run uncapped")
@@ -1741,11 +1744,11 @@ def _pilot(run: StudyRun, record: dict) -> None:
     summary["harness"] = _harness(run, record, groups, "pilot")
     multiple = cap_multiple(run)
     gate = summary.get("cap_gate") or {}
-    raised = [f"{r['multiple']} x B0 for {', '.join(f'{a} {c}' for a, c in r['over'].items())}" for r in gate.get("rounds", []) if r.get("over")]
+    raised = [f"{r['multiple']} x B0 for {', '.join(f'{a} {c}' for a, c in _merge_over(r['over'], r.get('over_projected') or {}).items())}" for r in gate.get("rounds", []) if r.get("over") or r.get("over_projected")]
     summary["power"] = _pilot_power(run, record)
     summary["prereg_items"] = {
         "token caps": ", ".join(f"{c} {v['cap']}" for c, v in token_caps(run).items()) or "none",
-        "cap multiple": f"{multiple} (D-039; " + (f"raised from {CAP_MULTIPLE}: over {CAP_HIT_MAX:.0%} cap hits at {'; '.join(raised)}" if raised else f"no arm over {CAP_HIT_MAX:.0%} cap hits on the pilot") + (f"; still over at {multiple}: {gate['over']}" if gate.get("over") else "") + "; config/cap_gate.json)",
+        "cap multiple": f"{multiple} (D-039, D-045; " + (f"raised from {CAP_MULTIPLE}: over {CAP_HIT_MAX:.0%} token-cap hits at {'; '.join(raised)}" if raised else f"no arm over {CAP_HIT_MAX:.0%} token-cap hits on the pilot, measured or projected") + (f"; still over at {multiple}: {gate['over']}" if gate.get("over") else "") + (f"; turn-cap hits over {CAP_HIT_MAX:.0%}: {gate['turn_over']}" if gate.get("turn_over") else "") + "; config/cap_gate.json)",
         "pilot σ and power": summary["power"]["summary"],
         "S7 targets per cell": ", ".join(f"{c} {t}" for c, t in targets.items()) or "none",
         "KG arm": f"{kg_resolution(run).get('arm')} ({kg_resolution(run).get('source')})",
@@ -1756,45 +1759,145 @@ def _pilot(run: StudyRun, record: dict) -> None:
     record["s7_targets"] = targets
 
 
-def cap_hit_rates(log_files: Sequence[str]) -> dict[str, dict[str, dict]]:
-    """arm (as run) -> task cell -> {samples, cap_hits, token_hits, rate, token_rate} over the logs (D-039). A cap hit
-    is B4's (`analysis.main_load.cap_hit_of`): an Inspect sample limit; or, unanswered, the single agent at its turn cap
-    or any agent of a multi-agent arm stopped at its turn cap or on a limit. A token hit is a cap hit the token cap
-    decided: Inspect's `token` limit, or an agent stopped on a limit while the sample records no other limit."""
+SAMPLE_COLUMNS = ("arm", "cell", "log_file", "error", "cap_hit", "token_hit", "turn_hit", "other_hit", "total_tokens", "token_limit")
+
+
+def pilot_samples(log_files: Sequence[str]) -> Any:
+    """One row per pilot sample (a DataFrame, `SAMPLE_COLUMNS`), its cap hit split three ways (D-045). A cap hit is B4's
+    (`analysis.main_load.cap_hit_of`). A **token hit** is one the token cap decided: Inspect's `token` limit, or an
+    agent of a multi-agent arm stopped on a limit while the sample records no other limit. An **other hit** is another
+    Inspect limit (the cost runaway guard, time). A **turn hit** is the rest: unanswered at a turn cap (the single
+    agent's, or any agent's of a multi-agent arm). `total_tokens` is what Inspect's `token_limit` meters (every model
+    of the sample); `token_limit` the cap the sample ran under (None: uncapped)."""
+    import pandas as pd
+    from inspect_ai.log import read_eval_log
+
     from .analysis.main_load import load_main
 
     if not log_files:
-        return {}
+        return pd.DataFrame(columns=list(SAMPLE_COLUMNS))
     df = load_main(list(log_files), require_cost=False)
+    extra: dict[tuple, tuple] = {}
+    for f in log_files:
+        log = read_eval_log(str(f))
+        limit = log.eval.config.token_limit
+        for x in log.samples or []:
+            extra[(str(f), x.id, int(x.epoch))] = (sum(int(u.total_tokens or 0) for u in (x.model_usage or {}).values()), limit)
+    keys = list(zip(df["log_file"].astype(str), df["task"], df["epoch"].astype(int), strict=True))
+    df["total_tokens"] = [extra[k][0] for k in keys]
+    df["token_limit"] = [extra[k][1] for k in keys]
+    cap = df["cap_hit"].fillna(False).astype(bool)
+    agent_limit = df["agent_stops"].map(lambda d: isinstance(d, dict) and int(d.get("limit", 0)) > 0).astype(bool)
+    df["cap_hit"] = cap
+    df["token_hit"] = cap & (df["limit_hit"].eq("token") | (df["limit_hit"].isna() & agent_limit))
+    df["other_hit"] = cap & df["limit_hit"].notna() & ~df["limit_hit"].eq("token")
+    df["turn_hit"] = cap & ~df["token_hit"] & ~df["other_hit"]
+    df["error"] = df["error"].fillna(False).astype(bool)
+    return df[list(SAMPLE_COLUMNS)].assign(arm=df["arm"].astype(str), cell=df["cell"].astype(str))
+
+
+def _rate(k: int, n: int) -> float:
+    return round(k / n, 4) if n else 0.0
+
+
+def cap_hit_rates(samples: Any, caps: dict[str, int]) -> dict[str, dict[str, dict]]:
+    """arm -> task cell -> its pilot samples' cap hits at the test's `caps` (D-045): token hits (`token_hits`: the cap
+    stopped them; `token_hits_projected`: a sample that ran uncapped, as the pilot runs a family the micro-pilot did
+    not measure, whose total tokens exceed the cap), turn and other hits, and their rates (`token_rate`, `turn_rate`,
+    `other_rate`; `rate`: any cap hit, B4's)."""
     out: dict[str, dict[str, dict]] = {}
-    for (arm, cell), sub in df.groupby(["arm", "cell"], sort=True):
-        cap = sub["cap_hit"].fillna(False).astype(bool)
-        agent_limit = sub["agent_stops"].map(lambda d: isinstance(d, dict) and int(d.get("limit", 0)) > 0).astype(bool)
-        token = cap & (sub["limit_hit"].eq("token") | (sub["limit_hit"].isna() & agent_limit))
+    for (arm, cell), sub in samples.groupby(["arm", "cell"], sort=True):
         n = int(len(sub))
+        cap = caps.get(cell)
+        over = (~sub["error"]) & sub["token_limit"].isna() & ((sub["total_tokens"] > cap) if cap is not None else False)
+        tok, proj = int(sub["token_hit"].sum()), int((over & ~sub["token_hit"]).sum())
+        turn, other, any_ = int(sub["turn_hit"].sum()), int(sub["other_hit"].sum()), int((sub["cap_hit"] | over).sum())
         out.setdefault(str(arm), {})[str(cell)] = {
-            "samples": n, "cap_hits": int(cap.sum()), "token_hits": int(token.sum()), "rate": round(float(cap.sum()) / n, 4), "token_rate": round(float(token.sum()) / n, 4),
+            "samples": n, "cap": cap, "token_hits": tok, "token_hits_projected": proj, "turn_hits": turn, "other_hits": other,
+            "token_rate": _rate(tok + proj, n), "turn_rate": _rate(turn, n), "other_rate": _rate(other, n), "rate": _rate(any_, n),
         }  # fmt: skip
     return out
 
 
-def cap_gate_rule(run: StudyRun) -> str:
-    """Which rate the gate tests (D-039). Live: the cap-hit rate (B4's rule, every cap). Offline: the token-hit rate
-    only. The mocks' cap hits that are not the token cap's (a mock that never answers runs to the turn cap) are mock
-    artefacts a larger token cap cannot change, so the rehearsal reports them and loops only on real token-cap hits."""
-    return "token_rate" if run.offline else "rate"
+def _nearest_level(rates: dict[str, dict], cell: str) -> str | None:
+    """The measured cell of `cell`'s family nearest to its level (log scale; a tie takes the higher token rate, then
+    the larger cap, as the caps borrow)."""
+    family, level = cell.split("-", 1)
+    near = sorted((_level_distance(level, c.split("-", 1)[1]), -r["token_rate"], -(r.get("cap") or 0), c) for c, r in rates.items() if c.split("-", 1)[0] == family)
+    return near[0][3] if near and math.isfinite(near[0][0]) else None
 
 
-def arms_over_cap(rates: dict[str, dict[str, dict]], rule: str) -> dict[str, list[str]]:
-    """arm -> the task cells where its `rule` rate exceeds CAP_HIT_MAX (only arms with one)."""
-    over = {arm: sorted(c for c, r in cells.items() if r[rule] > CAP_HIT_MAX) for arm, cells in sorted(rates.items())}
+def phase_final_logs(run: StudyRun, phase: str) -> list[str]:
+    """The final logs of a phase's eval sets (each log dir's runner index), not the failed attempts kept beside them."""
+    from .runner import INDEX_NAME, read_index
+
+    return [str(t["log"]) for idx in sorted(run.phase_dir(phase).rglob(INDEX_NAME)) for t in (read_index(idx.parent).get("tasks") or {}).values() if t.get("log")]
+
+
+def projected_rates(run: StudyRun, samples: Any, rates: dict[str, dict[str, dict]], caps: dict[str, int], micro: Any = None) -> tuple[dict[str, dict[str, dict]], list[str]]:
+    """({arm: {cell label: rates}}, what cannot be projected) for every test (arm, task cell, profile) the pilot does
+    not measure (D-045), each `projected: true` with its `source`:
+    - M1s: M1's rates (M1s runs M1's protocol, only concurrently);
+    - S8k3: the share of S1's pilot samples whose total tokens exceed cap / 3 (three independent S1 attempts share the
+      sample's cap; an S1 sample the cap already stopped counts as exceeding);
+    - an arm the micro-pilot ran in that cell (`micro`, its samples; uncapped): the share of them over the cap;
+    - another arm in an unpiloted cell: its rates at the family's nearest measured level (log scale; a tie takes the
+      higher token rate, then the larger cap), as the caps borrow;
+    - a cell on another profile than the study's (Sol): the same arm and cell on the study's profile (Luna), measured
+      or projected, labelled `<cell> (<profile>)`."""
+    default = default_profile(run)
+    targets = [(a, tc, c.spec.get("profile") or default) for c in phase_cells(run, "test") if c.kind == "agent" for a in rg._arm_names(c.spec["arms"]) for tc in c.spec["cells"]]
+
+    def luna(arm: str, tc: str) -> dict | None:
+        if tc in (rates.get(arm) or {}):
+            return rates[arm][tc] | {"source": "measured"}
+        if arm == "M1s":
+            r = luna("M1", tc)
+            return None if r is None else r | {"source": f"M1's ({r['source']}): M1s runs M1's protocol, only concurrently"}
+        if arm == "S8k3":
+            s1 = samples[(samples["arm"] == "S1") & (samples["cell"] == tc) & ~samples["error"]]
+            if not len(s1):
+                return None
+            cap = caps.get(tc)
+            exceed = s1["token_hit"] | ((s1["total_tokens"] > cap / 3) if cap is not None else False)
+            return {"samples": int(len(s1)), "cap": cap, "token_rate": _rate(int(exceed.sum()), int(len(s1))), "turn_rate": None, "source": "S1's pilot samples over cap / 3 (three S1 attempts)"}
+        if micro is not None and tc in (mrates := cap_hit_rates(micro[micro["arm"] == arm], caps)).get(arm, {}):
+            return mrates[arm][tc] | {"source": "the micro-pilot's samples (uncapped) over the cap"}
+        if (near := _nearest_level(rates.get(arm) or {}, tc)) is not None:
+            return rates[arm][near] | {"source": f"{arm}'s {near} (the family's nearest measured level)"}
+        return None
+
+    out: dict[str, dict[str, dict]] = {}
+    missing = []
+    for arm, tc, profile in dict.fromkeys(targets):
+        if profile == default and tc in (rates.get(arm) or {}):
+            continue
+        r = luna(arm, tc)
+        label = tc if profile == default else f"{tc} ({profile})"
+        if r is None:
+            missing.append(f"{arm} {label}")
+            continue
+        if profile != default:
+            r = r | {"source": f"{default}'s {arm} {tc} ({r['source']})"}
+        out.setdefault(arm, {})[label] = {k: v for k, v in r.items() if k in ("samples", "cap", "token_rate", "turn_rate", "source")} | {"projected": True}
+    return out, sorted(set(missing))
+
+
+def arms_over(rates: dict[str, dict[str, dict]], key: str = "token_rate") -> dict[str, list[str]]:
+    """arm -> the cells where its `key` rate exceeds CAP_HIT_MAX (only arms with one)."""
+    over = {arm: sorted(c for c, r in cells.items() if (r.get(key) or 0.0) > CAP_HIT_MAX) for arm, cells in sorted(rates.items())}
     return {arm: cells for arm, cells in over.items() if cells}
 
 
+def _merge_over(*overs: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {a: sorted({c for o in overs for c in o.get(a, [])}) for a in sorted({a for o in overs for a in o})}
+
+
 def cap_rerun_groups(run: StudyRun, groups: list[dict], arms: Sequence[str], multiple: int) -> list[dict]:
-    """The pilot's agent groups again for `arms` only (by the arm as run), under `multiple` x B0 caps (the pilot's B0
-    sources, `token_caps(run, "pilot", multiple)`), each in a log dir of its own (`<name>-x<multiple>-<digest>`)."""
-    caps = {c: v["cap"] for c, v in token_caps(run, "pilot", multiple).items()}
+    """The pilot's agent groups again for `arms` only (by the arm as run), under the test's caps at `multiple` x B0
+    (`token_caps(run, "test", multiple)`: the micro-pilot's and the pilot's B0, so a family the pilot ran uncapped is
+    capped now), each in a log dir of its own (`<name>-x<multiple>-<digest>`)."""
+    caps = {c: v["cap"] for c, v in token_caps(run, "test", multiple).items()}
     out = []
     for g in groups:
         mine = [a for a in g["arms"] if a["run"] in arms]
@@ -1806,67 +1909,86 @@ def cap_rerun_groups(run: StudyRun, groups: list[dict], arms: Sequence[str], mul
     return out
 
 
-def _log_arm(path: str) -> str | None:
-    from inspect_ai.log import read_eval_log
-
-    head = read_eval_log(str(path), header_only=True)
-    return (head.eval.task_args or {}).get("arm") or (head.eval.metadata or {}).get("arm")
-
-
 def _cap_gate(run: StudyRun, record: dict, groups: list[dict]) -> tuple[dict, list[str]]:
-    """D-039, the pilot cap-hit gate: each arm's cap-hit rate per task cell over the pilot's logs (`cap_hit_rates`);
-    while an arm exceeds CAP_HIT_MAX (`cap_gate_rule`), the multiple doubles for every arm (8 -> 16 -> 32, at most
-    CAP_DOUBLINGS times) and the arms over it re-run their pilot cells under the new caps (pilot-sized; the budget is
-    checked before each round), and the check repeats on their new logs. Writes config/cap_gate.json: the final
-    multiple (the test's, `cap_multiple`), every round's rates, the arms still over it (the freeze refuses while any
-    is) and the arms over the B4 rate that the offline rule only reports. Returns it and the latest logs of every arm."""
-    rule = cap_gate_rule(run)
-    logs = agent_logs(groups)
-    latest_logs: dict[str, list[str]] = {}
-    for f in logs:
-        latest_logs.setdefault(str(_log_arm(f)), []).append(f)
-    rates = cap_hit_rates(logs)
-    latest = {arm: dict(cells) for arm, cells in rates.items()}
+    """The pilot cap-hit gate (D-039 as refined by D-045), on the pilot's samples (`pilot_samples`) at the test's caps:
+    - each arm's **token-cap-hit rate** per task cell (`cap_hit_rates`), and a projected one for each test (arm, cell)
+      the pilot does not run (`projected_rates`: M1s, S8k3, unpiloted cells, Sol cells);
+    - while any of them exceeds CAP_HIT_MAX, the multiple doubles for every arm (8 -> 16 -> 32, at most CAP_DOUBLINGS
+      times); the measured arms over it re-run their pilot cells under the new caps (pilot-sized, budget-checked per
+      round), a projection over it only raises the multiple, and the check repeats;
+    - **turn-cap hits** are reported per arm and cell and never re-run: a bigger token cap cannot change them. The
+      freeze refuses while an arm's turn-cap-hit rate exceeds CAP_HIT_MAX (the turn caps need a decision), as it
+      refuses while a token rate does at the largest multiple (`read_cap_gate`).
+    Writes config/cap_gate.json (the final multiple, which the test applies; every round's measured and projected
+    rates; `over`, `turn_over`). Returns it and every arm's latest pilot logs."""
+    import pandas as pd
+
+    samples = pilot_samples(agent_logs(groups))
+    micro = pilot_samples(phase_final_logs(run, "micro-pilot"))  # e.g. S5 on F1, which the pilot does not run
     multiple, top = CAP_MULTIPLE, CAP_MULTIPLE * 2**CAP_DOUBLINGS
-    over = arms_over_cap(latest, rule)
-    rounds: list[dict] = [{"multiple": multiple, "rerun": [], "rates": rates, "over": over}]
-    while over and multiple < top:
+
+    def evaluate(m: int) -> tuple[dict, dict, list[str]]:
+        caps = {c: v["cap"] for c, v in token_caps(run, "test", m).items()}
+        rates = cap_hit_rates(samples, caps)
+        projected, missing = projected_rates(run, samples, rates, caps, micro)
+        return rates, projected, missing
+
+    rates, projected, missing = evaluate(multiple)
+    over_m, over_p = arms_over(rates), arms_over(projected)
+    rounds: list[dict] = [{"multiple": multiple, "rerun": [], "rates": rates, "projected": projected, "over": over_m, "over_projected": over_p}]
+    while (over_m or over_p) and multiple < top:
         multiple *= 2
-        rerun = cap_rerun_groups(run, groups, list(over), multiple)
-        what = f"pilot cap re-run at {multiple} x B0 (D-039: {', '.join(f'{a} {cells}' for a, cells in over.items())} over {CAP_HIT_MAX:.0%})"
-        print(f"[pilot] {what}", flush=True)
-        require_affordable(sum(group_projected(run, g) for g in rerun), guard_remaining(run), what)
-        new_logs = run_phase_groups(run, record, "pilot", rerun)
-        new = cap_hit_rates(new_logs)
-        for arm in over:
-            latest[arm] = dict(new.get(arm) or {})
-            latest_logs[arm] = [f for f in new_logs if _log_arm(f) == arm]
-        rounds.append({"multiple": multiple, "rerun": sorted(over), "dirs": [_show(run.phase_dir("pilot") / g["dir"]) for g in rerun], "rates": new, "over": (over := arms_over_cap(latest, rule))})
-    informational = {a: c for a, c in arms_over_cap(latest, "rate").items() if a not in over} if rule != "rate" else {}
+        rerun_arms = sorted(over_m)
+        dirs: list[str] = []
+        if rerun_arms:
+            rerun = cap_rerun_groups(run, groups, rerun_arms, multiple)
+            what = f"pilot cap re-run at {multiple} x B0 (D-039/D-045: {', '.join(f'{a} {c}' for a, c in over_m.items())} over {CAP_HIT_MAX:.0%} token-cap hits)"
+            print(f"[pilot] {what}", flush=True)
+            require_affordable(sum(group_projected(run, g) for g in rerun), guard_remaining(run), what)
+            new = pilot_samples(run_phase_groups(run, record, "pilot", rerun))
+            samples = pd.concat([samples[~samples["arm"].isin(rerun_arms)], new], ignore_index=True)
+            dirs = [_show(run.phase_dir("pilot") / g["dir"]) for g in rerun]
+        else:
+            print(f"[pilot] cap multiple raised to {multiple} x B0 for projected rates over {CAP_HIT_MAX:.0%} ({over_p}); nothing to re-run", flush=True)
+        rates, projected, missing = evaluate(multiple)
+        prev = (over_m, over_p)
+        over_m, over_p = arms_over(rates), arms_over(projected)
+        rounds.append({"multiple": multiple, "rerun": rerun_arms, "dirs": dirs, "raised_by": {"measured": prev[0], "projected": prev[1]}, "rates": rates, "projected": projected, "over": over_m, "over_projected": over_p})
+    over = _merge_over(over_m, over_p)
+    turn_over = arms_over(rates, "turn_rate")
+    other_over = arms_over(rates, "other_rate")
     gate = {
-        "decision": "D-039",
+        "decision": "D-039, D-045",
         "multiple": multiple,
         "base": CAP_MULTIPLE,
         "max": top,
         "threshold": CAP_HIT_MAX,
-        "rule": rule,
-        "rule_note": "cap-hit rate (B4's cap_hit_of)" if rule == "rate" else "offline: token-cap hits only; other cap hits are reported (`reported`), not looped on",
-        "passed": not over,
+        "rule": "token_rate",
+        "rule_note": "the multiple escalates on token-cap hits (measured, and projected for what the pilot does not run); turn-cap hits are reported, never re-run, and the freeze refuses while a turn-cap rate is over",
+        "passed": not over and not turn_over,
         "over": over,
-        "reported": informational,
-        "rates": latest,
+        "over_projected": over_p,
+        "turn_over": turn_over,
+        "other_over": other_over,
+        "rates": rates,
+        "projected": projected,
+        "unprojectable": missing,
         "rounds": rounds,
     }
     rg._write_json(run.cap_gate_path, gate)
     record["outputs"] |= {"cap_gate": _show(run.cap_gate_path)}
-    record["cap_gate"] = {k: gate[k] for k in ("multiple", "rule", "passed", "over", "reported")} | {"rounds": [{k: r[k] for k in ("multiple", "rerun", "over")} for r in rounds]}
+    record["cap_gate"] = {k: gate[k] for k in ("multiple", "rule", "passed", "over", "over_projected", "turn_over", "other_over", "unprojectable")} | {"rounds": [{k: r[k] for k in ("multiple", "rerun", "over", "over_projected")} for r in rounds]}
     if multiple != CAP_MULTIPLE:
         record["warnings"].append(f"D-039: the token caps' multiple is {multiple} x B0 for every arm (raised from {CAP_MULTIPLE}); the test applies it")
     if over:
-        record["warnings"].append(f"D-039: {over} still over {CAP_HIT_MAX:.0%} cap hits at {multiple} x B0: the freeze refuses this run")
-    if informational:
-        record["warnings"].append(f"cap hits over {CAP_HIT_MAX:.0%} that are not the token cap's (offline mock artefacts, reported only): {informational}")
-    return gate, [f for fs in latest_logs.values() for f in fs]
+        record["warnings"].append(f"D-039: {over} still over {CAP_HIT_MAX:.0%} token-cap hits at {multiple} x B0: the freeze refuses this run")
+    if turn_over:
+        record["warnings"].append(f"D-045: {turn_over} over {CAP_HIT_MAX:.0%} turn-cap hits: a bigger token cap cannot fix them; the freeze refuses until the turn caps are decided")
+    if other_over:
+        record["warnings"].append(f"other limits (cost guard, time) over {CAP_HIT_MAX:.0%} of samples, reported: {other_over}")
+    if missing:
+        record["warnings"].append(f"D-045: no pilot data to project the token-cap-hit rate of {missing}")
+    return gate, list(dict.fromkeys(str(f) for f in samples["log_file"]))
 
 
 def gate_pilot_sigma(run: StudyRun) -> tuple[dict | None, str, Path | None]:
@@ -1933,7 +2055,7 @@ def _pilot_power(run: StudyRun, record: dict) -> dict:
 
 
 def _pilot_params(run: StudyRun) -> dict:
-    gate = {"base": CAP_MULTIPLE, "doublings": CAP_DOUBLINGS, "threshold": CAP_HIT_MAX, "rule": cap_gate_rule(run)} if run.spec.caps else None
+    gate = {"base": CAP_MULTIPLE, "doublings": CAP_DOUBLINGS, "threshold": CAP_HIT_MAX, "rule": "token_rate", "turn_caps": "refuse"} if run.spec.caps else None
     return _build_params(run, "pilot") | {"groups": group_params(run_groups(run, "pilot")), "caps": _caps_params(run, "pilot"), "s7_env": s7_env(run) if kg_resolution(run).get("needed") else None, "cap_gate": gate}
 
 
@@ -1955,15 +2077,19 @@ def _pilot_projected(run: StudyRun) -> float:
 
 def read_cap_gate(run: StudyRun) -> tuple[dict | None, list[str]]:
     """(the pilot's cap-hit gate record, the freeze's problems with it): a capped study with a pilot freezes only with
-    the gate run and no arm still over CAP_HIT_MAX at the largest multiple (D-039)."""
+    the gate run, no arm's token-cap-hit rate (measured or projected) still over CAP_HIT_MAX at the largest multiple
+    (D-039), and no arm's turn-cap-hit rate over it (D-045)."""
     if not (run.spec.caps and "pilot" in run.spec.phases):
         return None, []
     if not run.cap_gate_path.is_file():
         return None, [f"{_show(run.cap_gate_path)} missing: the pilot's cap-hit gate (D-039) has not run; re-run the pilot"]
     gate = json.loads(run.cap_gate_path.read_text())
+    problems = []
     if gate.get("over"):
-        return gate, [f"D-039: {gate['over']} still over {CAP_HIT_MAX:.0%} cap hits at {gate['multiple']} x B0 (the largest multiple): the caps cannot be frozen"]
-    return gate, []
+        problems.append(f"D-039: {gate['over']} still over {CAP_HIT_MAX:.0%} token-cap hits at {gate['multiple']} x B0 (the largest multiple): the caps cannot be frozen")
+    if gate.get("turn_over"):
+        problems.append(f"D-045: {gate['turn_over']} over {CAP_HIT_MAX:.0%} turn-cap hits on the pilot: the turn caps need a decision, not a bigger token cap")
+    return gate, problems
 
 
 def frozen_outputs(run: StudyRun) -> list[str]:
@@ -2199,7 +2325,7 @@ def _freeze(run: StudyRun, record: dict) -> None:
         "kg": kg_resolution(run),
         "token_caps": _caps_params(run),
         "cap_multiple": cap_multiple(run) if run.spec.caps else None,
-        "cap_gate": {k: gate.get(k) for k in ("multiple", "base", "max", "threshold", "rule", "passed", "rates", "rounds")} if gate else None,
+        "cap_gate": {k: gate.get(k) for k in ("multiple", "base", "max", "threshold", "rule", "passed", "rates", "projected", "unprojectable", "turn_over", "rounds")} if gate else None,
         "design_env": env_knobs(run),
     }
     if rehearsal is not None:

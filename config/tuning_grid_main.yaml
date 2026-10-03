@@ -3,8 +3,8 @@
 #
 # Format (ape.tuning, as config/tuning_grid.yaml): `systems.<name>.candidates` ({id, arm, env}). A system is named for
 # the plan arm it tunes, and its candidates run as that arm: after the tune, the arm runs everywhere as its selection
-# (ape.run_study `run_groups`), with every selection's knobs applied together, so each system's candidates set only
-# their own arm's knobs. Each system tunes on its own `dev_cells`, the cells of the run_plan.yaml tuning cells that price
+# (ape.run_study `run_groups`), under exactly its own selection's knobs (D-042: an eval set per tuned arm), and each
+# system's candidates set only their own arm's knobs (`agent.multi.knobs.candidate_problems`). Each system tunes on its own `dev_cells`, the cells of the run_plan.yaml tuning cells that price
 # it (main.tune.a: F1-32, F2-10; main.tune.b: F3-60, F7-1000; M1 runs in both Study A and Study B, so on all four).
 # Selection (as the gate's): max mean dev success over the system's cells; candidates within tie_pp of the best go to
 # the lower cost.

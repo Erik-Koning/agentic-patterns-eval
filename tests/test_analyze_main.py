@@ -52,6 +52,7 @@ def test_the_analyze_phase_writes_the_report_and_the_decision(offline_main):
     md = (run.dir / "report" / "report.md").read_text()
     for heading in ("## Run", "## Coverage", "## Token caps and cap hits", "## Tuning", "## Confirmatory tests", "## Analysis choices"):
         assert heading in md
+    assert d["header"]["cap_multiple"] == 8 and "(8 × S1's B0, the pilot cap-hit gate's multiple (D-039); brief §4.5)" in md, "the frozen multiple"
     test = json.loads(run.manifest_path("test").read_text())
     assert {c["plan_cell"] for c in d["coverage"]} == set(test["cells"]) and all(c["samples"] > 0 for c in d["coverage"] if c["status"] == "done")
 
