@@ -759,9 +759,13 @@ def health(rows: pd.DataFrame) -> dict:
         if any(_is_lgr(a) for a in g["run_arm"]):
             n = int(g["keyword_compiles"].sum())
             e = where | {"compiles": n, "fallback_rate": _rate(g["keyword_fallbacks"].sum(), n), "error_rate": _rate(g["keyword_errors"].sum(), n)}
+            # Empty retrieval (keywords in hand, LightRAG found nothing) is a retrieval outcome, not a keyword failure; any mode.
+            if "lightrag_compiles" in g and "empty_retrievals" in g:
+                e["empty_retrieval_rate"] = _rate(g["empty_retrievals"].sum(), int(g["lightrag_compiles"].sum()))
             out["keywords"].append(e)
             warn("LightRAG keyword", "fallback rate", e["fallback_rate"], where)
             warn("LightRAG keyword", "error rate", e["error_rate"], where)
+            warn("LightRAG retrieval", "empty-retrieval rate", e.get("empty_retrieval_rate"), where)
         if delivery == "pull":
             pulls, errors = int(g["pull_compiles"].sum()), int(g["search_errors"].sum())
             e = where | {"searches": pulls + errors, "error_rate": _rate(errors, pulls + errors), "truncated_rate": _rate(g["pull_truncated"].sum(), pulls)}
@@ -1176,7 +1180,7 @@ def render(d: dict) -> str:
     L += [_table(["Plan cell", "Arm", "Cell", "Compiles", "Fallback", "Error", "Repaired", "Unknown IDs / compile"],
                  [[e["plan_cell"], e["arm"], e["cell"], e["compiles"], _rate_s(e["fallback_rate"]), _rate_s(e["error_rate"]), ", ".join(f"{k} {_rate_s(v)}" for k, v in e["repaired_rate"].items()) or "–", _f(e["unknown_ids_per_compile"], 2) if e["unknown_ids_per_compile"] is not None else "n/a"] for e in hh["classify"]])] if hh["classify"] else ["- n/a (no APG rows).", ""]  # fmt: skip
     L += ["LightRAG keywords:", ""]
-    L += [_table(["Plan cell", "Arm", "Cell", "Compiles", "Fallback", "Error"], [[e["plan_cell"], e["arm"], e["cell"], e["compiles"], _rate_s(e["fallback_rate"]), _rate_s(e["error_rate"])] for e in hh["keywords"]])] if hh["keywords"] else ["- n/a (no LightRAG rows).", ""]
+    L += [_table(["Plan cell", "Arm", "Cell", "Compiles", "Fallback", "Error", "Empty retrieval"], [[e["plan_cell"], e["arm"], e["cell"], e["compiles"], _rate_s(e["fallback_rate"]), _rate_s(e["error_rate"]), _rate_s(e.get("empty_retrieval_rate"))] for e in hh["keywords"]])] if hh["keywords"] else ["- n/a (no LightRAG rows).", ""]  # fmt: skip
     L += ["search_kb (pull):", ""]
     L += [_table(["Plan cell", "Arm", "Cell", "Searches", "Error", "Truncated"], [[e["plan_cell"], e["arm"], e["cell"], e["searches"], _rate_s(e["error_rate"]), _rate_s(e["truncated_rate"])] for e in hh["search_kb"]])] if hh["search_kb"] else ["- n/a (no pull rows).", ""]
     L += ["## exception_applies tasks", "", "F7 cells; reported separately (§3).", ""]

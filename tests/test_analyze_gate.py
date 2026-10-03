@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from ape import analyze_gate as ag
+from ape.analysis import gate_stats as gs
 from ape.analysis.gate_stats import GATE_CELLS, combine_modes, pipeline_miss, task_means
 
 PC_OK = [{"id": f"PC{i}", "pass": True, "reason": None} for i in range(1, 7)]
@@ -509,3 +510,22 @@ def test_report_renders_health_warnings_tables_and_the_calibration_label():
     assert "**Not matched (calibration did not converge for LGR*, S3s):**" in md
     na = ag.render(json.loads(json.dumps(ag._clean(_minimal_decision(ag.health(pd.DataFrame()), ag.matched_calibration(None, None))))))
     assert "- No warnings." in na and "- n/a (no APG rows)." in na and "Calibration status: n/a" in na
+
+
+def test_empty_retrieval_is_its_own_rate_over_every_lightrag_compile_and_warns_above_five_percent():
+    h = gs.compile_health(
+        [{"meta": {"lightrag": {"mode": "naive", "empty_retrieval": True}}}, {"meta": {"lightrag": {"mode": "hybrid", "keyword_fallback": False, "empty_retrieval": False}}}],
+        {},
+    )
+    # Naive compiles count toward empty retrieval (any mode) but never toward keyword health.
+    assert (h["lightrag_compiles"], h["empty_retrievals"], h["keyword_compiles"]) == (2, 1, 1)
+    rows = _health_rows()
+    lgr = rows["label"] == "LGR*"
+    rows.loc[lgr, "lightrag_compiles"] = 1
+    rows.loc[lgr, "empty_retrievals"] = [int(i < 3) for i in range(int(lgr.sum()))]  # 3 of 20 -> 15%
+    rows[["lightrag_compiles", "empty_retrievals"]] = rows[["lightrag_compiles", "empty_retrievals"]].fillna(0)
+    out = ag.health(rows)
+    (kw,) = out["keywords"]
+    assert kw["empty_retrieval_rate"] == pytest.approx(0.15) and kw["fallback_rate"] == pytest.approx(0.05)
+    assert f"LightRAG retrieval empty-retrieval rate 15.0% for LGR* (pull) F7-10 in {ag.F7_CELL} (> 5%)" in out["warnings"]
+    assert ag.health(_health_rows())["keywords"][0]["empty_retrieval_rate"] is None  # logs without the counter: n/a

@@ -179,7 +179,7 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
 # Per-sample harness-health counters the decision report aggregates (`analyze_gate.health`).
 HEALTH_COLUMNS = (
     "classify_compiles", "classify_errors", "classify_fallbacks", "classify_repaired", "classify_unknown_ids",
-    "keyword_compiles", "keyword_fallbacks", "keyword_errors", "empty_retrievals", "pull_compiles", "pull_truncated",
+    "keyword_compiles", "keyword_fallbacks", "keyword_errors", "lightrag_compiles", "empty_retrievals", "pull_compiles", "pull_truncated",
     "search_errors",
 )  # fmt: skip
 
@@ -191,7 +191,7 @@ def compile_health(compiles: list[dict], store: dict) -> dict:
       fell back to the root for lack of a usable match, needed each repair kind, or named unknown node IDs.
     - LightRAG keywords (`lgr/adapter.py` meta `lightrag`): compiles carrying the flags, keyword fallbacks and errors.
       Naive-mode compiles are left out: naive mode extracts no keywords. Empty retrievals (keywords in hand, nothing
-      found; any mode) are counted separately, as `empty_retrievals`.
+      found; any mode) are counted separately, as `empty_retrievals` out of `lightrag_compiles` (every LightRAG compile).
     - search_kb (pull, `agent/kb_react.py`): pull compiles, those whose result was cut to `max_output`, and failed
       searches (`search_errors`, never in the compile log).
 
@@ -213,6 +213,7 @@ def compile_health(compiles: list[dict], store: dict) -> dict:
         "keyword_compiles": len(lgr),
         "keyword_fallbacks": sum(1 for m in lgr if m.get("keyword_fallback")),
         "keyword_errors": sum(1 for m in lgr if m.get("keyword_error")),
+        "lightrag_compiles": sum(1 for m in metas if isinstance(m.get("lightrag"), dict)),
         "empty_retrievals": sum(1 for m in metas if isinstance(m.get("lightrag"), dict) and m["lightrag"].get("empty_retrieval")),
         "pull_compiles": len(pulls),
         "pull_truncated": sum(1 for r in pulls if r.get("truncated")),
