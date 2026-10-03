@@ -1,0 +1,3124 @@
+{
+ "CM0": {
+  "arm": {
+   "checkpoints": [
+    5,
+    10
+   ],
+   "max_turns_per_item": 8,
+   "name": "CM0",
+   "window": 32000
+  },
+  "calls": [
+   {
+    "kind": "agent",
+    "n": 3,
+    "sha": "7db4e51ed7fd8bd9615b",
+    "tokens": 2262
+   },
+   {
+    "kind": "agent",
+    "n": 5,
+    "sha": "81c6e93759b1a0b96f13",
+    "tokens": 3474
+   },
+   {
+    "kind": "agent",
+    "n": 8,
+    "sha": "a2dc3436efa77a024b76",
+    "tokens": 3602
+   },
+   {
+    "kind": "agent",
+    "n": 10,
+    "sha": "64fa65f05355201f08d3",
+    "tokens": 4714
+   },
+   {
+    "kind": "agent",
+    "n": 13,
+    "sha": "b5c5fe73a0d29954de39",
+    "tokens": 4840
+   },
+   {
+    "kind": "agent",
+    "n": 15,
+    "sha": "8c9bb9f2bef5577ea574",
+    "tokens": 6214
+   },
+   {
+    "kind": "agent",
+    "n": 18,
+    "sha": "f1712ceab92981d62b3d",
+    "tokens": 6362
+   },
+   {
+    "kind": "agent",
+    "n": 20,
+    "sha": "0f79dc1cd6bc73fcc127",
+    "tokens": 7776
+   },
+   {
+    "kind": "agent",
+    "n": 23,
+    "sha": "3117a55c78d375429ac9",
+    "tokens": 7853
+   },
+   {
+    "kind": "agent",
+    "n": 25,
+    "sha": "c4b1a0d3cfc84f393e4c",
+    "tokens": 9065
+   },
+   {
+    "kind": "probe",
+    "n": 28,
+    "sha": "0933cadaef481d1c5062",
+    "tokens": 9200
+   },
+   {
+    "kind": "agent",
+    "n": 28,
+    "sha": "8978eedab8b3aa54fb5a",
+    "tokens": 9193
+   },
+   {
+    "kind": "agent",
+    "n": 30,
+    "sha": "ac4f93786e1bbe41cb08",
+    "tokens": 10624
+   },
+   {
+    "kind": "agent",
+    "n": 33,
+    "sha": "4d6fec885495b8483b1e",
+    "tokens": 10725
+   },
+   {
+    "kind": "agent",
+    "n": 35,
+    "sha": "fbb7cf8a3e6d73be678b",
+    "tokens": 11897
+   },
+   {
+    "kind": "agent",
+    "n": 38,
+    "sha": "0ee2948574fd5de297ec",
+    "tokens": 11994
+   },
+   {
+    "kind": "agent",
+    "n": 40,
+    "sha": "a0949e2b950bae8a903c",
+    "tokens": 13462
+   },
+   {
+    "kind": "agent",
+    "n": 43,
+    "sha": "c29109a9983f0ae11c9b",
+    "tokens": 13616
+   },
+   {
+    "kind": "agent",
+    "n": 46,
+    "sha": "ada44ebb13e7a3e93106",
+    "tokens": 13724
+   },
+   {
+    "kind": "agent",
+    "n": 48,
+    "sha": "ca539264093f962adac6",
+    "tokens": 14820
+   },
+   {
+    "kind": "probe",
+    "n": 51,
+    "sha": "81839ff687d4d4591123",
+    "tokens": 14955
+   },
+   {
+    "kind": "agent",
+    "n": 51,
+    "sha": "fb7373ed0cad3b9b55cb",
+    "tokens": 14928
+   },
+   {
+    "kind": "agent",
+    "n": 53,
+    "sha": "a0db4e50e65c9937ab09",
+    "tokens": 16140
+   },
+   {
+    "kind": "agent",
+    "n": 56,
+    "sha": "689ef89ed45a779eef7d",
+    "tokens": 16274
+   },
+   {
+    "kind": "agent",
+    "n": 59,
+    "sha": "4f1473007007b054c637",
+    "tokens": 16412
+   }
+  ],
+  "events": [
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 1,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-121462",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 1,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-33140"
+    },
+    "item": 2,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-250300",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 2,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-66003"
+    },
+    "item": 3,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-624761",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 3,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-848053"
+    },
+    "item": 4,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-949145"
+    },
+    "item": 4,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 5,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-755981",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 5,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-32383"
+    },
+    "item": 6,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-746992",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 6,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-175499"
+    },
+    "item": 7,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-438412"
+    },
+    "item": 7,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-48682"
+    },
+    "item": 8,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-864258",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 8,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-542819",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 9,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-10266"
+    },
+    "item": 10,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-961109",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 10,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 11,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-969941",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 11,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-254502",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 12,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "report": "{\"dispositions\": {\"C-121462\": \"approve\", \"C-250300\": \"approve\", \"C-624761\": \"approve\", \"C-949145\": \"approve\", \"C-755981\": \"approve\", \"C-746992\": \"approve\", \"C-438412\": \"approve\", \"C-864258\": \"approve\", \"C-542819\": \"approve\", \"C-961109\": \"approve\", \"C-969941\": \"approve\", \"C-254502\": \"approve\"}, \"pending_recheck\": [], \"open_followups\": []}"
+    },
+    "item": 13,
+    "tool": "submit_shift_report"
+   }
+  ],
+  "history": {
+   "n": 61,
+   "sha": "1f54e0d35ac8c119684a"
+  },
+  "items": [
+   {
+    "answered": true,
+    "case_id": "C-121462",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 1,
+    "success": false,
+    "view_tokens_decision": 3474,
+    "view_tokens_first": 2262
+   },
+   {
+    "answered": true,
+    "case_id": "C-250300",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 2,
+    "success": false,
+    "view_tokens_decision": 4714,
+    "view_tokens_first": 3602
+   },
+   {
+    "answered": true,
+    "case_id": "C-624761",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 3,
+    "success": false,
+    "view_tokens_decision": 6214,
+    "view_tokens_first": 4840
+   },
+   {
+    "answered": true,
+    "case_id": "C-949145",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 4,
+    "success": false,
+    "view_tokens_decision": 7776,
+    "view_tokens_first": 6362
+   },
+   {
+    "answered": true,
+    "case_id": "C-755981",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 5,
+    "success": false,
+    "view_tokens_decision": 9065,
+    "view_tokens_first": 7853
+   },
+   {
+    "answered": true,
+    "case_id": "C-746992",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 6,
+    "success": false,
+    "view_tokens_decision": 10624,
+    "view_tokens_first": 9193
+   },
+   {
+    "answered": true,
+    "case_id": "C-438412",
+    "dependency": true,
+    "dependency_kinds": [
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 7,
+    "success": false,
+    "view_tokens_decision": 11897,
+    "view_tokens_first": 10725
+   },
+   {
+    "answered": true,
+    "case_id": "C-864258",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 8,
+    "success": false,
+    "view_tokens_decision": 13462,
+    "view_tokens_first": 11994
+   },
+   {
+    "answered": true,
+    "case_id": "C-542819",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 1,
+    "kind": "followup",
+    "position": 9,
+    "success": false,
+    "view_tokens_decision": 13616,
+    "view_tokens_first": 13616
+   },
+   {
+    "answered": true,
+    "case_id": "C-961109",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 10,
+    "success": false,
+    "view_tokens_decision": 14820,
+    "view_tokens_first": 13724
+   },
+   {
+    "answered": true,
+    "case_id": "C-969941",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota",
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 11,
+    "success": false,
+    "view_tokens_decision": 16140,
+    "view_tokens_first": 14928
+   },
+   {
+    "answered": true,
+    "case_id": "C-254502",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 1,
+    "kind": "followup",
+    "position": 12,
+    "success": false,
+    "view_tokens_decision": 16274,
+    "view_tokens_first": 16274
+   }
+  ],
+  "overflow_at": null,
+  "probes": [
+   {
+    "answer": {
+     "completed": [
+      "C-121462",
+      "C-250300",
+      "C-624761",
+      "C-949145",
+      "C-755981"
+     ],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": [
+      "C-746992",
+      "C-438412",
+      "C-864258",
+      "C-542819",
+      "C-961109",
+      "C-969941",
+      "C-254502"
+     ]
+    },
+    "error": null,
+    "k": 5,
+    "scores": {
+     "completed": 1.0,
+     "escalated": 1.0,
+     "mean_f1": 0.6,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 1.0
+    },
+    "view_tokens": 9200
+   },
+   {
+    "answer": {
+     "completed": [
+      "C-121462",
+      "C-250300",
+      "C-624761",
+      "C-949145",
+      "C-755981",
+      "C-746992",
+      "C-438412",
+      "C-864258",
+      "C-542819",
+      "C-961109"
+     ],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": [
+      "C-969941",
+      "C-254502"
+     ]
+    },
+    "error": null,
+    "k": 10,
+    "scores": {
+     "completed": 1.0,
+     "escalated": 1.0,
+     "mean_f1": 0.6,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 1.0
+    },
+    "view_tokens": 14955
+   }
+  ],
+  "report": {
+   "dispositions": {
+    "C-121462": "approve",
+    "C-250300": "approve",
+    "C-254502": "approve",
+    "C-438412": "approve",
+    "C-542819": "approve",
+    "C-624761": "approve",
+    "C-746992": "approve",
+    "C-755981": "approve",
+    "C-864258": "approve",
+    "C-949145": "approve",
+    "C-961109": "approve",
+    "C-969941": "approve"
+   },
+   "open_followups": [],
+   "pending_recheck": []
+  },
+  "score": {
+   "dependency_success": 0.0,
+   "item_success": 0.0,
+   "overflow": 0.0,
+   "probe_coverage": 1.0,
+   "probe_f1": 0.6,
+   "report_exact": 0.0,
+   "session_success": 0.0
+  },
+  "views": [
+   {
+    "item": 1,
+    "view_tokens": 2262
+   },
+   {
+    "item": 1,
+    "view_tokens": 3474
+   },
+   {
+    "item": 2,
+    "view_tokens": 3602
+   },
+   {
+    "item": 2,
+    "view_tokens": 4714
+   },
+   {
+    "item": 3,
+    "view_tokens": 4840
+   },
+   {
+    "item": 3,
+    "view_tokens": 6214
+   },
+   {
+    "item": 4,
+    "view_tokens": 6362
+   },
+   {
+    "item": 4,
+    "view_tokens": 7776
+   },
+   {
+    "item": 5,
+    "view_tokens": 7853
+   },
+   {
+    "item": 5,
+    "view_tokens": 9065
+   },
+   {
+    "item": 6,
+    "view_tokens": 9193
+   },
+   {
+    "item": 6,
+    "view_tokens": 10624
+   },
+   {
+    "item": 7,
+    "view_tokens": 10725
+   },
+   {
+    "item": 7,
+    "view_tokens": 11897
+   },
+   {
+    "item": 8,
+    "view_tokens": 11994
+   },
+   {
+    "item": 8,
+    "view_tokens": 13462
+   },
+   {
+    "item": 9,
+    "view_tokens": 13616
+   },
+   {
+    "item": 10,
+    "view_tokens": 13724
+   },
+   {
+    "item": 10,
+    "view_tokens": 14820
+   },
+   {
+    "item": 11,
+    "view_tokens": 14928
+   },
+   {
+    "item": 11,
+    "view_tokens": 16140
+   },
+   {
+    "item": 12,
+    "view_tokens": 16274
+   },
+   {
+    "item": 13,
+    "view_tokens": 16412
+   }
+  ]
+ },
+ "CM0-nudges": {
+  "arm": {
+   "checkpoints": [
+    5,
+    10
+   ],
+   "max_turns_per_item": 8,
+   "name": "CM0",
+   "window": 32000
+  },
+  "calls": [
+   {
+    "kind": "agent",
+    "n": 3,
+    "sha": "7db4e51ed7fd8bd9615b",
+    "tokens": 2262
+   },
+   {
+    "kind": "agent",
+    "n": 5,
+    "sha": "81c6e93759b1a0b96f13",
+    "tokens": 3474
+   },
+   {
+    "kind": "agent",
+    "n": 8,
+    "sha": "a2dc3436efa77a024b76",
+    "tokens": 3602
+   },
+   {
+    "kind": "agent",
+    "n": 10,
+    "sha": "9c0592ed1c07f2a76df5",
+    "tokens": 3632
+   },
+   {
+    "kind": "agent",
+    "n": 12,
+    "sha": "64a9d49477bf25cb41c9",
+    "tokens": 4744
+   },
+   {
+    "kind": "agent",
+    "n": 15,
+    "sha": "3865e138d9844f53a3bc",
+    "tokens": 4870
+   },
+   {
+    "kind": "agent",
+    "n": 17,
+    "sha": "895cf0fb34c91202b907",
+    "tokens": 6244
+   },
+   {
+    "kind": "agent",
+    "n": 20,
+    "sha": "970e47781ce9f487c5b0",
+    "tokens": 6392
+   },
+   {
+    "kind": "agent",
+    "n": 22,
+    "sha": "ba8c63bdbfa89e74f601",
+    "tokens": 7806
+   },
+   {
+    "kind": "agent",
+    "n": 25,
+    "sha": "cd9754daac9255dd3517",
+    "tokens": 7883
+   },
+   {
+    "kind": "agent",
+    "n": 27,
+    "sha": "307e24cca1766ea9064e",
+    "tokens": 9095
+   },
+   {
+    "kind": "probe",
+    "n": 30,
+    "sha": "d84855e4e42e11c6e412",
+    "tokens": 9230
+   },
+   {
+    "kind": "agent",
+    "n": 30,
+    "sha": "d8ec0ebbb6555b6e8113",
+    "tokens": 9223
+   },
+   {
+    "kind": "agent",
+    "n": 32,
+    "sha": "524d0c565508df011d7b",
+    "tokens": 10654
+   },
+   {
+    "kind": "agent",
+    "n": 35,
+    "sha": "68423d2ab3f1cc800680",
+    "tokens": 10755
+   },
+   {
+    "kind": "agent",
+    "n": 37,
+    "sha": "e9f1947a70287f5bc476",
+    "tokens": 11927
+   },
+   {
+    "kind": "agent",
+    "n": 40,
+    "sha": "c9b203926e99b204065f",
+    "tokens": 12024
+   },
+   {
+    "kind": "agent",
+    "n": 42,
+    "sha": "572d0a8916755d8eac93",
+    "tokens": 13492
+   },
+   {
+    "kind": "agent",
+    "n": 45,
+    "sha": "403feb5e35ce49b66a32",
+    "tokens": 13646
+   },
+   {
+    "kind": "agent",
+    "n": 47,
+    "sha": "84cbfa8327fa611a2086",
+    "tokens": 13676
+   },
+   {
+    "kind": "agent",
+    "n": 50,
+    "sha": "9ff64fbdbe9f05a9c895",
+    "tokens": 13784
+   },
+   {
+    "kind": "agent",
+    "n": 52,
+    "sha": "d432efab4322f57bef17",
+    "tokens": 13814
+   },
+   {
+    "kind": "agent",
+    "n": 54,
+    "sha": "ea98d4d65a4ebfe81392",
+    "tokens": 14910
+   },
+   {
+    "kind": "probe",
+    "n": 57,
+    "sha": "2707beded3bf890f7119",
+    "tokens": 15045
+   },
+   {
+    "kind": "agent",
+    "n": 57,
+    "sha": "ce0e67169ae931344e08",
+    "tokens": 15018
+   },
+   {
+    "kind": "agent",
+    "n": 59,
+    "sha": "5253fcb0abee6aa5ac90",
+    "tokens": 16230
+   },
+   {
+    "kind": "agent",
+    "n": 62,
+    "sha": "b9f63c77a1bcdaca272e",
+    "tokens": 16364
+   },
+   {
+    "kind": "agent",
+    "n": 65,
+    "sha": "9cf4fabf59666fca640d",
+    "tokens": 16502
+   },
+   {
+    "kind": "agent",
+    "n": 67,
+    "sha": "cb93f612c14b52294dd7",
+    "tokens": 16531
+   }
+  ],
+  "events": [
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 1,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-121462",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 1,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-33140"
+    },
+    "item": 2,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-250300",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 2,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-66003"
+    },
+    "item": 3,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-624761",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 3,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-848053"
+    },
+    "item": 4,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-949145"
+    },
+    "item": 4,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 5,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-755981",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 5,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-32383"
+    },
+    "item": 6,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-746992",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 6,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-175499"
+    },
+    "item": 7,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-438412"
+    },
+    "item": 7,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-48682"
+    },
+    "item": 8,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-864258",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 8,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-542819",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 9,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-10266"
+    },
+    "item": 10,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-961109",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 10,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 11,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-969941",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 11,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-254502",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 12,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "report": "{\"dispositions\": {\"C-121462\": \"approve\", \"C-250300\": \"approve\", \"C-624761\": \"approve\", \"C-949145\": \"approve\", \"C-755981\": \"approve\", \"C-746992\": \"approve\", \"C-438412\": \"approve\", \"C-864258\": \"approve\", \"C-542819\": \"approve\", \"C-961109\": \"approve\", \"C-969941\": \"approve\", \"C-254502\": \"approve\"}, \"pending_recheck\": [], \"open_followups\": []}"
+    },
+    "item": 13,
+    "tool": "submit_shift_report"
+   }
+  ],
+  "history": {
+   "n": 69,
+   "sha": "298823d72731f8657ac0"
+  },
+  "items": [
+   {
+    "answered": true,
+    "case_id": "C-121462",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 1,
+    "success": false,
+    "view_tokens_decision": 3474,
+    "view_tokens_first": 2262
+   },
+   {
+    "answered": true,
+    "case_id": "C-250300",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 3,
+    "kind": "policy",
+    "position": 2,
+    "success": false,
+    "view_tokens_decision": 4744,
+    "view_tokens_first": 3602
+   },
+   {
+    "answered": true,
+    "case_id": "C-624761",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 3,
+    "success": false,
+    "view_tokens_decision": 6244,
+    "view_tokens_first": 4870
+   },
+   {
+    "answered": true,
+    "case_id": "C-949145",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 4,
+    "success": false,
+    "view_tokens_decision": 7806,
+    "view_tokens_first": 6392
+   },
+   {
+    "answered": true,
+    "case_id": "C-755981",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 5,
+    "success": false,
+    "view_tokens_decision": 9095,
+    "view_tokens_first": 7883
+   },
+   {
+    "answered": true,
+    "case_id": "C-746992",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 6,
+    "success": false,
+    "view_tokens_decision": 10654,
+    "view_tokens_first": 9223
+   },
+   {
+    "answered": true,
+    "case_id": "C-438412",
+    "dependency": true,
+    "dependency_kinds": [
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 7,
+    "success": false,
+    "view_tokens_decision": 11927,
+    "view_tokens_first": 10755
+   },
+   {
+    "answered": true,
+    "case_id": "C-864258",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 8,
+    "success": false,
+    "view_tokens_decision": 13492,
+    "view_tokens_first": 12024
+   },
+   {
+    "answered": true,
+    "case_id": "C-542819",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 2,
+    "kind": "followup",
+    "position": 9,
+    "success": false,
+    "view_tokens_decision": 13676,
+    "view_tokens_first": 13646
+   },
+   {
+    "answered": true,
+    "case_id": "C-961109",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 3,
+    "kind": "policy",
+    "position": 10,
+    "success": false,
+    "view_tokens_decision": 14910,
+    "view_tokens_first": 13784
+   },
+   {
+    "answered": true,
+    "case_id": "C-969941",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota",
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 11,
+    "success": false,
+    "view_tokens_decision": 16230,
+    "view_tokens_first": 15018
+   },
+   {
+    "answered": true,
+    "case_id": "C-254502",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 1,
+    "kind": "followup",
+    "position": 12,
+    "success": false,
+    "view_tokens_decision": 16364,
+    "view_tokens_first": 16364
+   }
+  ],
+  "overflow_at": null,
+  "probes": [
+   {
+    "answer": {
+     "completed": [
+      "C-121462",
+      "C-250300",
+      "C-624761",
+      "C-949145",
+      "C-755981"
+     ],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": [
+      "C-746992",
+      "C-438412",
+      "C-864258",
+      "C-542819",
+      "C-961109",
+      "C-969941",
+      "C-254502"
+     ]
+    },
+    "error": null,
+    "k": 5,
+    "scores": {
+     "completed": 1.0,
+     "escalated": 1.0,
+     "mean_f1": 0.6,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 1.0
+    },
+    "view_tokens": 9230
+   },
+   {
+    "answer": {
+     "completed": [
+      "C-121462",
+      "C-250300",
+      "C-624761",
+      "C-949145",
+      "C-755981",
+      "C-746992",
+      "C-438412",
+      "C-864258",
+      "C-542819",
+      "C-961109"
+     ],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": [
+      "C-969941",
+      "C-254502"
+     ]
+    },
+    "error": null,
+    "k": 10,
+    "scores": {
+     "completed": 1.0,
+     "escalated": 1.0,
+     "mean_f1": 0.6,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 1.0
+    },
+    "view_tokens": 15045
+   }
+  ],
+  "report": {
+   "dispositions": {
+    "C-121462": "approve",
+    "C-250300": "approve",
+    "C-254502": "approve",
+    "C-438412": "approve",
+    "C-542819": "approve",
+    "C-624761": "approve",
+    "C-746992": "approve",
+    "C-755981": "approve",
+    "C-864258": "approve",
+    "C-949145": "approve",
+    "C-961109": "approve",
+    "C-969941": "approve"
+   },
+   "open_followups": [],
+   "pending_recheck": []
+  },
+  "score": {
+   "dependency_success": 0.0,
+   "item_success": 0.0,
+   "overflow": 0.0,
+   "probe_coverage": 1.0,
+   "probe_f1": 0.6,
+   "report_exact": 0.0,
+   "session_success": 0.0
+  },
+  "views": [
+   {
+    "item": 1,
+    "view_tokens": 2262
+   },
+   {
+    "item": 1,
+    "view_tokens": 3474
+   },
+   {
+    "item": 2,
+    "view_tokens": 3602
+   },
+   {
+    "item": 2,
+    "view_tokens": 3632
+   },
+   {
+    "item": 2,
+    "view_tokens": 4744
+   },
+   {
+    "item": 3,
+    "view_tokens": 4870
+   },
+   {
+    "item": 3,
+    "view_tokens": 6244
+   },
+   {
+    "item": 4,
+    "view_tokens": 6392
+   },
+   {
+    "item": 4,
+    "view_tokens": 7806
+   },
+   {
+    "item": 5,
+    "view_tokens": 7883
+   },
+   {
+    "item": 5,
+    "view_tokens": 9095
+   },
+   {
+    "item": 6,
+    "view_tokens": 9223
+   },
+   {
+    "item": 6,
+    "view_tokens": 10654
+   },
+   {
+    "item": 7,
+    "view_tokens": 10755
+   },
+   {
+    "item": 7,
+    "view_tokens": 11927
+   },
+   {
+    "item": 8,
+    "view_tokens": 12024
+   },
+   {
+    "item": 8,
+    "view_tokens": 13492
+   },
+   {
+    "item": 9,
+    "view_tokens": 13646
+   },
+   {
+    "item": 9,
+    "view_tokens": 13676
+   },
+   {
+    "item": 10,
+    "view_tokens": 13784
+   },
+   {
+    "item": 10,
+    "view_tokens": 13814
+   },
+   {
+    "item": 10,
+    "view_tokens": 14910
+   },
+   {
+    "item": 11,
+    "view_tokens": 15018
+   },
+   {
+    "item": 11,
+    "view_tokens": 16230
+   },
+   {
+    "item": 12,
+    "view_tokens": 16364
+   },
+   {
+    "item": 13,
+    "view_tokens": 16502
+   },
+   {
+    "item": 13,
+    "view_tokens": 16531
+   }
+  ]
+ },
+ "CM0-overflow": {
+  "arm": {
+   "checkpoints": [
+    5,
+    10
+   ],
+   "max_turns_per_item": 8,
+   "name": "CM0",
+   "window": 8000
+  },
+  "calls": [
+   {
+    "kind": "agent",
+    "n": 3,
+    "sha": "7db4e51ed7fd8bd9615b",
+    "tokens": 2262
+   },
+   {
+    "kind": "agent",
+    "n": 5,
+    "sha": "81c6e93759b1a0b96f13",
+    "tokens": 3474
+   },
+   {
+    "kind": "agent",
+    "n": 8,
+    "sha": "a2dc3436efa77a024b76",
+    "tokens": 3602
+   },
+   {
+    "kind": "agent",
+    "n": 10,
+    "sha": "64fa65f05355201f08d3",
+    "tokens": 4714
+   },
+   {
+    "kind": "agent",
+    "n": 13,
+    "sha": "b5c5fe73a0d29954de39",
+    "tokens": 4840
+   },
+   {
+    "kind": "agent",
+    "n": 15,
+    "sha": "8c9bb9f2bef5577ea574",
+    "tokens": 6214
+   },
+   {
+    "kind": "agent",
+    "n": 18,
+    "sha": "f1712ceab92981d62b3d",
+    "tokens": 6362
+   },
+   {
+    "kind": "agent",
+    "n": 20,
+    "sha": "0f79dc1cd6bc73fcc127",
+    "tokens": 7776
+   },
+   {
+    "kind": "agent",
+    "n": 23,
+    "sha": "3117a55c78d375429ac9",
+    "tokens": 7853
+   }
+  ],
+  "events": [
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 1,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-121462",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 1,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-33140"
+    },
+    "item": 2,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-250300",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 2,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-66003"
+    },
+    "item": 3,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-624761",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 3,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-848053"
+    },
+    "item": 4,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-949145"
+    },
+    "item": 4,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 5,
+    "tool": "lookup_customer"
+   }
+  ],
+  "history": {
+   "n": 25,
+   "sha": "c4b1a0d3cfc84f393e4c"
+  },
+  "items": [
+   {
+    "answered": true,
+    "case_id": "C-121462",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 1,
+    "success": false,
+    "view_tokens_decision": 3474,
+    "view_tokens_first": 2262
+   },
+   {
+    "answered": true,
+    "case_id": "C-250300",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 2,
+    "success": false,
+    "view_tokens_decision": 4714,
+    "view_tokens_first": 3602
+   },
+   {
+    "answered": true,
+    "case_id": "C-624761",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 3,
+    "success": false,
+    "view_tokens_decision": 6214,
+    "view_tokens_first": 4840
+   },
+   {
+    "answered": true,
+    "case_id": "C-949145",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 4,
+    "success": false,
+    "view_tokens_decision": 7776,
+    "view_tokens_first": 6362
+   }
+  ],
+  "overflow_at": 5,
+  "probes": [],
+  "report": null,
+  "score": {
+   "dependency_success": 0.0,
+   "item_success": 0.0,
+   "overflow": 1.0,
+   "probe_coverage": 0.0,
+   "probe_f1": 0.0,
+   "report_exact": 0.0,
+   "session_success": 0.0
+  },
+  "views": [
+   {
+    "item": 1,
+    "view_tokens": 2262
+   },
+   {
+    "item": 1,
+    "view_tokens": 3474
+   },
+   {
+    "item": 2,
+    "view_tokens": 3602
+   },
+   {
+    "item": 2,
+    "view_tokens": 4714
+   },
+   {
+    "item": 3,
+    "view_tokens": 4840
+   },
+   {
+    "item": 3,
+    "view_tokens": 6214
+   },
+   {
+    "item": 4,
+    "view_tokens": 6362
+   },
+   {
+    "item": 4,
+    "view_tokens": 7776
+   },
+   {
+    "item": 5,
+    "view_tokens": 7853
+   }
+  ]
+ },
+ "O-state": {
+  "arm": {
+   "checkpoints": [
+    5,
+    10
+   ],
+   "max_turns_per_item": 8,
+   "name": "O-state",
+   "window": 32000
+  },
+  "calls": [
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "909cb3397563f6894eed",
+    "tokens": 2302
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "38acd40abb9992c14407",
+    "tokens": 3514
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "7b774cffa2527d3bc3d8",
+    "tokens": 2355
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "df84c0d80206874fcc30",
+    "tokens": 3467
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "9e12de80ccc4c3f16ca2",
+    "tokens": 2385
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "9d1d17eb888b1f4c9923",
+    "tokens": 3759
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "e35833eb81c0f7f47a09",
+    "tokens": 2439
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "fd7cdefeacb4820f9243",
+    "tokens": 3853
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "7662f93b14a76e07aa6e",
+    "tokens": 2455
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "99bc3a1760a67a15549f",
+    "tokens": 3667
+   },
+   {
+    "kind": "probe",
+    "n": 3,
+    "sha": "14f7879ff9ab437c2027",
+    "tokens": 2508
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "29a10a1c5f240ca9c560",
+    "tokens": 2502
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "c65f0c9cc9410beacb81",
+    "tokens": 3933
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "02064995fd3be50367b7",
+    "tokens": 2509
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "1acecb4b36dd0ca397a8",
+    "tokens": 3681
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "738c9f8520fa3347cba6",
+    "tokens": 2547
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "75a031b0147bbb3ef766",
+    "tokens": 4015
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "31febda5b1d5ea2f3f2d",
+    "tokens": 2607
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "1802d05199ab67aa8579",
+    "tokens": 2628
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "84dd98ccacdd93dc38b7",
+    "tokens": 3724
+   },
+   {
+    "kind": "probe",
+    "n": 3,
+    "sha": "c0048135c3ab7c49d091",
+    "tokens": 2681
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "61977c95a864c696d0e6",
+    "tokens": 2655
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "e1e089e2283e966cd374",
+    "tokens": 3867
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "764652db212b59f7f737",
+    "tokens": 2717
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "7db77371c330b24f7dfc",
+    "tokens": 2733
+   }
+  ],
+  "events": [
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 1,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-121462",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 1,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-33140"
+    },
+    "item": 2,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-250300",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 2,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-66003"
+    },
+    "item": 3,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-624761",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 3,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-848053"
+    },
+    "item": 4,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-949145"
+    },
+    "item": 4,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 5,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-755981",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 5,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-32383"
+    },
+    "item": 6,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-746992",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 6,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-175499"
+    },
+    "item": 7,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-438412"
+    },
+    "item": 7,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-48682"
+    },
+    "item": 8,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-864258",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 8,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-542819",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 9,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-10266"
+    },
+    "item": 10,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-961109",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 10,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 11,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-969941",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 11,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-254502",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 12,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "report": "{\"dispositions\": {}, \"pending_recheck\": [], \"open_followups\": []}"
+    },
+    "item": 13,
+    "tool": "submit_shift_report"
+   }
+  ],
+  "history": {
+   "n": 61,
+   "sha": "43b0498f5383123fde00"
+  },
+  "items": [
+   {
+    "answered": true,
+    "case_id": "C-121462",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 1,
+    "success": false,
+    "view_tokens_decision": 3514,
+    "view_tokens_first": 2302
+   },
+   {
+    "answered": true,
+    "case_id": "C-250300",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 2,
+    "success": false,
+    "view_tokens_decision": 3467,
+    "view_tokens_first": 2355
+   },
+   {
+    "answered": true,
+    "case_id": "C-624761",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 3,
+    "success": false,
+    "view_tokens_decision": 3759,
+    "view_tokens_first": 2385
+   },
+   {
+    "answered": true,
+    "case_id": "C-949145",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 4,
+    "success": false,
+    "view_tokens_decision": 3853,
+    "view_tokens_first": 2439
+   },
+   {
+    "answered": true,
+    "case_id": "C-755981",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 5,
+    "success": false,
+    "view_tokens_decision": 3667,
+    "view_tokens_first": 2455
+   },
+   {
+    "answered": true,
+    "case_id": "C-746992",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 6,
+    "success": false,
+    "view_tokens_decision": 3933,
+    "view_tokens_first": 2502
+   },
+   {
+    "answered": true,
+    "case_id": "C-438412",
+    "dependency": true,
+    "dependency_kinds": [
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 7,
+    "success": false,
+    "view_tokens_decision": 3681,
+    "view_tokens_first": 2509
+   },
+   {
+    "answered": true,
+    "case_id": "C-864258",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 8,
+    "success": false,
+    "view_tokens_decision": 4015,
+    "view_tokens_first": 2547
+   },
+   {
+    "answered": true,
+    "case_id": "C-542819",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 1,
+    "kind": "followup",
+    "position": 9,
+    "success": false,
+    "view_tokens_decision": 2607,
+    "view_tokens_first": 2607
+   },
+   {
+    "answered": true,
+    "case_id": "C-961109",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 10,
+    "success": false,
+    "view_tokens_decision": 3724,
+    "view_tokens_first": 2628
+   },
+   {
+    "answered": true,
+    "case_id": "C-969941",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota",
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 11,
+    "success": false,
+    "view_tokens_decision": 3867,
+    "view_tokens_first": 2655
+   },
+   {
+    "answered": true,
+    "case_id": "C-254502",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 1,
+    "kind": "followup",
+    "position": 12,
+    "success": false,
+    "view_tokens_decision": 2717,
+    "view_tokens_first": 2717
+   }
+  ],
+  "overflow_at": null,
+  "probes": [
+   {
+    "answer": {
+     "completed": [],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": []
+    },
+    "error": null,
+    "k": 5,
+    "scores": {
+     "completed": 0.0,
+     "escalated": 1.0,
+     "mean_f1": 0.2,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 0.0
+    },
+    "view_tokens": 2508
+   },
+   {
+    "answer": {
+     "completed": [],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": []
+    },
+    "error": null,
+    "k": 10,
+    "scores": {
+     "completed": 0.0,
+     "escalated": 1.0,
+     "mean_f1": 0.2,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 0.0
+    },
+    "view_tokens": 2681
+   }
+  ],
+  "report": {
+   "dispositions": {},
+   "open_followups": [],
+   "pending_recheck": []
+  },
+  "score": {
+   "dependency_success": 0.0,
+   "item_success": 0.0,
+   "overflow": 0.0,
+   "probe_coverage": 1.0,
+   "probe_f1": 0.2,
+   "report_exact": 0.0,
+   "session_success": 0.0
+  },
+  "views": [
+   {
+    "item": 1,
+    "view_tokens": 2302
+   },
+   {
+    "item": 1,
+    "view_tokens": 3514
+   },
+   {
+    "item": 2,
+    "view_tokens": 2355
+   },
+   {
+    "item": 2,
+    "view_tokens": 3467
+   },
+   {
+    "item": 3,
+    "view_tokens": 2385
+   },
+   {
+    "item": 3,
+    "view_tokens": 3759
+   },
+   {
+    "item": 4,
+    "view_tokens": 2439
+   },
+   {
+    "item": 4,
+    "view_tokens": 3853
+   },
+   {
+    "item": 5,
+    "view_tokens": 2455
+   },
+   {
+    "item": 5,
+    "view_tokens": 3667
+   },
+   {
+    "item": 6,
+    "view_tokens": 2502
+   },
+   {
+    "item": 6,
+    "view_tokens": 3933
+   },
+   {
+    "item": 7,
+    "view_tokens": 2509
+   },
+   {
+    "item": 7,
+    "view_tokens": 3681
+   },
+   {
+    "item": 8,
+    "view_tokens": 2547
+   },
+   {
+    "item": 8,
+    "view_tokens": 4015
+   },
+   {
+    "item": 9,
+    "view_tokens": 2607
+   },
+   {
+    "item": 10,
+    "view_tokens": 2628
+   },
+   {
+    "item": 10,
+    "view_tokens": 3724
+   },
+   {
+    "item": 11,
+    "view_tokens": 2655
+   },
+   {
+    "item": 11,
+    "view_tokens": 3867
+   },
+   {
+    "item": 12,
+    "view_tokens": 2717
+   },
+   {
+    "item": 13,
+    "view_tokens": 2733
+   }
+  ]
+ },
+ "O-state-nudges": {
+  "arm": {
+   "checkpoints": [
+    5,
+    10
+   ],
+   "max_turns_per_item": 8,
+   "name": "O-state",
+   "window": 32000
+  },
+  "calls": [
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "909cb3397563f6894eed",
+    "tokens": 2302
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "38acd40abb9992c14407",
+    "tokens": 3514
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "7b774cffa2527d3bc3d8",
+    "tokens": 2355
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "dab65eaf9fd5016e291e",
+    "tokens": 2385
+   },
+   {
+    "kind": "agent",
+    "n": 6,
+    "sha": "b6792a9c45f204617650",
+    "tokens": 3497
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "9e12de80ccc4c3f16ca2",
+    "tokens": 2385
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "9d1d17eb888b1f4c9923",
+    "tokens": 3759
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "e35833eb81c0f7f47a09",
+    "tokens": 2439
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "fd7cdefeacb4820f9243",
+    "tokens": 3853
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "7662f93b14a76e07aa6e",
+    "tokens": 2455
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "99bc3a1760a67a15549f",
+    "tokens": 3667
+   },
+   {
+    "kind": "probe",
+    "n": 3,
+    "sha": "14f7879ff9ab437c2027",
+    "tokens": 2508
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "29a10a1c5f240ca9c560",
+    "tokens": 2502
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "c65f0c9cc9410beacb81",
+    "tokens": 3933
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "02064995fd3be50367b7",
+    "tokens": 2509
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "1acecb4b36dd0ca397a8",
+    "tokens": 3681
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "738c9f8520fa3347cba6",
+    "tokens": 2547
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "75a031b0147bbb3ef766",
+    "tokens": 4015
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "31febda5b1d5ea2f3f2d",
+    "tokens": 2607
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "2adc91e75d67d4bf6dc1",
+    "tokens": 2637
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "1802d05199ab67aa8579",
+    "tokens": 2628
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "3da222361466d3f233bf",
+    "tokens": 2658
+   },
+   {
+    "kind": "agent",
+    "n": 6,
+    "sha": "04b7c134177e9daf8e85",
+    "tokens": 3754
+   },
+   {
+    "kind": "probe",
+    "n": 3,
+    "sha": "c0048135c3ab7c49d091",
+    "tokens": 2681
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "61977c95a864c696d0e6",
+    "tokens": 2655
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "e1e089e2283e966cd374",
+    "tokens": 3867
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "764652db212b59f7f737",
+    "tokens": 2717
+   },
+   {
+    "kind": "agent",
+    "n": 2,
+    "sha": "7db77371c330b24f7dfc",
+    "tokens": 2733
+   },
+   {
+    "kind": "agent",
+    "n": 4,
+    "sha": "00b43d691b5cea5e6a2c",
+    "tokens": 2762
+   }
+  ],
+  "events": [
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 1,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-121462",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 1,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-33140"
+    },
+    "item": 2,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-250300",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 2,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-66003"
+    },
+    "item": 3,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-624761",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 3,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-848053"
+    },
+    "item": 4,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-949145"
+    },
+    "item": 4,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 5,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-755981",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 5,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-32383"
+    },
+    "item": 6,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-746992",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 6,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "order_id": "O-175499"
+    },
+    "item": 7,
+    "tool": "order_lookup"
+   },
+   {
+    "args": {
+     "case_id": "C-438412"
+    },
+    "item": 7,
+    "tool": "finish"
+   },
+   {
+    "args": {
+     "customer_id": "CU-48682"
+    },
+    "item": 8,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-864258",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 8,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-542819",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 9,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-10266"
+    },
+    "item": 10,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-961109",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 10,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "customer_id": "CU-91312"
+    },
+    "item": 11,
+    "tool": "lookup_customer"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-969941",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 11,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "action": "approve",
+     "approver": "none",
+     "case_id": "C-254502",
+     "deadline_days": 1,
+     "document": "none"
+    },
+    "item": 12,
+    "tool": "submit_decision"
+   },
+   {
+    "args": {
+     "report": "{\"dispositions\": {}, \"pending_recheck\": [], \"open_followups\": []}"
+    },
+    "item": 13,
+    "tool": "submit_shift_report"
+   }
+  ],
+  "history": {
+   "n": 69,
+   "sha": "1fe1925347cfc902af95"
+  },
+  "items": [
+   {
+    "answered": true,
+    "case_id": "C-121462",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 1,
+    "success": false,
+    "view_tokens_decision": 3514,
+    "view_tokens_first": 2302
+   },
+   {
+    "answered": true,
+    "case_id": "C-250300",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 3,
+    "kind": "policy",
+    "position": 2,
+    "success": false,
+    "view_tokens_decision": 3497,
+    "view_tokens_first": 2355
+   },
+   {
+    "answered": true,
+    "case_id": "C-624761",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 3,
+    "success": false,
+    "view_tokens_decision": 3759,
+    "view_tokens_first": 2385
+   },
+   {
+    "answered": true,
+    "case_id": "C-949145",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 4,
+    "success": false,
+    "view_tokens_decision": 3853,
+    "view_tokens_first": 2439
+   },
+   {
+    "answered": true,
+    "case_id": "C-755981",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 5,
+    "success": false,
+    "view_tokens_decision": 3667,
+    "view_tokens_first": 2455
+   },
+   {
+    "answered": true,
+    "case_id": "C-746992",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 6,
+    "success": false,
+    "view_tokens_decision": 3933,
+    "view_tokens_first": 2502
+   },
+   {
+    "answered": true,
+    "case_id": "C-438412",
+    "dependency": true,
+    "dependency_kinds": [
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "ticket",
+    "position": 7,
+    "success": false,
+    "view_tokens_decision": 3681,
+    "view_tokens_first": 2509
+   },
+   {
+    "answered": true,
+    "case_id": "C-864258",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 2,
+    "kind": "policy",
+    "position": 8,
+    "success": false,
+    "view_tokens_decision": 4015,
+    "view_tokens_first": 2547
+   },
+   {
+    "answered": true,
+    "case_id": "C-542819",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 2,
+    "kind": "followup",
+    "position": 9,
+    "success": false,
+    "view_tokens_decision": 2637,
+    "view_tokens_first": 2607
+   },
+   {
+    "answered": true,
+    "case_id": "C-961109",
+    "dependency": false,
+    "dependency_kinds": [],
+    "generations": 3,
+    "kind": "policy",
+    "position": 10,
+    "success": false,
+    "view_tokens_decision": 3754,
+    "view_tokens_first": 2628
+   },
+   {
+    "answered": true,
+    "case_id": "C-969941",
+    "dependency": true,
+    "dependency_kinds": [
+     "quota",
+     "memo"
+    ],
+    "generations": 2,
+    "kind": "repeat",
+    "position": 11,
+    "success": false,
+    "view_tokens_decision": 3867,
+    "view_tokens_first": 2655
+   },
+   {
+    "answered": true,
+    "case_id": "C-254502",
+    "dependency": true,
+    "dependency_kinds": [
+     "followup"
+    ],
+    "generations": 1,
+    "kind": "followup",
+    "position": 12,
+    "success": false,
+    "view_tokens_decision": 2717,
+    "view_tokens_first": 2717
+   }
+  ],
+  "overflow_at": null,
+  "probes": [
+   {
+    "answer": {
+     "completed": [],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": []
+    },
+    "error": null,
+    "k": 5,
+    "scores": {
+     "completed": 0.0,
+     "escalated": 1.0,
+     "mean_f1": 0.2,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 0.0
+    },
+    "view_tokens": 2508
+   },
+   {
+    "answer": {
+     "completed": [],
+     "escalated": [],
+     "memos_in_force": [],
+     "open_followups": [],
+     "pending": []
+    },
+    "error": null,
+    "k": 10,
+    "scores": {
+     "completed": 0.0,
+     "escalated": 1.0,
+     "mean_f1": 0.2,
+     "memos_in_force": 0.0,
+     "open_followups": 0.0,
+     "pending": 0.0
+    },
+    "view_tokens": 2681
+   }
+  ],
+  "report": {
+   "dispositions": {},
+   "open_followups": [],
+   "pending_recheck": []
+  },
+  "score": {
+   "dependency_success": 0.0,
+   "item_success": 0.0,
+   "overflow": 0.0,
+   "probe_coverage": 1.0,
+   "probe_f1": 0.2,
+   "report_exact": 0.0,
+   "session_success": 0.0
+  },
+  "views": [
+   {
+    "item": 1,
+    "view_tokens": 2302
+   },
+   {
+    "item": 1,
+    "view_tokens": 3514
+   },
+   {
+    "item": 2,
+    "view_tokens": 2355
+   },
+   {
+    "item": 2,
+    "view_tokens": 2385
+   },
+   {
+    "item": 2,
+    "view_tokens": 3497
+   },
+   {
+    "item": 3,
+    "view_tokens": 2385
+   },
+   {
+    "item": 3,
+    "view_tokens": 3759
+   },
+   {
+    "item": 4,
+    "view_tokens": 2439
+   },
+   {
+    "item": 4,
+    "view_tokens": 3853
+   },
+   {
+    "item": 5,
+    "view_tokens": 2455
+   },
+   {
+    "item": 5,
+    "view_tokens": 3667
+   },
+   {
+    "item": 6,
+    "view_tokens": 2502
+   },
+   {
+    "item": 6,
+    "view_tokens": 3933
+   },
+   {
+    "item": 7,
+    "view_tokens": 2509
+   },
+   {
+    "item": 7,
+    "view_tokens": 3681
+   },
+   {
+    "item": 8,
+    "view_tokens": 2547
+   },
+   {
+    "item": 8,
+    "view_tokens": 4015
+   },
+   {
+    "item": 9,
+    "view_tokens": 2607
+   },
+   {
+    "item": 9,
+    "view_tokens": 2637
+   },
+   {
+    "item": 10,
+    "view_tokens": 2628
+   },
+   {
+    "item": 10,
+    "view_tokens": 2658
+   },
+   {
+    "item": 10,
+    "view_tokens": 3754
+   },
+   {
+    "item": 11,
+    "view_tokens": 2655
+   },
+   {
+    "item": 11,
+    "view_tokens": 3867
+   },
+   {
+    "item": 12,
+    "view_tokens": 2717
+   },
+   {
+    "item": 13,
+    "view_tokens": 2733
+   },
+   {
+    "item": 13,
+    "view_tokens": 2762
+   }
+  ]
+ }
+}

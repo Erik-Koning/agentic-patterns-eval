@@ -13,6 +13,10 @@
   what a case needs.
 - Model-written lists are read tolerantly (`id_set`: strings kept, case and space normalized, anything else
   ignored), so no report or probe shape can make the scorer raise.
+- Cost: the score metadata carries the session's usage by call kind (agent, cm, probe; restored calls included)
+  and, for a resumed session, its resumes and the earlier attempts' usage that no Inspect log holds (`unlogged`,
+  to add to spend) or that an earlier log's errored sample holds (`logged_elsewhere`), compact enough to survive in
+  Inspect's sample summaries (`ape.agent.session_checkpoint`).
 """
 
 import json
@@ -21,13 +25,36 @@ import re
 from inspect_ai.scorer import Score, Target, mean, scorer
 from inspect_ai.solver import TaskState
 
-from ..worlds.env_f8 import EVENTS, OVERFLOW, PROBES, REPORT
+from ..worlds.env_f8 import EVENTS, OVERFLOW, PROBES, REPORT, RESUME, USAGE
 from ..worlds.gen_f8 import PROBE_CATEGORIES, calls_key, decisions_equal
 from ..worlds.spec import TaskItem, World
 
 CASE_ID = re.compile(r"\bC-\d{6}\b")
 MEMO_ID = re.compile(r"\bM-\d+\b")
 LABELS = ("forgot_constraint", "stale_state", "resurrected_done_item", "dropped_item", "hallucinated_state", "overflow")
+USAGE_FIELDS = ("input_tokens", "output_tokens", "input_tokens_cache_read", "reasoning_tokens", "total_cost")
+
+
+def _compact_usage(by: dict | None) -> dict | None:
+    """{kind or model: usage} reduced to the fields cost analysis prices."""
+    if not by:
+        return None
+    return {k: {f: u[f] for f in USAGE_FIELDS if f in u} for k, u in by.items()}
+
+
+def resume_metadata(resume: dict | None) -> dict | None:
+    """The score's view of `f8_resume`: how often and after which items the session resumed, and the earlier
+    attempts' usage by model, split by whether any Inspect log holds it."""
+    if not resume:
+        return None
+    return {
+        "count": resume["count"],
+        "after_items": resume["after_items"],
+        "failures": len(resume["failures"]),
+        "discarded_calls": sum(f["usage"]["calls"] for f in resume["failures"]),
+        "unlogged": _compact_usage((resume["unlogged"] or {}).get("by_model")),
+        "logged_elsewhere": _compact_usage((resume["logged_elsewhere"] or {}).get("by_model")),
+    }
 
 
 def _mutating(world: World) -> set[str]:
@@ -339,6 +366,8 @@ def f8_session_score():
                 "taxonomy": tax,
                 "probes": [{"k": p["k"], "scores": p["scores"], "error": p["error"]} for p in probes],
                 "probes_by_checkpoint": {str(k): v for k, v in by_k.items()},
+                "usage": _compact_usage((state.store.get(USAGE) or {}).get("by_kind")),
+                "resume": resume_metadata(state.store.get(RESUME)),
             },
         )
 
