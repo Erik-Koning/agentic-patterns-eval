@@ -91,9 +91,10 @@ def candidate_problems(arm: str, env: dict[str, str]) -> list[str]:
 
 
 def _test_envs(selected: dict[str, dict]) -> dict[str, dict[str, str]]:
-    """The env each tuned arm runs under in the test phase, by ape.run_study's rule for selections that share APE_CM_*
-    knobs (BUILD_PLAN B1, `selection_env` and `env_group`): every selection's knobs together when they agree on each
-    shared knob, else each tuned arm under its own selection. The runner's own functions once it has them."""
+    """The env each tuned arm runs under in the test phase, by the study runner's rule for selections that share
+    APE_CM_* knobs (BUILD_PLAN B1, `selection_env` and `env_group`): every selection's knobs together when they agree
+    on each shared knob, else each tuned arm under its own selection. The runner's own functions when it has them;
+    modelled here until then (a runner whose `selection_env` refuses any shared knob stops this grid's test phase)."""
     if hasattr(run_study, "env_group"):
         together = run_study.selection_env(selected)
         return {name: run_study.env_group(name, s["arm"], selected, together)[1] for name, s in selected.items()} | {"*untuned*": dict(together or {})}
