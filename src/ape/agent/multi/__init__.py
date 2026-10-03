@@ -5,8 +5,10 @@
   the shared turn loop (kb_agent's per-turn rules over any history), and environment isolation.
 - `primitives.py`: a worker run, the orchestrator loop, a council, an ensemble and its vote; reusable outside the
   main study's solvers (Study G's B9).
-- `specialists.py`: M2's specialization, from the world's domains.
+- `specialists.py`: M2's specialization, from the world's domains (F8 sessions included).
 - `solvers.py`: one Inspect solver per arm, with the switch vector each logs.
+- `session_team.py` and `session_prompts.py`: Study G's topology arms (S1 = CM0, M1, M2; B9) as context policies
+  of the F8 session loop: an orchestrator under CM0's rule delegates each case's work to isolated workers.
 
 **Inspect 0.3.273 defaults that change information flow, and how the arms hold them constant** (brief §9):
 - `react()`, `as_tool()`, `handoff()` and `run()` are not used for these loops. `react()` adds its own assistant

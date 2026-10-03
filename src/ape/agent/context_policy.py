@@ -9,6 +9,9 @@ the base class is CM0, the full history):
 - `tools()` / `system_addendum()`: extra tools (e.g. Inspect's `todo_write()`, `memory()`) and a short, fixed
   instruction appended to the shared system prompt. The loop records every call of a policy tool as a tool event
   flagged `policy: True` (the scorers skip them; external-state analysis reads them).
+- `agent_tools(tools)`: which of the session's own tools the agent itself gets (default: all). The topology arms
+  (`ape.agent.multi.session_team`, B9) keep only the answer and report tools for their orchestrator; their workers
+  use the rest through `SessionContext.session_tools`.
 - `start(history)`: once, when a fresh session starts (a resumed one restores its state instead).
 - `view(history, item_start, done)`: before every agent call, the model's input. May keep state and make
   management calls.
@@ -23,6 +26,9 @@ the base class is CM0, the full history):
 - `state_dict()` / `load_state(state, history)`: the policy's management state as JSON, saved with every
   mid-session checkpoint and restored on resume (`ape.agent.session_checkpoint`). State that lives elsewhere (e.g.
   Inspect's `memory()` files in the sample store) must be carried here too, or it is lost on resume.
+- `records()`: extra sample-store keys the loop writes at the end of the session (in its `finally`, so a session
+  cut short keeps them), e.g. a team's per-agent accounting. `CODE_MODULES` names further modules whose source is
+  part of the checkpoint key (the policy's own module always is).
 
 Management model calls go through `SessionContext.cm_generate` on the `cm` role (the agent's own model when the run
 defines none: self-summarisation, audit §6.3). The harness W-checks each like an agent call and records it per
@@ -180,7 +186,8 @@ class SessionContext:
     `position` is the item being worked on (0 before the first case, N + 1 for the report) and `stage` where the
     loop is: "start", "item", "boundary" (after an item: its after_item hook and probe) or "report". `system` is
     the history's system message and `tools` every tool the agent has; both are set before `start` / `load_state`,
-    so a policy's constructor must not use them."""
+    so a policy's constructor must not use them. `session_tools` are all of the session's own tools, bound to its
+    recorder (whatever `agent_tools` gives the agent), and `max_turns_per_item` the loop's turn cap per case."""
 
     world: World
     window: int
@@ -192,6 +199,8 @@ class SessionContext:
     tools: list = field(default_factory=list)
     position: int = 0
     stage: str = "start"
+    session_tools: dict = field(default_factory=dict)
+    max_turns_per_item: int = 8
 
     @staticmethod
     def tokens(messages: Sequence[ChatMessage]) -> int:
@@ -236,6 +245,7 @@ class ContextPolicy:
 
     name: ClassVar[str] = "full-history"
     KNOBS: ClassVar[dict[str, Any]] = {}
+    CODE_MODULES: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, session: SessionContext, **knobs: Any):
         if unknown := sorted(set(knobs) - set(self.KNOBS)):
@@ -252,6 +262,10 @@ class ContextPolicy:
 
     def tools(self) -> list[Tool | ToolDef]:
         return []
+
+    def agent_tools(self, tools: list[ToolDef]) -> list[ToolDef]:
+        """Which of the session's own tools the agent gets (default: all of them)."""
+        return tools
 
     def system_addendum(self) -> str:
         return ""
@@ -282,6 +296,10 @@ class ContextPolicy:
 
     def load_state(self, state: dict, history: list[ChatMessage]) -> None:
         return None
+
+    def records(self) -> dict[str, Any]:
+        """Extra sample-store keys, written by the loop when the session ends (default: none)."""
+        return {}
 
 
 class FullHistory(ContextPolicy):
