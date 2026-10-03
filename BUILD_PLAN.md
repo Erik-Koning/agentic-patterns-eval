@@ -99,7 +99,7 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | Package | Status | Notes |
 |---|---|---|
 | Seam | ✅ 4fbb68b, a85799f | `main_study` covers F1/F2/F3/F7; `agent/solvers.arm_solver` dispatch point; S5 = the gate's KG arm (`APE_KG_ARM`); `ape.build` takes seed_base and F8 knobs |
-| B1 + B6 | ✅ merged dffa9b3; integration with the merged arms + fixes in progress | D-036 |
+| B1 + B6 | ✅ merged dffa9b3; integration merged 61e4215 (877 passed) | D-036, D-045 |
 | B2 | ✅ merged cb3516d | D-034 (M2 dropped on F1) |
 | B4 | ✅ statistics core merged cc9dcb5; run-dir glue after B1 | D-029, D-031; power gaps P-1 |
 | B7 | ✅ merged efe6158 | D-030 |
@@ -114,8 +114,8 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 
 **Follow-ups found during the build** (must be done before any paid run):
 - **For B12:** a per-run cache nonce (brief §6.2: provider prefix caches must not carry across runs or arms sharing a monolith prefix) and a runaway wall-clock guard (brief §4.5); the runner writing the `cap multiple` and `pilot σ and power` pre-registration items.
-- **Pilot cap-hit gate (D-039):** M7 may outgrow the 8 × B0 token cap; the main runner doubles the cap multiple for all arms when any arm's pilot cap-hit rate exceeds 10% (with the B1 integration).
-- **Freeze scope:** the gate's freeze hashes all of `run_plan.yaml`, `models.yaml` and `model_costs.yaml`, so once the gate freezes, any later main/G plan edit would break it. Being changed to per-study resolved slices (with the B1 integration).
-- **`search_kb` limit handling:** a token limit tripped inside `search_kb` became a tool error (one extra model call). Being fixed with the B1 integration.
-- **Spend misses errored attempts** (D-030): Inspect drops the usage of a sample's errored attempts under `retry_on_error`, so `ape.budget`/`ape.spend` undercount. Fix (after B1 merges, since it touches runner/spend code): Inspect 0.3.273's `on_model_usage` hook fires for every successful generate call, errored attempts included, with eval/run/eval-set IDs; a hook that appends each call's usage and cost to a flushed per-run ledger makes spend complete and kill-safe, with the logs kept as a cross-check.
+✅ - **Pilot cap-hit gate (D-039):** M7 may outgrow the 8 × B0 token cap; the main runner doubles the cap multiple for all arms when any arm's pilot cap-hit rate exceeds 10% (with the B1 integration).
+✅ - **Freeze scope:** the gate's freeze hashes all of `run_plan.yaml`, `models.yaml` and `model_costs.yaml`, so once the gate freezes, any later main/G plan edit would break it. Being changed to per-study resolved slices (with the B1 integration).
+✅ - **`search_kb` limit handling:** a token limit tripped inside `search_kb` became a tool error (one extra model call). Being fixed with the B1 integration.
+✅ - **Spend misses errored attempts** (D-030): Inspect drops the usage of a sample's errored attempts under `retry_on_error`, so `ape.budget`/`ape.spend` undercount. Fix (after B1 merges, since it touches runner/spend code): Inspect 0.3.273's `on_model_usage` hook fires for every successful generate call, errored attempts included, with eval/run/eval-set IDs; a hook that appends each call's usage and cost to a flushed per-run ledger makes spend complete and kill-safe, with the logs kept as a cross-check.
 
