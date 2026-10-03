@@ -44,7 +44,7 @@ def test_the_task_selects_the_variant_seed_block_and_skipped_worlds(worlds):
     variant = gen_f8.variant_tag({"output_tokens": 2250})
     big = session_samples("10", "dev", variant=variant)
     assert _ids(big) == ["F8-10-o2250-dev-s1000", "F8-10-o2250-dev-s1001"] and all(s.metadata["knobs"]["output_tokens"] == 2250 for s in big)
-    with pytest.raises(FileNotFoundError, match="seeds 1200..1299"):
+    with pytest.raises(FileNotFoundError, match=r"seeds 1200\.\.1299"):
         session_samples("10", "dev", seed_base=1200)
 
 

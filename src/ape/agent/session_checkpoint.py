@@ -139,15 +139,20 @@ class SessionCheckpoints:
         return payload
 
     def save(self, payload: Mapping[str, Any]) -> None:
-        """Write `payload` atomically (temporary file, fsync, rename)."""
+        """Write `payload` atomically (temporary file, fsync, rename). It must be plain JSON: a policy state that is
+        not raises here, at the session's first save, instead of coming back altered on resume."""
         full = {"format": FORMAT, "key": self.key, "components": self.components, "saved_at": _now(), **payload}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(f"{self.path.name}.tmp-{os.getpid()}")
-        with open(tmp, "w") as f:
-            json.dump(full, f, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)
+        try:
+            with open(tmp, "w") as f:
+                json.dump(full, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         self.last = full
 
     def complete(self) -> None:

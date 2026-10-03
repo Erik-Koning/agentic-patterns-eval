@@ -263,6 +263,18 @@ def test_policy_registry_and_knobs(monkeypatch):
         Ledger(SessionContext(world=None, window=1, threshold=1, agent_model=None, cm_model=None, records=None), stride=2)
 
 
+def test_a_management_call_made_elsewhere_is_recorded_from_its_usage():
+    """E.g. Inspect's native compaction returns (messages, ModelUsage): the policy records it as a cm call."""
+    from inspect_ai.model import ModelUsage
+
+    from ape.agent.context_policy import SessionRecords
+
+    ctx = SessionContext(world=None, window=1, threshold=1, agent_model=None, cm_model=None, records=SessionRecords(), position=3, stage="item")
+    entry = ctx.record_call("cm", get_model("mockllm/model"), 1200, ModelUsage(input_tokens=1200, output_tokens=80), purpose="native")
+    assert entry == {"item": 3, "view_tokens": 1200, "kind": "cm", "model": "mockllm/model", "usage": {"input_tokens": 1200, "output_tokens": 80, "total_tokens": 0}, "purpose": "native"}
+    assert ctx.record_call("cm", get_model("mockllm/model"), 5, None)["usage"] is None
+
+
 def test_the_naive_mock_answers_management_calls():
     from inspect_ai.model import GenerateConfig
 

@@ -263,6 +263,10 @@ def test_the_key_covers_the_configuration(tmp_path):
     assert other.load() is None
     c.complete()
     assert not c.path.exists() and c.load() is None
+    # A payload that is not plain JSON (e.g. a policy keeping a set) fails loudly, and leaves no file behind.
+    with pytest.raises(TypeError):
+        c.save({"done": 1, "policy": {"seen": {"C-1"}}})
+    assert not c.path.exists() and not list(c.path.parent.glob("*.tmp-*"))
 
 
 def test_resume_summary_splits_usage_by_where_inspect_logged_it():

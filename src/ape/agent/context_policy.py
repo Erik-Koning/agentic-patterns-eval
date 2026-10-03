@@ -37,6 +37,26 @@ knobs are recorded with the arm and are part of the checkpoint key.
 Inspect's `compaction()` handlers keep their state in a closure that only a `Checkpointer` can reach;
 `TrackedState` is a minimal one, so a policy built on them checkpoints and resumes like any other.
 
+What Inspect 0.3.273 provides (verified in the installed package, B7):
+- `compaction(strategy, prefix, tools, model, checkpointer)`: a handler with `compact_input(messages, force=False)`
+  -> (view, message for the history or None) and `record_output(input, output)`. A threshold is absolute tokens
+  (an int) or a fraction of the model's context window (a float <= 1), measured Inspect's way: tiktoken o200k plus
+  10% and the tool schemas, then the provider's reported input tokens after a call. That is not this harness's
+  meter, so a policy that should trigger at T_abs sets Inspect's threshold out of reach and forces compaction
+  from `on_threshold` (tests/test_session_resume.py `InspectPrune`).
+- `CompactionEdit` (keep_tool_uses, keep_tool_inputs, keep_thinking_turns, exclude_tools): no model call; older
+  tool results become "(Tool result removed)". `CompactionTrim` (preserve, a fraction of the conversation's
+  messages): no model call; keeps the system message and the first user turn.
+- `CompactionSummary` (model, instructions, prompt): one `model.generate` per compaction, made inside Inspect, so
+  neither W-checked nor recorded per call here (use `cm_generate` with its prompt instead, or meter it through
+  `record_call`). `CompactionNative`: `model.compact()`, server-side (OpenAI Responses), NotImplementedError
+  where unsupported; `CompactionAuto` falls back to Summary.
+- `todo_write()` is stateless (it returns "Todo list updated"): the list exists only in its call arguments, which
+  a policy reads in `after_generate`. `memory()` keeps files in the sample store (`MemoryStore`), which a resume
+  does not restore unless the policy's state carries them.
+- Native sample checkpointing (`inspect_ai.util.checkpointer`) exists but resumes only on task-level retries
+  (`ape.agent.session_checkpoint`).
+
 Built here (B7): CM0 (`FullHistory`) and O-state (`OracleState`). B8 adds the managed arms with `register_policy`.
 """
 
@@ -175,8 +195,11 @@ class SessionContext:
         start or at a boundary (the item that just ended is complete)."""
         return self.position + 1 if self.stage in ("start", "boundary") else self.position
 
-    def record_call(self, kind: str, model: Model, tokens: int, output: ModelOutput, purpose: str | None = None) -> dict:
-        entry = {"item": self.position, "view_tokens": tokens, "kind": kind, "model": str(model), "usage": usage_record(output.usage)}
+    def record_call(self, kind: str, model: Model, tokens: int, output: ModelOutput | ModelUsage | None, purpose: str | None = None) -> dict:
+        """Record one call (the loop's agent calls, `cm_generate`'s management calls, or a management call a policy
+        made another way, e.g. inside an Inspect compaction strategy, given its usage)."""
+        usage = output.usage if isinstance(output, ModelOutput) else output
+        entry = {"item": self.position, "view_tokens": tokens, "kind": kind, "model": str(model), "usage": usage_record(usage)}
         if purpose:
             entry["purpose"] = purpose
         self.records.views.append(entry)
