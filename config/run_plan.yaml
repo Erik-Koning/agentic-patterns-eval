@@ -146,7 +146,7 @@ studies:
         - {id: g.pilot.luna, kind: session, arms: [CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state],
            N: 40, sessions: 3, epochs: 1, note: "~3 sessions per arm at one tier (audit §8)"}
       tuning:
-        - {id: g.tune.luna, kind: session, arms: {CM-prune: 3, CM-sum: 3, CM-todo: 3, CM-reset: 3, S-CM*: 3},
+        - {id: g.tune.luna, kind: session, arms: {CM-prune: 3, CM-sum: 2, CM-todo: 2, CM-reset: 3, S-CM*: 3},
            N: 40, sessions: 3, epochs: 1, note: "equal dev budget per strategy (audit §6.3)"}
       capability_anchor:
         # Measured capability per point (audit §2.1): the baseline on F7-10 + F3-5, short-horizon.
@@ -163,8 +163,10 @@ studies:
            epochs: 3, note: "Luna-low capability point, the 4 arms common to every point"}
         - {id: g.cm.luna-n10, kind: session, arms: [CM0, O-state], N: 10, sessions: 10, epochs: 3,
            note: "short-session control (audit §8), Luna only"}
-        - {id: g.cm.sol-high, kind: session, profile: study_g_sol, arms: [CM0, CM-prune, CM-sum, CM-todo, O-state],
-           N: 40, sessions: 6, epochs: 2}
+        - {id: g.cm.sol-high, kind: session, profile: study_g_sol, arms: [CM0, CM-native, CM-sum, CM-todo, O-state],
+           N: 40, sessions: 6, epochs: 2,
+           note: "D-043: CM-native replaces CM-prune at Sol (a second tier for native compaction). Needs the probe's confirmed
+             Sol support record; if the probe says unsupported, put CM-prune back here before the freeze (a plan change, not a deviation)"}
         - {id: g.cm.sol-low, kind: session, profile: study_g_sol, effort: low, arms: [CM0, CM-sum, CM-todo, O-state],
            N: 40, sessions: 8, epochs: 2, enabled: false}
         - {id: g.cm.astra-high, kind: session, profile: study_g_astra, arms: [CM0, CM-sum, CM-todo, O-state],
