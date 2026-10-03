@@ -168,6 +168,20 @@ def test_tasks_differing_only_in_arm_are_distinct_and_indexed(offline_env):
     assert {e["log"] for e in entries} == {log_path(h) for h in logs}
 
 
+def test_a_run_leaves_no_model_or_role_behind(offline_env):
+    """Inspect sets its active model and model roles in the caller's context and never resets them: without
+    run_evals' context copy, a later `get_model(role="kg", required=True)` in the same process (another run, or
+    test_fixes' kg-role test after a run_study test) resolved to this run's mock instead of failing."""
+    from inspect_ai.model import get_model
+    from inspect_ai.model._model import _model_roles, active_model_context_var
+
+    success, _ = run_evals(echo(2), offline_env / "logs", model_override=MOCK, **FAST)
+    assert success
+    assert _model_roles.get() == {} and active_model_context_var.get(None) is None
+    with pytest.raises(Exception, match="kg"):
+        get_model(role="kg", required=True)
+
+
 # ---------- models, prices, concurrency, preflight ----------
 
 
