@@ -556,15 +556,16 @@ def _world_cell(world_id: str) -> str:
 
 
 def build_per_call(rows: Sequence[Mapping], assumptions: Mapping) -> dict[str, dict]:
-    """Finished build calls in the ledger (role build; unfinished ones carry a `status`), per system against the
-    build_calls priors: calls, input, output and reasoning tokens per call, and calls per chunk where every
-    world's chunk count is known (budget_assumptions chunks_per_world)."""
+    """Finished build calls in the ledger (role build; unfinished ones carry a `status`) of the gate's worlds, per
+    system against the build_calls priors: calls, input, output and reasoning tokens per call, and calls per chunk
+    where every world's chunk count is known (budget_assumptions chunks_per_world). Rows with no world (the PC1
+    anchor's index, built by another model on another corpus) are not the gate's builds and would skew both."""
     chunks = assumptions.get("chunks_per_world") or {}
     acc: dict[str, dict] = {}
     for r in rows:
         ctx = r.get("context") or {}
         key = BUILD_SYSTEMS.get(ctx.get("system"))
-        if r.get("role") != "build" or key is None or ctx.get("status"):
+        if r.get("role") != "build" or key is None or ctx.get("status") or not ctx.get("world"):
             continue
         a = acc.setdefault(key, {"calls": 0, "input": 0.0, "output": 0.0, "reasoning": 0.0, "worlds": set()})
         a["calls"] += 1
@@ -628,8 +629,8 @@ def cost_verdict(projections: Mapping[str, Mapping[str, float]], total_usd: floa
 
 def update_live_record(record: Mapping | None, report: Mapping, required: Sequence[str]) -> dict:
     """`record` with this live invocation's checks replacing their earlier entries. Each entry carries what
-    run_gate's preflight checks (`check_live_smoke`): status, finish time, commit, profile, model overrides and
-    the probe's snapshots."""
+    run_gate's preflight checks (`check_live_smoke`): status, finish time, commit and its uncommitted code changes
+    (`code_dirty`), profile, model overrides and the probe's snapshots."""
     out = dict(record or {})
     checks = dict(out.get("checks") or {})
     vcs = report.get("git") or {}
@@ -637,7 +638,7 @@ def update_live_record(record: Mapping | None, report: Mapping, required: Sequen
     for name, r in (report.get("checks") or {}).items():
         checks[name] = {
             "status": r["status"], "reason": r.get("reason"), "finished_utc": r.get("finished_utc") or report.get("finished_utc"),
-            "git_commit": vcs.get("commit"), "git_dirty": vcs.get("dirty"), "profile": models.get("profile"),
+            "git_commit": vcs.get("commit"), "git_dirty": vcs.get("dirty"), "code_dirty": vcs.get("code_dirty"), "profile": models.get("profile"),
             "overrides": {k: v for k, v in (models.get("overrides") or {}).items() if v},
             "snapshots": dict(report.get("snapshots") or {}), "report_started_utc": report.get("started_utc"),
         }  # fmt: skip

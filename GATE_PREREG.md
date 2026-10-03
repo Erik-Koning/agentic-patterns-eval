@@ -6,14 +6,14 @@
 - This header is instructions and is never checked. From §1 on, any remaining marker blocks the freeze.
 
 **Freeze procedure:**
-1. Run the gate through the pilot: `python -m ape.run_gate pilot --run-id <id>`.
+1. Run the gate through the pilot: `uv run --locked python -m ape.run_gate pilot --run-id <id>` (`--locked`: uv never rewrites `uv.lock`, which the freeze hashes).
 2. Fill every `[PILOT: …]` and `[USER: …]` item in the body, set the status to FROZEN, and commit.
-3. Run `python -m ape.run_gate freeze --run-id <id>`.
+3. Run `uv run --locked python -m ape.run_gate freeze --run-id <id>`.
    - It refuses while a marker remains in the body, a tracked file has uncommitted changes, or PC1 fails.
    - It also refuses unless build-dev, tune, anchor and pilot are current: a re-run of each would be a skip. Otherwise a re-tune after the pilot would freeze a new APG*/LGR* with S7 targets and caps sized for the old one.
-   - It records in `runs/<id>/freeze.json` and `PROVENANCE.md`: the sha256 of this file, `config/selected.yaml`, `config/s7_targets.json`, `config/budget_calibration.yaml`, `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`; the analysis code (`src/ape/analyze_gate.py`, `src/ape/analysis/`) and `uv.lock`; the commit; the analysis-code commit; the APG pin; and the run's test-seed block (§4).
+   - It records in `runs/<id>/freeze.json` and `PROVENANCE.md`: the sha256 of this file; the run's own outputs `runs/<id>/config/selected.yaml`, `runs/<id>/config/s7_targets.json` and `runs/<id>/config/budget_calibration.yaml` (tune and pilot write them there, never to the repo's `config/`, so a later run cannot rewrite them); `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid.yaml`; the analysis code (`src/ape/analyze_gate.py`, `src/ape/analysis/`) and `uv.lock`; the commit; the analysis-code commit; the APG pin; the `APE_*` design knobs tune and pilot ran with; and the run's test-seed block (§4).
    - Commit `PROVENANCE.md` afterwards.
-4. Only then is the test split generated (`run_gate build-test`). It refuses unless every frozen file still matches its hash, and unless `src/`, `power/` and `uv.lock` are exactly the freeze commit's (scorers, generators, the agent loop and the adapters included). `test` refuses on the same conditions.
+4. Only then is the test split generated (`run_gate build-test`). It refuses unless every frozen file still matches its hash, unless `src/`, `power/` and `uv.lock` are exactly the freeze commit's (scorers, generators, the agent loop and the adapters included), and unless the design knobs are the frozen ones. `test` refuses on the same conditions.
 
 After the freeze, any change to this file, to a frozen file or to the code is a logged deviation (see the end of this document). `tune`, `pilot` and `anchor` refuse to re-run on a frozen run.
 
@@ -68,7 +68,7 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 | LGRo-* | diagnostic, optional | Oracle LightRAG custom KG |
 | S1 | diagnostic | Whole corpus in the system prompt |
 | S6 | diagnostic | Gold facts only |
-| S7 | diagnostic / placebo | Random chunks, sized per cell to APG*'s realized median context per compile on the pilot (`config/s7_targets.json`: [PILOT: S7 targets per cell]), capped at 50% of the corpus. S7 follows APG*'s delivery schedule (D-024): once per task for a per-query APG*, and a fresh random draw at every step for a per-step APG*, so it matches APG* both in what the model sees at each call and in what a sample delivers in total. |
+| S7 | diagnostic / placebo | Random chunks, sized per cell to APG*'s realized median context per compile on the pilot (`runs/<id>/config/s7_targets.json`: [PILOT: S7 targets per cell]), capped at 50% of the corpus. S7 follows APG*'s delivery schedule (D-024): once per task for a per-query APG*, and a fresh random draw at every step for a per-step APG*, so it matches APG* both in what the model sees at each call and in what a sample delivers in total. |
 
 **Delivery modes** (EXPERIMENT_AUDIT B3; decided D-016).
 - **push:** the harness compiles context (per query or per step) and hands it to the agent.
@@ -131,8 +131,8 @@ Every arm uses the same agent model, agent loop (`agent/kb_react.py`), system pr
 
 ## 5. Tuning (dev split only; equal budget)
 
-- **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.run_gate tune --run-id <id>`. Every configuration tried is logged in `runs/<id>/tune/tuning_log.jsonl`; a re-run archives the previous log beside it (`tuning_log.<UTC time>.jsonl`), and archived logs count toward PC6 and are reported. The selections go to `runs/<id>/tune/selected.yaml` and `config/selected.yaml`; the freeze hashes `config/selected.yaml`. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
-- **Selections** (`config/selected.yaml`, fixed at freeze): APG* = [PILOT: APG* selection]; LGR* = [PILOT: LGR* selection]; S3s = [PILOT: S3s selection].
+- **Budget.** Each system gets at most **N = 8** configurations, declared in advance in `config/tuning_grid.yaml` and evaluated on the same dev cells by `python -m ape.run_gate tune --run-id <id>`. Every configuration tried is logged in `runs/<id>/tune/tuning_log.jsonl`; a re-run archives the previous log beside it (`tuning_log.<UTC time>.jsonl`), and archived logs count toward PC6 and are reported. The selections go to `runs/<id>/tune/selected.yaml` and the run's `runs/<id>/config/selected.yaml`; the freeze hashes the latter. Selection: highest mean dev success; candidates within 1 pp go to the cheaper one.
+- **Selections** (`runs/<id>/config/selected.yaml`, fixed at freeze): APG* = [PILOT: APG* selection]; LGR* = [PILOT: LGR* selection]; S3s = [PILOT: S3s selection].
 - **Roles** (D-018, O-3):
   - APG owner: [USER: APG owner]
   - skeptic (not on the APG side; owns the LightRAG and S3s candidates): [USER: skeptic]
