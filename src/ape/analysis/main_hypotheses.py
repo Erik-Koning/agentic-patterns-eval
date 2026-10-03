@@ -277,7 +277,7 @@ TEST_TEXT = {
     "superiority": "one-sided superiority (H0 Δ ≤ 0)",
     "less": "one-sided (H0 Δ ≥ 0, H1 Δ < 0)",
     "ni": "one-sided non-inferiority (H0 Δ ≤ −margin)",
-    "tost": "equivalence, TOST (H0 |Δ| ≥ margin)",
+    "tost": "equivalence, TOST (H0 Δ ≤ −margin or Δ ≥ margin)",
     "descriptive": "estimate and intervals",
 }
 

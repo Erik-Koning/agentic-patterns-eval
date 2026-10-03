@@ -412,9 +412,10 @@ def _members(hyp: Hypothesis, **changes) -> Hypothesis:
     return replace(hyp, members=tuple(replace(m, **changes) for m in hyp.members))
 
 
-def alternatives(reps: int = 500, seed: int = 20261004, sigmas: Sigmas = Sigmas(), settings: Settings = Settings(), baselines: dict = BASELINES) -> list[dict]:
+def alternatives(reps: int = 500, seed: int = 20261004, sigmas: Sigmas = Sigmas(), settings: Settings = Settings(), baselines: dict = BASELINES, only: tuple[str, ...] | None = None) -> list[dict]:
     """Power under design changes that would fix the underpowered tests (each against the planned design's scenario):
-    more test worlds for the same tasks, more tasks, wider equivalence / NI margins, fewer Holm members, pooling cells."""
+    more test worlds for the same tasks, more tasks, wider equivalence / NI margins, fewer Holm members, pooling cells.
+    `only`: run the cases whose name contains one of these strings."""
     from .main_hypotheses import get
 
     sizes = planned_sizes()
@@ -423,7 +424,14 @@ def alternatives(reps: int = 500, seed: int = 20261004, sigmas: Sigmas = Sigmas(
     h6 = get("H6")
     h6_pooled = replace(h6, members=(replace(h6.members[0], id="H6.pooled", cells=TIER_CELLS),))
     k2_ni_only = replace(get("K2"), members=get("K2").members[1:])
+    k2 = get("K2")
+    k2_ni_pooled = lambda margin: replace(k2, members=(replace(k2.members[1], id="K2.ni-pooled", cells=STUDY_B_CELLS, margin=margin),))  # noqa: E731
     cases = [
+        ("M2 frontier at +0.10, 20 worlds", get("M2"), sc["M2"]["M1 − S8@M1 = +0.10 (M1 > S1)"], replace(settings, worlds=20), sizes),
+        ("M3 at 0, margin ±6 pp", _members(get("M3"), margin=0.06), sc["M3"]["M7 − S8@M7 = +0.00"], settings, sizes),
+        ("M5 at 0, margin ±6 pp", _members(get("M5"), margin=0.06), sc["M5"]["M2 − M1k = +0.00"], settings, sizes),
+        ("K2 NI pooled over Study B, own family, margin 3 pp", k2_ni_pooled(0.03), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
+        ("K2 NI pooled over Study B, own family, margin 5 pp", k2_ni_pooled(0.05), sc["K2"]["interaction -0.10; S5 = M2"], settings, sizes),
         ("M1 at +0.10, 20 worlds (same 100 tasks)", get("M1"), sc["M1"]["M1 − S9 = +0.10"], replace(settings, worlds=20), sizes),
         ("M1 at +0.10, 200 tasks over 9 worlds", get("M1"), sc["M1"]["M1 − S9 = +0.10"], settings, scale_sizes(sizes, 2)),
         ("M2 frontier at +0.10, 200 tasks", get("M2"), sc["M2"]["M1 − S8@M1 = +0.10 (M1 > S1)"], settings, scale_sizes(sizes, 2)),
@@ -440,6 +448,8 @@ def alternatives(reps: int = 500, seed: int = 20261004, sigmas: Sigmas = Sigmas(
     ]
     out = []
     for i, (name, hyp, scen, st, sz) in enumerate(cases):
+        if only and not any(o in name for o in only):
+            continue
         res = simulate_family(hyp, scen, reps, seed + 100 * i, sigmas, st, sz)
         out.append({"case": name, "family": hyp.id, "scenario": scen.name} | res)
     return out

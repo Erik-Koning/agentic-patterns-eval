@@ -151,4 +151,5 @@ def test_the_hypothesis_table_is_the_single_source_and_follows_d028():
     assert all(r["margin"] == 0.03 for r in rows if r["test"] in ("ni", "tost"))
     md = render_hypothesis_table()
     assert all(h.id in md for h in HYPOTHESES)
+    assert {line.count("|") for line in md.strip().splitlines()} == {10}, "no cell breaks the markdown table"
     json.dumps(rows, allow_nan=False)
