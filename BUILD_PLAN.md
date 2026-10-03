@@ -93,3 +93,20 @@ The gate can run live at any time during this build. The main study needs the ga
 ## 5. Out of scope (Tier B/C)
 
 F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data hooks that exist; M3–M6, M7-R0, M8 and M9; and the external benchmarks deferred by decision 5.
+
+## 6. Progress
+
+| Package | Status | Notes |
+|---|---|---|
+| Seam | ✅ 4fbb68b, a85799f | `main_study` covers F1/F2/F3/F7; `agent/solvers.arm_solver` dispatch point; S5 = the gate's KG arm (`APE_KG_ARM`); `ape.build` takes seed_base and F8 knobs |
+| B1 + B6 | 🔄 building | |
+| B2 | 🔄 building | |
+| B4 | 🔄 building (statistics core; run-dir glue after B1) | D-029 method |
+| B7 | ✅ merged efe6158 | D-030 |
+| B8 | 🔄 building | |
+| B10 | 🔄 building (statistics core; run-dir glue after B1) | D-029 method |
+| B3, B5, B9, B11, B12 | ⏳ waiting on dependencies | |
+
+**Follow-ups found during the build** (must be done before any paid run):
+- **Spend misses errored attempts** (D-030): Inspect drops the usage of a sample's errored attempts under `retry_on_error`, so `ape.budget`/`ape.spend` undercount. Fix: count every model call's usage as it happens (e.g. an Inspect hook) or add the recorded lost usage; for sessions add `f8_resume.unlogged`.
+

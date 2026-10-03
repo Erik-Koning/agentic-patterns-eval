@@ -323,6 +323,21 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Study G:** sessions are the clusters. G-H1's slope is a session-clustered regression of per-session paired differences on measured capability; G-H2's equivalence and slopes and G-H3's shares likewise.
 - **GLMM:** `statsmodels` `BinomialBayesMixedGLM` (variational Bayes; no new dependency) fits the brief's `success ~ arm * log_knob + (1 | task) + (1 | task:arm)` and Study G's `success ~ topology * capability + (1 | session) + (1 | item)` as descriptive models only. No claim rests on them.
 
+**D-030 (2026-10-03, BUILD_PLAN B7: Study G session runner).** Choices made while building the ContextPolicy layer and mid-session resume (`agent/context_policy.py`, `agent/session_checkpoint.py`).
+- **Thresholds and the window.**
+  - T_abs is level-triggered: the policy's `on_threshold` hook runs before every call whose view exceeds it, measured on the harness meter (o200k over message text and tool calls; tool schemas excluded). Inspect-based arms force compaction from this hook instead of using Inspect's own threshold, which counts tokens differently.
+  - W applies to management (`cm`) inputs as well as agent views. A management overflow at an item boundary fails from the next item; the item that just ended still counts. Probes are not W-checked.
+  - A policy's extra tool schemas (e.g. `todo_write`, ~800 tokens) are not counted against W or T, like every other tool schema; their size is recorded (`policy_tool_tokens`).
+- **Records.** Every call carries a kind (agent, cm, probe), its model and its usage. Management calls and probes at a boundary are attributed to the item that just ended, session-start calls to item 0 and report-phase calls to N+1. At a boundary the order is: the policy's `after_item`, then the probe (it sees the post-boundary view), then the checkpoint. Policy tool calls are logged with `policy: true` and ignored by the scorers.
+- **Knobs.** Policy knobs are environment variables `APE_CM_<KNOB>`, recorded in task metadata and in the checkpoint key; each env group needs its own log directory (as for every APE_* knob). `threshold` is a task arg so tuning candidates can vary it. The knob variant stays `variant` (= `gen_f8.variant_tag(knobs)`).
+- **Resume** (`APE_SESSION_CHECKPOINTS=<dir>`, one per run):
+  - Inspect's own sample checkpointing was not used: it resumes only on task-level retries (not `retry_on_error`), needs a restic binary and changes the eval config.
+  - A checkpoint is saved at session start and after every completed item. The interrupted item reruns from its first call, so a resumed session is not bit-identical to an uninterrupted one; `f8_resume` and the score metadata record every resume.
+  - The key hashes the configuration and the source of the session modules, so any change, including a code edit between a crash and its retry, starts a fresh session.
+  - Checkpoints are deleted when a session ends normally, overflows or hits an Inspect limit.
+- **Inspect 0.3.273 facts that change the audit's plan** (CONTEXT_MANAGEMENT_AUDIT §6): `todo_write()` stores nothing; `memory()` keeps files in the sample store, which a resume does not restore unless the policy carries them; Inspect's Summary strategy makes an internal call our per-call meter cannot see, so CM-sum uses our own F8 prompt through the metered `cm` path; CM-native raises where the provider lacks support.
+- **Known gap, to fix before any paid run (tracked in BUILD_PLAN §6):** Inspect logs a sample's usage only for its last attempt, so the usage of errored attempts under `retry_on_error` appears in no log, for every task. Spend accounting (`ape.budget`, `ape.spend`) undercounts by that amount. Sessions record the lost usage (`f8_resume.unlogged`); other tasks do not yet.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
