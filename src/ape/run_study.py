@@ -17,7 +17,8 @@ Phases (`all` runs a study's in order and stops at the first failure; a failed o
                  every model, the APG pin); the arms each phase names that are not built yet; live: a passing live smoke
                  of this code (`run_gate._settle_smoke`, plus the study's own required checks, `Study.smoke_checks`) and
                  storage warnings. A dirty tree is a warning.
-    build-dev    the dev worlds the study tunes on (`world_specs`) and the artifacts its arms read (`arm_kinds`).
+    build-dev    the dev worlds the study tunes on (`world_specs`) and the artifacts its arms read (`arm_kinds`). Live, it
+                 refuses a builder other than the gate run's when it would touch the gate's shared dev worlds.
     micro-pilot  the run_plan `micro_pilot` cells on the pilot split, after building every pilot world. Main: B0, the
                  median realized total tokens of S1 per task cell (`b0_from_logs`), and the token caps, CAP_MULTIPLE x
                  B0 (ORCHESTRATOR_BRIEF_v2 §4.5) -> the run's config/token_caps.json. The cost model is recalibrated
@@ -71,7 +72,8 @@ The KG arm (S5, and the KG workers of M1k and M2; `agent.arms.kg_arm_name`). `--
 gate run: GO (any GO label) -> its APG*, NO_GO -> its LGR*, with that selection's knobs (the gate run's selected.yaml),
 set as APE_KG_ARM and the knobs for every phase (`kg_resolution`). A live run refuses without a live gate run whose
 verdict is final; offline defaults to APG-s with the fake author's graphs (an offline gate run's LightRAG arm is its
-oracle twin, `run_gate.OFFLINE_ARMS`). The resolution is in every manifest's params and in the freeze, which hashes
+oracle twin, `run_gate.OFFLINE_ARMS`). run.json records the gate run at the run's first phase, so a later invocation
+may omit the flag, and one naming another gate run is refused (`settle_gate_run`). The resolution is in every manifest's params and in the freeze, which hashes
 the gate run's selected.yaml, decision.json and freeze.json. The KG arm's system (APG or LightRAG) is the one the
 builds make for the KG cells (BUILD_PLAN B6: `main.build.kg`, with the build-quality check per build phase, F1 included).
 
@@ -317,14 +319,30 @@ def _show(path: Path) -> str:
 
 
 def _check_mode(run: StudyRun) -> None:
-    """A run is offline or live, and of one study, for its whole life (run.json)."""
+    """A run is offline or live, of one study, and takes its KG arm from one gate run, for its whole life (run.json)."""
     path = run.dir / "run.json"
     if path.is_file():
         info = json.loads(path.read_text())
         if bool(info.get("offline")) != run.offline:
             raise PhaseError(f"run {run.run_id!r} is {'an offline' if info.get('offline') else 'a live'} run ({_show(path)}); use another --run-id")
+        if run.gate_run_id and not info.get("gate_run_id"):
+            rg.update_run_info(run, gate_run_id=run.gate_run_id, gate_runs_dir=_show(run.gate_runs_root))
         return
-    rg._write_json(path, {"run_id": run.run_id, "study": run.study, "offline": run.offline, "created": rg._now(), "config_dir": _show(run.config_dir), "git": rg.git_state()})
+    gate = {"gate_run_id": run.gate_run_id, "gate_runs_dir": _show(run.gate_runs_root)} if run.gate_run_id else {}
+    rg._write_json(path, {"run_id": run.run_id, "study": run.study, "offline": run.offline, "created": rg._now(), "config_dir": _show(run.config_dir), "git": rg.git_state()} | gate)
+
+
+def settle_gate_run(run: StudyRun) -> None:
+    """The gate run a study run took its KG arm from, recorded in run.json at its first phase: a later invocation
+    without --gate-run-id uses it, and one naming another gate run is refused (a new KG arm is a new run)."""
+    info = rg.read_run_info(run)
+    recorded = info.get("gate_run_id")
+    if not recorded:
+        return
+    if run.gate_run_id and run.gate_run_id != recorded:
+        raise PhaseError(f"run {run.run_id!r} takes its KG arm from gate run {recorded!r} (run.json), not {run.gate_run_id!r}; a new KG arm is a new --run-id")
+    if not run.gate_run_id:
+        run.gate_run_id, run.gate_runs_root, run._kg = recorded, rg._resolve(info.get("gate_runs_dir") or _show(run.gate_runs_root)), None
 
 
 # --- Plan, profiles, scale ---------------------------------------------------------------------------
@@ -1169,6 +1187,22 @@ def _build_dev(run: StudyRun, record: dict) -> None:
     build_world_set(run, record, "build-dev", "dev")
 
 
+def _refuse_other_builder(run: StudyRun) -> str | None:
+    """Live: the shared gate dev worlds' KG artifacts were authored by the gate run's builder (D-017: the profile's, or
+    the fallback under APE_BUILD_FALLBACK=1). A study building them with another builder would re-author them in place,
+    rewriting the gate's artifacts, so build-dev refuses until the builders agree."""
+    if run.offline or not run.gate_run_id or not any(s.get("shared") and s["kinds"] for s in world_specs(run, "dev")):
+        return None
+    gate = rg.read_manifest(rg.GateRun(run.gate_run_id, runs_root=run.gate_runs_root), "build-dev") or {}
+    theirs, ours = (gate.get("params") or {}).get("builder") or {}, build_params(run)
+    if theirs and (theirs.get("model"), theirs.get("effort")) != (ours["model"], ours["effort"]):
+        return (
+            f"build-dev: gate run {run.gate_run_id!r} built the shared dev worlds with {theirs.get('model')} ({theirs.get('effort')}), this run would "
+            f"build with {ours['model']} ({ours['effort']}) and re-author the gate's artifacts; set APE_BUILD_FALLBACK as the gate run did"
+        )
+    return None
+
+
 def _build_dev_projected(run: StudyRun) -> float:
     return project(run, kg_build_cell(run, "dev"))  # shared gate dev worlds are the gate's (already built)
 
@@ -1410,6 +1444,14 @@ def _tune(run: StudyRun, record: dict) -> None:
         path.write_text(text)
     record["outputs"] |= {"selected": _show(tdir / "selected.yaml"), "selected_config": _show(run.selected_path)}
     record["selected"] = selected
+    # PC6-style completeness (the gate's check, on the study's systems): a record for every declared candidate, no
+    # more configurations than budget_per_system (archived logs included), each selection logged as selected.yaml.
+    from .analyze_gate import pc6
+
+    completeness = pc6(tdir, grid, _load_grid(run), selected, [(name, name) for name in grid["systems"]])
+    record["tuning_completeness"] = {k: completeness[k] for k in ("pass", "value", "threshold", "reason")} | {"systems": completeness["details"].get("systems")}
+    if not completeness["pass"]:
+        record["warnings"].append(f"tuning completeness (PC6-style) fails: {completeness['reason']}")
     if grid.get("placeholder"):
         record["warnings"].append(f"{run.grid_name} is a placeholder grid (BUILD_PLAN B3/B11 write the real one); a live tune refuses it")
     if skipped:
@@ -1969,7 +2011,7 @@ def phase_defs(study: str) -> dict[str, rg.Phase]:
         "preflight": rg.Phase("preflight", _preflight, inputs=lambda r: _cfg_inputs(r, "models.yaml", "model_costs.yaml", "run_plan.yaml"), params=_preflight_params, projected=lambda r: 0.0, profile=study_profile),
         "build-dev": rg.Phase(
             "build-dev", _build_dev, inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml", r.grid_name), params=lambda r: _build_params(r, "dev"),
-            projected=_build_dev_projected, profile=study_profile, requires=("preflight",),
+            projected=_build_dev_projected, profile=study_profile, requires=("preflight",), refuse=_refuse_other_builder,
         ),
         "micro-pilot": rg.Phase(
             "micro-pilot", _micro_pilot, inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml", "model_costs.yaml"), params=_micro_pilot_params,
@@ -2175,6 +2217,7 @@ def run_phases(run: StudyRun, phase: str) -> dict[str, str]:
     names = run.spec.phases if phase == "all" else (phase,)
     if unknown := [n for n in names if n not in PHASE_DEFS[run.study]]:
         raise PhaseError(f"unknown phase(s) {unknown} for {run.study}; its phases are {list(run.spec.phases)} or all")
+    settle_gate_run(run)
     statuses: dict[str, str] = {}
     with run_environment(run):
         for name in names:

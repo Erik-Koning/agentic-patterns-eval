@@ -234,6 +234,20 @@ def test_the_kg_arm_follows_the_gate_runs_verdict_and_selection(clean_env, monke
         pass
 
 
+def test_a_run_keeps_the_gate_run_its_kg_arm_came_from(clean_env):
+    gates = clean_env / "gates"
+    _fake_gate_run(gates, "g-go", "GO")
+    _fake_gate_run(gates, "g-nogo", "NO_GO")
+    first = StudyRun("main", "m", runs_root=clean_env / "runs", gate_run_id="g-go", gate_runs_root=gates)
+    run_study._check_mode(first)
+    assert run_gate.read_run_info(first)["gate_run_id"] == "g-go"
+    later = StudyRun("main", "m", runs_root=clean_env / "runs")  # no --gate-run-id: the recorded one
+    run_study.settle_gate_run(later)
+    assert later.gate_run_id == "g-go" and run_study.kg_resolution(later)["arm"] == "APG-q"
+    with pytest.raises(PhaseError, match="takes its KG arm from gate run 'g-go'.*not 'g-nogo'"):
+        run_phases(StudyRun("main", "m", runs_root=clean_env / "runs", gate_run_id="g-nogo", gate_runs_root=gates), "preflight")
+
+
 def test_a_changed_gate_selection_changes_the_phases_fingerprints(clean_env):
     runs = clean_env / "runs"
     d = _fake_gate_run(runs, "g-go", "GO")
@@ -324,7 +338,9 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
     run = _run(offline, "main")
     selected = yaml.safe_load(run.selected_path.read_text())
     assert set(selected) == {"S3s"} and selected["S3s"]["arm"] == "S3s", "the placeholder grid tunes S3s only"
-    assert _manifest(run, "tune")["warnings"] and "placeholder" in _manifest(run, "tune")["warnings"][0]
+    tune = _manifest(run, "tune")
+    assert any("placeholder" in w for w in tune["warnings"])
+    assert tune["tuning_completeness"]["pass"] is True and tune["tuning_completeness"]["systems"]["S3s"]["logged"] == ["s3s-1000", "s3s-2000"], "PC6-style"
     kg = _manifest(run, "test")["kg"]
     assert kg["arm"] == "APG-s" and kg["system"] == "apg" and read_freeze(run)["kg"]["arm"] == "APG-s"
     targets = json.loads(run.s7_targets_path.read_text())
@@ -473,6 +489,19 @@ def test_main_builds_cover_the_kg_cells_and_share_the_gates_dev_worlds(clean_env
     assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == ["chunks", "apg"]
     assert "shared" not in dev["F1-32"] and dev["F1-32"]["kinds"] == [] and dev["F1-32"]["seed_base"] == 1000
     assert run_study.kg_worlds(live, "dev") == {}, "shared dev worlds are the gate's: not projected again"
+
+
+def test_a_live_build_dev_refuses_another_builder_than_the_gate_runs(clean_env):
+    _fake_gate_run(clean_env / "gates", "g-go", "GO")
+    run = StudyRun("main", "b", runs_root=clean_env / "runs", gate_run_id="g-go", gate_runs_root=clean_env / "gates")
+    assert run_study._refuse_other_builder(run) is None, "no gate build-dev record: nothing to compare"
+    ours = run_study.build_params(run)
+    gate_manifest = clean_env / "gates" / "g-go" / "build-dev" / "manifest.json"
+    run_gate._write_json(gate_manifest, {"phase": "build-dev", "status": "done", "params": {"builder": ours}})
+    assert run_study._refuse_other_builder(run) is None
+    run_gate._write_json(gate_manifest, {"phase": "build-dev", "status": "done", "params": {"builder": {"model": "gpt-6-sol", "effort": "medium", "fallback": True}}})
+    assert "re-author the gate's artifacts; set APE_BUILD_FALLBACK as the gate run did" in run_study._refuse_other_builder(run)
+    assert run_study._refuse_other_builder(StudyRun("main", "b", offline=True, runs_root=clean_env / "runs")) is None, "offline builds are the run's own"
 
 
 def test_a_shared_dev_world_is_never_overwritten(clean_env, monkeypatch):
