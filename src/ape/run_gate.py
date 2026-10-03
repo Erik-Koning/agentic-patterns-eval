@@ -224,7 +224,7 @@ from typing import Any
 
 import yaml
 
-from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, program_remaining, projected_cost, remaining, require_affordable
+from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, program_remaining, projected_cost, remaining, require_affordable, usage_ledgers
 from .build_quality import worlds_per_cell_note
 from .config import ROOT, Config, embedding_cache
 from .freeze_scope import ConfigSlice, config_input
@@ -791,24 +791,30 @@ def run_log_files(run: GateRun) -> list[str]:
     return sorted(str(p) for p in run.dir.rglob("*.eval"))
 
 
-SPEND_KEYS = ("registry", "inspect_usd", "ledger_usd", "spent_usd", "by_study", "partial_logs", "unfinished_dirs", "missing", "unreadable")
+SPEND_KEYS = (
+    "registry", "inspect_usd", "unlogged_usd", "ledger_usd", "spent_usd", "by_study", "usage_ledger_usd", "final_attempt_diff_usd", "partial_logs",
+    "unfinished_dirs", "missing", "unreadable",
+)  # fmt: skip
 
 
 def spend(run: GateRun) -> dict:
     """The guard's view: the whole program's spend (`ape.budget.program_remaining` over the spend registry; offline
     runs have their own registry under work/) against the plan's budget, or a lower `run.budget_usd`. Also this
-    run's own spend (its logs plus the ledger it writes to): `run_spent_usd`."""
+    run's own spend (its logs, what their usage ledgers add, and the build ledger it writes to): `run_spent_usd`. Spend
+    counts what no Inspect log holds, from each log dir's usage ledger (`ape.usage_ledger`: errored attempts Inspect
+    retried, a killed run's in-flight samples; `unlogged_usd`)."""
     budget = float(plan(run).budget["total_usd"])
     if run.budget_usd is not None:
         budget = min(budget, run.budget_usd)  # an override may only lower the plan's budget, never raise it
     program = program_remaining(budget, None, run.costs_path)
-    mine = remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path)
+    mine = remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path, usage_ledgers(run.dir))
     return {
         "budget_usd": program["budget_usd"],
         "spent_usd": program["spent_usd"],
         "remaining_usd": program["remaining_usd"],
         "run_spent_usd": mine["spent_usd"],
         "run_inspect_usd": mine["inspect_usd"],
+        "run_unlogged_usd": mine["unlogged_usd"],
         "run_ledger_usd": mine["ledger_usd"],
         "program": {k: program[k] for k in SPEND_KEYS},
     }
@@ -818,11 +824,11 @@ def prior_attempt_spend(run: GateRun, name: str, old: dict | None, fingerprint: 
     """$ that earlier attempts of this phase with the same fingerprint already spent on its current work (a resume
     after a crash, a failure or a budget stop, or a --force re-run): `ape.runner` reuses their finished eval logs and
     `ape.artifacts` their current artifacts, so the guard should project only the rest. It is the Inspect spend of
-    the eval logs under the phase's directory written since the first such attempt, plus the build/embedding
-    ledger's entries since then. 0 for a first run or changed inputs (new work: new log dirs, new artifacts).
-    An approximation: a retried sample's first, wasted attempt is credited too, and a concurrent run's ledger
-    entries in that window would be."""
-    from .budget import ledger_spend, logs_spend
+    the eval logs under the phase's directory written since the first such attempt, what their usage ledgers add
+    since then (errored attempts), plus the build/embedding ledger's entries since then. 0 for a first run or
+    changed inputs (new work: new log dirs, new artifacts). An approximation: a concurrent run's ledger entries in
+    that window would be credited too."""
+    from .budget import ledger_spend, logs_spend, unlogged_spend
 
     if not old or old.get("fingerprint") != fingerprint:
         return 0.0
@@ -832,18 +838,22 @@ def prior_attempt_spend(run: GateRun, name: str, old: dict | None, fingerprint: 
         return 0.0
     t0 = datetime.fromisoformat(since).timestamp()
     logs = [p for p in run.phase_dir(name).rglob("*.eval") if p.stat().st_mtime >= t0]
-    return logs_spend(logs)["inspect_usd"] + ledger_spend(Config().ledger_path, run.costs_path, since=t0)
+    unlogged = unlogged_spend(logs, usage_ledgers(run.phase_dir(name)), since=t0)["unlogged_usd"]
+    return logs_spend(logs)["inspect_usd"] + unlogged + ledger_spend(Config().ledger_path, run.costs_path, since=t0)
 
 
 def verify_offline(run: GateRun) -> dict:
-    """Offline runs must not have called any real model: every log's models mockllm, the ledger empty."""
+    """Offline runs must not have called any real model: every log's models, and every call the usage ledgers
+    recorded, mockllm; the build ledger empty."""
     from .llm.ledger import Ledger
+    from .usage_ledger import read_entries
 
     models: set[str] = set()
     for index in run.dir.rglob(INDEX_NAME):
         for entry in json.loads(index.read_text()).get("tasks", {}).values():
             models.add(str(entry.get("model")))
             models.update(str(m) for m in (entry.get("model_roles") or {}).values())
+    models.update(str(e.get("model")) for e in read_entries(usage_ledgers(run.dir)))
     ledger = Config().ledger_path
     entries = Ledger(ledger).read() if ledger.is_file() else []
     problems = [f"eval logs used non-mock model(s) {sorted(m for m in models if not m.startswith('mockllm/'))}"] if any(not m.startswith("mockllm/") for m in models) else []
@@ -2759,10 +2769,13 @@ def group_done(log_dir: Path, g: dict) -> bool:
 
 
 def group_spent(log_dir: Path) -> float:
-    """Inspect $ the group's eval logs already hold (each sample once)."""
-    from .budget import logs_spend
+    """$ the group's eval set already spent: its logs (each sample once) and what its usage ledger adds."""
+    from .budget import logs_spend, unlogged_spend
 
-    return logs_spend(sorted(log_dir.rglob("*.eval")))["inspect_usd"] if log_dir.is_dir() else 0.0
+    if not log_dir.is_dir():
+        return 0.0
+    logs = sorted(log_dir.rglob("*.eval"))
+    return logs_spend(logs)["inspect_usd"] + unlogged_spend(logs, usage_ledgers(log_dir))["unlogged_usd"]
 
 
 def group_remaining(run: GateRun, g: dict, projected: float) -> float:
