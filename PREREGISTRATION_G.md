@@ -54,10 +54,10 @@ The rows of `ape.analysis.g_hypotheses.HYPOTHESES`, the single source of this se
 <!-- BEGIN GENERATED: g_hypotheses.markdown() -->
 | ID | Role | Family (step) | Arms | Estimand | Test | Margin |
 |---|---|---|---|---|---|---|
-| G-H1 | descriptive | G-H1 | M2, S-CM*, S1 | Slope of the per-session gap Δ_s = logit(M2) − logit(S-CM*) on measured capability (OLS over sessions), and the change along the fitted line over the capability span, at Luna-low, Luna-high and Sol-high (S-CM* does not run at Astra). Sensitivity: S1-pre (M2 − S1 on the items before S1's overflow; all four points). S1 as scored is reported only descriptively. | estimate with 95% session-clustered t and session-bootstrap intervals; no decision (D-033) | – |
+| G-H1 | descriptive | G-H1 | M2, S-CM*, S1 | Slope of the per-session gap Δ_s = logit(M2) − logit(S-CM*) on measured capability (OLS over sessions), and the change along the fitted line over the capability span, at Luna-low, Luna-high and Sol-high (S-CM* does not run at Astra). Sensitivity: S1-pre (M2 − S1 on the items before S1's overflow; all four points). S1 as scored is reported only descriptively. Sensitivity (D-043): the same with capability replaced by the tier rank (Luna-low < Luna-high < Sol < Astra, equally spaced). | estimate with 95% session-clustered t and session-bootstrap intervals; no decision (D-033) | – |
 | G-H1-M1 | descriptive | G-H1 | M1, S-CM*, S1 | As G-H1 with M1 (Luna-low, Luna-high and Sol-high). | estimate with interval | – |
 | G-H2a | confirmatory | G-H2-gap | O-state, CM0 | Per point: mean over sessions of s(O-state) − s(CM0), item success rate, N = 40 (Astra 24). | intersection-union: one-sided session-clustered t at α at every point (no multiplicity adjustment); exact sign-flip reported | 0 (pp) |
-| G-H2b | descriptive | G-H2 | CM-sum, CM-todo, O-state, CM0 | θ_x = slope of R_x,c = (s_x − s_CM0) / (s_O − s_CM0) on measured capability × the capability span (per-point ratio estimators, linearised per session). Sensitivity: the gain s_x − s_CM0 on the logit scale. | estimate with 95% session-clustered interval; no decision (D-033) | – |
+| G-H2b | descriptive | G-H2 | CM-sum, CM-todo, O-state, CM0 | θ_x = slope of R_x,c = (s_x − s_CM0) / (s_O − s_CM0) on measured capability × the capability span (per-point ratio estimators, linearised per session). Sensitivities: the gain s_x − s_CM0 on the logit scale; and (D-043) capability replaced by the tier rank (Luna-low < Luna-high < Sol < Astra, equally spaced). | estimate with 95% session-clustered interval; no decision (D-033) | – |
 | G-H2c | descriptive | G-H2 | CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state, CM0 | R_x,c with delta-method, Fieller and session-bootstrap intervals; undefined when the headroom is ≤ 2 pp. | intervals only | – |
 | G-H2d | descriptive | G-H2 | CM0, O-state, CM-prune, CM-sum, CM-todo, CM-reset, CM-native | Logistic slopes with session-clustered intervals; Gap(N = 40) − Gap(N = 10) at Luna-high (Welch over sessions). | intervals only | – |
 | G-H3-pre | confirmatory | G-H3 (1) | M2, S1 | Mean over Luna-low, Luna-high and Sol-high (equal weights) of the per-session M2 − S1, item success rate. | one-sided session-clustered t | 0 (pp) |
@@ -66,7 +66,7 @@ The rows of `ape.analysis.g_hypotheses.HYPOTHESES`, the single source of this se
 | G-H3-spec | descriptive | G-H3 | M1, M2, S1 | Ratio of pooled mean differences. | intervals only | – |
 | G-D1 | descriptive | descriptive | all session arms | Mean probe F1 (a missed checkpoint scores 0) with session-clustered intervals. | intervals only | – |
 | G-D2 | descriptive | descriptive | all session arms | Label counts and rates per item. | counts only | – |
-| G-D3 | descriptive | descriptive | all session arms | Posterior means and SDs (statsmodels BinomialBayesMixedGLM, variational Bayes). | none | – |
+| G-D3 | descriptive | descriptive | all session arms | Posterior means and SDs (statsmodels BinomialBayesMixedGLM, variational Bayes); long sessions only (the N = 10 control is left out). | none | – |
 <!-- END GENERATED: g_hypotheses.markdown() -->
 
 Plan cells (`config/run_plan.yaml`), level, and planned power or precision. Power comes from `ape.analysis.g_power` at the D-033 design with D-038's df rule, through the real analysis path:
@@ -74,18 +74,18 @@ Plan cells (`config/run_plan.yaml`), level, and planned power or precision. Powe
 <!-- BEGIN GENERATED: g_hypotheses.design_markdown() -->
 | ID | Plan cells | One-sided α | Planned power and precision |
 |---|---|---|---|
-| G-H1 | g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive. g_power at the D-033 design: its 95% interval covers the true 0 in 95.6% of null studies (S1-pre 94.8%); the change over the span has SD 0.29 logit (0.37 before D-033; S1-pre 0.36), so the interval excludes 0 in 26% of studies when M2's advantage falls 0.9 → 0 across the points (S1-pre 39%). Under a constant mechanism the S-CM* estimate drifts +0.24 and S1's +0.67 (CM0's overflow rule); S1-pre's does not. |
+| G-H1 | g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive. g_power at the D-033 design: its 95% interval covers the true 0 in 95.6% of null studies (S1-pre 94.8%); the change over the span has SD 0.29 logit (0.37 before D-033; S1-pre 0.36), so the interval excludes 0 in 26% of studies when M2's advantage falls 0.9 → 0 across the points (S1-pre 39%). Under a constant mechanism the S-CM* estimate drifts +0.24 and S1's +0.67 (CM0's overflow rule); S1-pre's does not. Tier order (D-043): the S-CM* interval covers 0 in 95.2% of null studies and the change over the tier steps spanned has SD 0.31 logit (S1-pre 0.40); it excludes 0 in 30% of studies under the same convergence (S1-pre 42%). |
 | G-H1-M1 | g.topo.luna-low, g.topo.luna, g.topo.sol | – (descriptive) | – |
-| G-H2a | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | 0.025 | Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test there (D-032). g_power: type I 0.020–0.024 per point (10,000 studies); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies. |
-| G-H2b | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive (the TOST at ±0.20 R had power 0.01; 80% would need ±0.46). The gain on the logit scale drifts +0.16 to +0.22 over the span under a constant R_x, because of CM0's overflow rule. g_power: θ has SD 0.14 R; its 95% interval covers 0 in 95% of studies at a constant R_x and excludes 0 in 20% when R_x falls by 0.2 over the span. |
+| G-H2a | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | 0.025 | Decided over the plan's points: a planned point without paired sessions makes it INCOMPLETE, never SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test there (D-032). g_power: type I 0.020–0.024 per point (10,000 studies); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies. |
+| G-H2b | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive (the TOST at ±0.20 R had power 0.01; 80% would need ±0.46). The gain on the logit scale drifts +0.16 to +0.22 over the span under a constant R_x, because of CM0's overflow rule. g_power: θ has SD 0.14 R; its 95% interval covers 0 in 95% of studies at a constant R_x and excludes 0 in 20% when R_x falls by 0.2 over the span. Tier order (D-043): SD 0.15 R, covering 0 in 96% of studies at a constant R_x and excluding it in 22% under that fall. |
 | G-H2c | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | – (descriptive) | – |
 | G-H2d | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10 | – (descriptive) | CM0 fails every item after its overflow, so 'gains grow with length' holds for CM0 by construction; the slopes of the managed arms and O-state carry the information. |
-| G-H3-pre | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp). |
+| G-H3-pre | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | Pools the plan's points; a planned point without ≥ 2 sessions of all four arms makes G-H3-pre, G-H3a and G-H3b INCOMPLETE, never SUPPORTED. g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp). |
 | G-H3a | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | g_power (D-033 design): type I 0.026 at a share of 0.5 (10,000 studies); power 0.997 at 0.75, 0.996 at 0.80, 0.90 at 0.70, 0.66 at 0.65 (0.95 / 0.68 at 0.80 / 0.70 with σ_arm 0.6). Before D-033: 0.84 at 0.75. |
 | G-H3b | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7). g_power (D-033 design): type I 0.027 (recovery at 0.8) and 0.026 (cost at 0.6) over 16,000 studies, 0.006 with both clauses at their margins; power 0.69 at recovery 0.95 and cost ratio 0.45, 0.37 at 0.90 / 0.50, 0.11 at 0.85 / 0.55 (the cost clause alone ≥ 0.99 at ≤ 0.5). With 24 Luna sessions per point 0.76; with 12 Sol sessions 0.74. Before D-033: 0.38. |
 | G-H3-spec | g.topo.luna-low, g.topo.luna, g.topo.sol | – (descriptive) | – |
-| G-D1 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
-| G-D2 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
+| G-D1 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
+| G-D2 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
 | G-D3 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
 <!-- END GENERATED: g_hypotheses.design_markdown() -->
 
@@ -136,7 +136,7 @@ No decision rests on these. Each is an estimate with its 95% interval (session-c
   - The TOST at ±0.20 R is still computed but not decided (its power was 0.01).
   - Sensitivity: the gain s_x − s_CM0 on the logit scale. It drifts +0.16 to +0.22 over the span under a constant R_x.
   - Precision: θ has an SD of 0.14 R.
-- **G-H2c (headroom recovered).** R_x,c per strategy and point, with delta-method, Fieller and bootstrap intervals; undefined when the headroom is ≤ 2 pp. CM-sum and CM-todo run at every point, CM-prune at Luna-high and Sol-high, CM-reset and CM-native at Luna-high (§3.5).
+- **G-H2c (headroom recovered).** R_x,c per strategy and point, with delta-method, Fieller and bootstrap intervals; undefined when the headroom is ≤ 2 pp. CM-sum and CM-todo run at every point, CM-prune and CM-reset at Luna-high, CM-native at Luna-high and Sol-high (§3.5, D-043).
 - **G-H2d (length).**
   - Per arm × point: logistic slopes of item success on log(view tokens at the decision call), on relative position, and on both with their interaction. The intervals are session-clustered (sandwich), and items lost to overflow are left out (audit §5.2).
   - The gain over CM0 before and after the reference W crossing.
@@ -215,11 +215,11 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 | **CM0** | The full, append-only history: no context management. The reference arm; its degradation slope per point is the absorption signal. | — | none | every `g.cm.*` cell |
 | **S1** | CM0 under its topology name (D-040): identical records and score. (The capability anchor's S1 is the agent-task arm, §5.2.) | — | none | every `g.topo.*` cell |
 | **O-state** | An oracle: the system prompt, the start message, the generator's true shift state after the previous case, and the current case's messages. The state (`render_oracle_state`) lists the pending cases, the memos in force with their text, the approvals per customer, the open follow-ups, the escalations, and the completed cases with their gold decisions. Not a real system: the upper bound that defines Gap_T and R_x. | — | none | every `g.cm.*` cell |
-| **CM-prune** | Inspect `CompactionEdit` at T_abs: among the completed cases, the results of all but the last k tool uses become "(Tool result removed)"; the tool calls stay. It has no mover, so a view still over T_abs after pruning is sent as it is. | `prune_keep` (3) | none | Luna-high, Sol-high |
+| **CM-prune** | Inspect `CompactionEdit` at T_abs: among the completed cases, the results of all but the last k tool uses become "(Tool result removed)"; the tool calls stay. It has no mover, so a view still over T_abs after pruning is sent as it is. | `prune_keep` (3) | none | Luna-high |
 | **CM-sum** | Our own incremental F8 summary on the metered `cm` path (Inspect's Summary strategy makes calls our meter cannot see). The earlier notes and the shown transcript become new notes, and the summarised messages leave the view. Self-summarisation: the `cm` role is the agent's own model and effort. | `sum_prompt` (structured, or plain) | summary calls | every CM point |
 | **CM-todo** | Inspect's `todo_write()`, plus an extraction call at the start of the shift and on every case that announces or withdraws a memo. The list is parsed from the calls and kept as policy state, so it is checkpointed. At T_abs the list stands in for the completed messages. | `todo_extract` (true) | extraction calls (`todo_write` traffic counts as agent calls) | every CM point |
 | **CM-reset** | CM-todo plus a reset at T_abs and after every m items: the completed messages leave the view and a handoff note takes their place. | `todo_extract` (true), `reset_every` (5), `reset_summary` (true) | handoff and extraction calls | Luna-high |
-| **CM-native** | Provider-native compaction at T_abs, on the agent's own model (OpenAI's Responses compaction, `Model.compact`). The earlier context (system prompt excluded, current case kept) is replaced by the provider's compacted window. It runs only on a model whose support the probe has recorded (`native_compaction.json`); otherwise every session fails at start. A failed compaction is logged and the session goes on; after 3 failures the arm stops compacting. | `native_max_failures` (3); not tuned | provider compaction calls (`cm`) | Luna-high (§3.5) |
+| **CM-native** | Provider-native compaction at T_abs, on the agent's own model (OpenAI's Responses compaction, `Model.compact`). The earlier context (system prompt excluded, current case kept) is replaced by the provider's compacted window. It runs only on a model whose support the probe has recorded (`native_compaction.json`); otherwise every session fails at start. A failed compaction is logged and the session goes on; after 3 failures the arm stops compacting. | `native_max_failures` (3); not tuned | provider compaction calls (`cm`) | Luna-high, Sol-high (§3.5) |
 | **S-CM\*** | The best single-agent stack, chosen on dev (§6): any valid stack of prune or trim, todo, and sum or reset, with at most one compactor and one note writer (17 stacks). Default prune+todo+reset. | `stack`, and every knob above | the sum of its parts | `g.topo.luna-low`, `g.topo.luna`, `g.topo.sol` |
 | **M1** | An orchestrator plus 3 identical workers (DEC, ISO and CONC = 1). The orchestrator is the session's agent and follows **the CM0 rule** (its full history, no context management), so the topology contrast is not confounded with a CM strategy. It has the case-answer and report tools and `delegate` (1–3 subtasks per call, run concurrently), never the lookups or procedure tools. Each subtask runs in a fresh worker context: the session's system prompt plus one message, the worker note and the subtask. Workers have the lookups, the procedure tools and `report`. Only a worker's result returns, clipped at 2,000 tokens. | — (not tuned) | none; worker calls are agent calls (kind `agent`, with agent ID and role) | `g.topo.luna-low`, `g.topo.luna`, `g.topo.sol` |
 | **M2** | M1 with 3 specialists (SPEC = 1): the world's policy domains, then its service domains, dealt round-robin; each specialist has its subset of the tools. M1 and M2 differ only in SPEC (tested). | — (not tuned) | as M1 | every `g.topo.*` cell |
@@ -228,20 +228,20 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 
 ### 3.5 Open arm decisions
 
-- **CM-native at one tier only.**
-  - The plan runs CM-native at Luna-high only (`g.pilot.luna`, `g.cm.luna-high`). It is then a descriptive arm at one point (G-H2c, G-H2d).
+- **CM-native at two tiers (decided, D-043).**
+  - The plan runs CM-native at Luna-high (`g.pilot.luna`, `g.cm.luna-high`) and, in place of CM-prune, at Sol-high (`g.cm.sol-high`). It is a descriptive arm (G-H2c, G-H2d).
   - At one point, the audit's reading "native compaction ≈ the best harness strategy at high tiers" (context management absorbed into the provider) cannot be assessed across capability.
   - Options:
     - (a) keep Luna-high only;
     - (b) add CM-native to `g.cm.sol-high` and/or `g.cm.astra-high`, each needing the probe's support record for that model (BUILD_PLAN B11's probe extension);
     - (c) drop it, if the probe shows no support at Luna (a plan change before the micro-pilot).
   - The cost of each option is estimated before the decision.
-  - Decision: [USER: CM-native tiers]
+  - **Decision (D-043): (b) at Sol-high, replacing CM-prune there (+$6).** Adding it beside CM-prune (+$125) would exceed Study G's allocation, and at Sol and Astra (+$373) the program budget. It runs at Sol only with the probe's confirmed Sol support record; if the probe records Sol as unsupported, CM-prune returns to `g.cm.sol-high` before the freeze (a plan change, not a deviation).
 - **S1+KG and S-subiso.**
   - The audit's topology factor includes S1+KG, a single agent with the gate-selected KG (audit §2.3, §7). G3 lists S-subiso, a single agent that delegates only exploration to isolated subagents, as Tier B.
   - Neither is in `config/run_plan.yaml`, and neither is built as a session arm.
   - Expected: Tier B, outside this pre-registration's estimands. If run, they run on Luna only, after the core and only if budget remains, and are reported descriptively in a section of their own, never pooled into a G-H family.
-  - Decision: [USER: S1+KG and S-subiso]
+  - **Decision (D-043): Tier B; not run under this pre-registration.** F8's knowledge base is already in every arm's system prompt (about 2.3K tokens), so a KG arm has nothing to retrieve, and S-subiso is the audit's Tier B CM-subiso.
 - **Tier B, not in this pre-registration:** CM-notes, CM-lesson, CM-subiso and CM-consol (F9), on Luna, only if budget remains (audit §8).
 
 ## 4. Samples
@@ -270,7 +270,7 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 | `g.cm.luna-high` | Luna-high | CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state | 40 | default | 10 × 3 | 110 |
 | `g.cm.luna-low` | Luna-low | CM0, CM-sum, CM-todo, O-state | 40 | default | 10 × 3 | 44 |
 | `g.cm.luna-n10` | Luna-high | CM0, O-state (short-session control, §4.4) | 10 | default | 10 × 3 | 7 |
-| `g.cm.sol-high` | Sol-high | CM0, CM-prune, CM-sum, CM-todo, O-state | 40 | default | 6 × 2 | 611 |
+| `g.cm.sol-high` | Sol-high | CM0, CM-native, CM-sum, CM-todo, O-state | 40 | default | 6 × 2 | 611 |
 | `g.cm.astra-high` | Astra-high | CM0, CM-sum, CM-todo, O-state | 24 | `output_tokens` 1,750 | 4 × 2 | 986 |
 | `g.topo.luna-low` | Luna-low | S1, M1, M2, S-CM\* | 20 | `output_tokens` 2,250 | 16 × 2 | 44 |
 | `g.topo.luna` | Luna-high | S1, M1, M2, S-CM\* | 20 | `output_tokens` 2,250 | 16 × 2 | 60 |
@@ -349,7 +349,7 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
     - (b) a harder anchor (F7-1000 and F3-60), in new plan cells;
     - (c) keep it, and add the tier order (the points as ranks) as a sensitivity axis for G-H1 and G-H2b.
   - Costs are estimated before the decision.
-  - Decision: [USER: capability anchor]
+  - **Decision (D-043): (c).** The anchor stays F7-10 and F3-5, and the tier order (Luna-low 1, Luna-high 2, Sol-high 3, Astra-high 4) is a pre-registered sensitivity axis for G-H1 and G-H2b, reported beside each measured-capability estimate (`g_hypotheses.TIER_ORDER`). A harder anchor (F7-100 and F3-60, +$45) was not chosen.
 
 ### 5.3 API mode
 
@@ -431,15 +431,15 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 
 | Label | Meaning |
 |---|---|
-| SUPPORTED | The confirmatory row's test rejects at one-sided 0.025: for G-H2a at every point tested (see "Missing data"), for G-H3b both clauses. |
+| SUPPORTED | The confirmatory row's test rejects at one-sided 0.025 with every planned point present: for G-H2a at every planned point, for G-H3b both clauses. |
+| INCOMPLETE | A planned point lacks paired data; the missing points are named, and the estimate and decision over the points present are reported beside it. Never counted as SUPPORTED. |
 | NOT_SUPPORTED | Tested, and it does not reject. |
 | NOT_TESTED | An earlier step of G-H3's sequence was not supported. |
 | NOT_TESTABLE | Arms, points or sessions are missing (fewer than 2 paired sessions at a point); the reason is given. |
 | descriptive | G-H1, G-H1-M1, G-H2b, G-H2c, G-H2d, G-H3-spec and G-D1–G-D3: an estimate with its interval, never a decision. |
 
 - **Missing data.** A cell that fails or that the budget stops is reported in the coverage table with its reason. No value is imputed.
-  - G-H3 pools the planned points that have at least 2 paired sessions of all four arms (`g_stats.gh3`). A missing planned point is a deviation, and the claim is restricted to the points tested.
-  - G-H2a tests the points with paired sessions. A supported G-H2a covers only those points, and the report names any planned point it lacks.
+  - G-H3 pools its planned points (Luna-low, Luna-high, Sol-high) and G-H2a tests its planned points (all four). If any planned point lacks paired data, the row is labelled **INCOMPLETE**, never SUPPORTED, and the report names the missing points; the estimate over the points present, and the decision those points alone would give, are reported beside it (`g_stats.gap_iut`, `g_stats.gh3`, `planned_points`). A missing planned point is a deviation.
 - **Errored samples** count as failures (§2.1).
 - **Re-runs.** A failed group is re-run by resuming it. Nothing is re-run because of its result.
 - **No extension.** Study G pre-registers no extension and spends no α on one. A later run, including one frozen with `--extension-of`, is analysed alone, reported as a replication, and never pooled with this run.
@@ -452,7 +452,7 @@ This is how the results will be read; it is not a decision rule.
 |---|---|
 | G-H2a supported, and R_x stable across capability (G-H2b's estimate near 0) | Context management keeps its value as models improve: invest in it rather than in new topologies. |
 | G-H2a supported, and CM0's own degradation slope flattens with capability | The model absorbs part of the problem (the bitter lesson through the model); the remaining value is cost and latency. |
-| CM-native ≈ the best harness strategy where it runs | Context management is absorbed into the provider, not made unnecessary. This is assessable across capability only if CM-native runs at more than one point (§3.5). |
+| CM-native ≈ the best harness strategy where it runs | Context management is absorbed into the provider, not made unnecessary. Assessed at the two points where CM-native runs (Luna-high, Sol-high; §3.5), descriptively. |
 | Gains only after the W crossing (G-H2d) | Context management is capacity engineering (it enables longer work), not an accuracy technique. |
 | G-H3a supported | Under a hard window, isolation carries at least half of the team's gain, and specialisation the rest (§2.3). |
 | G-H3b supported | A single agent with context management is the cheaper way to get the team's gain in long sessions. |

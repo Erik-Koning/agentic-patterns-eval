@@ -122,8 +122,12 @@ def test_report_end_to_end_from_cells(g_logs):
     d = report_from_cells(_cells(g_logs), prices=PRICES, capability={"luna-high": 0.78, "sol-high": 0.86}, reps=500, boot=200)
     json.dumps(d)
     dec = {r["id"]: r for r in d["decisions"]}
-    # O-state solves everything and CM0 overflows: Gap_T = 1 − CM0's item success, shown at both points.
-    assert dec["G-H2a"]["decision"] == "SUPPORTED"
+    # O-state solves everything and CM0 overflows: Gap_T = 1 − CM0's item success, shown at both points present; the
+    # plan's other two points (Luna-low, Astra) have no cells here, so the decision is INCOMPLETE, never SUPPORTED.
+    assert dec["G-H2a"]["decision"] == "INCOMPLETE" and dec["G-H2a"]["missing_points"] == ["luna-low", "astra-high"] and dec["G-H2a"]["present_positive"]
+    # With the planned points those two cells cover, it is decided.
+    full = report_from_cells(_cells(g_logs), prices=PRICES, capability={"luna-high": 0.78, "sol-high": 0.86}, reps=500, boot=0, glmm=False, planned={"G-H2a": ["luna-high", "sol-high"], "G-H3": []})
+    assert {r["id"]: r["decision"] for r in full["decisions"]}["G-H2a"] == "SUPPORTED"
     ss = load_g_cells(_cells(g_logs), prices=PRICES).sessions
     cm0 = ss[(ss["arm"] == "CM0") & (ss["point"] == "luna-high")].groupby("session")["item_success"].mean().mean()
     assert d["gh2"]["gap"]["points"]["luna-high"]["est"] == pytest.approx(1.0 - cm0)

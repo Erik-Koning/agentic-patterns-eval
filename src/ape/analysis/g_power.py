@@ -60,7 +60,7 @@ import pandas as pd
 from scipy.special import expit, logit
 
 from . import g_stats as gs
-from .g_hypotheses import ALPHA, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE
+from .g_hypotheses import ALPHA, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE, TIER_ORDER
 
 _GH_X, _GH_W = np.polynomial.hermite_e.hermegauss(40)
 _GH_W = _GH_W / _GH_W.sum()
@@ -352,6 +352,10 @@ def analyse_topo(sessions: pd.DataFrame, cap: Mapping[str, float], *, references
         r = gs.gh1(sessions, cap, reference=ref, alpha=alpha, reps=reps, seed=seed, flip=False)
         se = None if r.get("se") is None or r.get("span") is None else r["se"] * r["span"]
         out[f"G-H1[{ref}]"] = {"est": r.get("est_span"), "se": se, "covers_0": _covers(r.get("ci_span")), "testable": r.get("testable", False)}
+        if ref in ("S-CM*", "S1-pre"):  # D-043: capability as the tier rank
+            t = gs.gh1(sessions, TIER_ORDER, reference=ref, alpha=alpha, reps=reps, seed=seed, flip=False)
+            tse = None if t.get("se") is None or t.get("span") is None else t["se"] * t["span"]
+            out[f"G-H1[{ref}|tier]"] = {"est": t.get("est_span"), "se": tse, "covers_0": _covers(t.get("ci_span"))}
     h = gs.gh3(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, boot=0, meters=())
     if h.get("testable"):
         pre, a, rec, cost = h["pre"], h["h3a"], h["h3b"]["recovery"], h["h3b"]["cost"]
@@ -374,6 +378,8 @@ def analyse_cm(sessions: pd.DataFrame, cap: Mapping[str, float], *, estimand: st
     for s in ("CM-sum", "CM-todo"):
         r = gs.tost(sessions, cap, s, estimand=estimand, alpha=alpha, reps=reps, seed=seed, flip=False)
         out[f"G-H2b[{s}]"] = {"est": r.get("est"), "se": r.get("se"), "covers_0": _covers(r.get("ci"))}
+        t = gs.tost(sessions, TIER_ORDER, s, estimand=estimand, alpha=alpha, reps=reps, seed=seed, flip=False)  # D-043
+        out[f"G-H2b[{s}|tier]"] = {"est": t.get("est"), "se": t.get("se"), "covers_0": _covers(t.get("ci"))}
     return out
 
 

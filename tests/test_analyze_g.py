@@ -41,7 +41,8 @@ def test_the_offline_study_g_run_is_analysed_end_to_end(offline_g):
     assert md.startswith("# Study G report: run `t1` (OFFLINE") and "## Coverage" in md and "## Decisions" in md
     # Every confirmatory row is decided or says why not; the descriptive rows are labelled so.
     dec = {r["id"]: r["decision"] for r in d["decisions"]}
-    assert dec["G-H1"] == "descriptive" and dec["G-H2a"] in ("SUPPORTED", "NOT_SUPPORTED", "NOT_TESTABLE")
+    assert dec["G-H1"] == "descriptive" and dec["G-H2a"] in ("SUPPORTED", "NOT_SUPPORTED", "INCOMPLETE", "NOT_TESTABLE")
+    assert d["planned_points"]["G-H3"] == ["luna-low", "luna-high", "sol-high"]  # from the run's plan
     assert am["analysis"]["decisions"] == dec
     # Coverage: every arm the runner skipped is reported as skipped with its reason, and every plan arm has a row.
     test = _manifest(run, "test")

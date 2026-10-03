@@ -624,21 +624,34 @@ def _brief(c: dict) -> dict:
 # ---------- G-H2 ----------
 
 
-def gap_iut(sessions: pd.DataFrame, *, block: str | None = "cm", high: str = "O-state", low: str = "CM0", length: str = "long", outcome: str = "item_success", scale: str = "prob", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, flip: bool = True, primary: str = "t") -> dict:
+def gap_iut(sessions: pd.DataFrame, *, block: str | None = "cm", high: str = "O-state", low: str = "CM0", length: str = "long", outcome: str = "item_success", scale: str = "prob", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, flip: bool = True, primary: str = "t", planned_points: Sequence[str] | None = None) -> dict:
     """G-H2a: Gap_T = s(high) − s(low) > 0 at every point (intersection-union: each point one-sided at α, no
-    adjustment). `all_positive` is the IUT decision; points that cannot be tested make it False."""
+    adjustment). `all_positive` is the IUT decision; points that cannot be tested make it False.
+
+    With `planned_points` (the plan's points, PREREGISTRATION_G.md) the decision is over exactly those: a planned point
+    without testable data makes the result `incomplete` (named in `missing_points`) and `all_positive` False, whatever
+    the other points show; points outside the plan are reported, not decided on. Without it, the points present."""
     wide = session_values(sessions, [high, low], block=block, length=length, outcome=outcome, scale=scale)
     v = long_values(wide, {high: 1.0, low: -1.0})
     points = {c: _brief(contrast(g, {c: 1.0}, alternative="greater", alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary)) for c, g in v.groupby("point")}
-    tested = [c for c, r in points.items() if r["testable"]]
-    flip_ok = all(r["p_flip"] is not None and r["p_flip"] <= alpha for r in points.values()) if points else False
+    planned = list(planned_points) if planned_points is not None else None
+    decided = {c: r for c, r in points.items() if planned is None or c in planned}
+    missing = [c for c in planned if c not in points or not points[c]["testable"]] if planned is not None else []
+    tested = [c for c, r in decided.items() if r["testable"]]
+    flip_ok = all(r["p_flip"] is not None and r["p_flip"] <= alpha for r in decided.values()) if decided else False
+    present_positive = bool(decided) and len(tested) == len(decided) and all(r["reject"] for r in decided.values())
     return {
         "high": high,
         "low": low,
         "points": points,
-        "all_positive": bool(points) and len(tested) == len(points) and all(points[c]["reject"] for c in points),
-        "all_positive_flip": bool(points) and flip_ok,
-        "flip_unreachable": [c for c, r in points.items() if r["flip_reachable"] is False],
+        "planned_points": planned,
+        "missing_points": missing,
+        "incomplete": bool(missing),
+        "unplanned_points": sorted(set(points) - set(planned)) if planned is not None else [],
+        "present_positive": present_positive,
+        "all_positive": present_positive and not missing,
+        "all_positive_flip": bool(decided) and flip_ok and not missing,
+        "flip_unreachable": [c for c, r in decided.items() if r["flip_reachable"] is False],
         "testable": bool(tested),
         "reason": None if points else "no paired O-state / CM0 sessions",
     }
@@ -707,10 +720,10 @@ def tost(sessions: pd.DataFrame, capability, strategy: str, *, estimand: str = T
     }
 
 
-def gh2(sessions: pd.DataFrame, capability, *, strategies: Sequence[str] = ("CM-sum", "CM-todo"), estimand: str = TOST_ESTIMAND, margin: float | None = None, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t", block: str | None = "cm") -> dict:
+def gh2(sessions: pd.DataFrame, capability, *, strategies: Sequence[str] = ("CM-sum", "CM-todo"), estimand: str = TOST_ESTIMAND, margin: float | None = None, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t", block: str | None = "cm", planned_points: Sequence[str] | None = None) -> dict:
     """G-H2: Gap_T at every point (G-H2a), R_x per strategy present (G-H2c), and θ per strategy (G-H2b; its TOST with
     Holm across the strategies is still computed, though D-033 decides nothing on it)."""
-    gaps = gap_iut(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, block=block)
+    gaps = gap_iut(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, block=block, planned_points=planned_points)
     arms = sorted(set(_rows(sessions, block, "long", None).get("arm", pd.Series(dtype=str))) - {"O-state", "CM0"})
     heads = {s: headroom(sessions, s, alpha=alpha, boot=boot, seed=seed, block=block) for s in arms}
     tosts = {s: tost(sessions, capability, s, estimand=estimand, margin=margin, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, block=block) for s in strategies}
@@ -822,20 +835,28 @@ def _cost_boot(wide: pd.DataFrame, a: str, b: str, weights: Mapping[str, float],
     return out[np.isfinite(out)]
 
 
-def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[str] | None = None, outcome: str = "item_success", scale: str = "prob", iso: float = ISOLATION_SHARE, recovery: float = RECOVERY_SHARE, cost_ratio: float = COST_RATIO, meter: str = COST_METER, meters: Sequence[str] = COST_METERS, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t") -> dict:
+def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[str] | None = None, planned_points: Sequence[str] | None = None, outcome: str = "item_success", scale: str = "prob", iso: float = ISOLATION_SHARE, recovery: float = RECOVERY_SHARE, cost_ratio: float = COST_RATIO, meter: str = COST_METER, meters: Sequence[str] = COST_METERS, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t") -> dict:
     """G-H3 at the points where S1, M1, M2 and S-CM* all ran (equal point weights): the gatekeeper M2 − S1 > 0, H3a
     (isolation share ≥ `iso` as (M1 − S1) − iso (M2 − S1) > 0) and H3b (recovery ≥ `recovery` and cost per solved item
-    ratio ≤ `cost_ratio`, an intersection-union), in fixed sequence; the shares with ratio intervals; every cost meter."""
+    ratio ≤ `cost_ratio`, an intersection-union), in fixed sequence; the shares with ratio intervals; every cost meter.
+
+    With `planned_points` (the plan's points, PREREGISTRATION_G.md) the pool is those points only; a planned point
+    without ≥ 2 sessions of all four arms makes the result `incomplete` (named in `missing_points`): the estimates over
+    the planned points present are kept, and the report labels the rows INCOMPLETE. `points` instead pools exactly
+    the points given; without either, every point with data."""
     wide = session_values(sessions, list(TOPO_ARMS), block=block, length=None, outcome=outcome, scale=scale)
     if len(wide):
         ok = wide.dropna()
         counts = ok.groupby("point").size().to_dict()
     else:
         ok, counts = wide, {}
-    pts = [c for c in (points or sorted(counts)) if counts.get(c, 0) >= MIN_SESSIONS]
-    base = {"points": pts, "sessions": {c: int(counts.get(c, 0)) for c in (points or counts)}}
+    planned = list(planned_points) if planned_points is not None and points is None else None
+    candidates = points or planned or sorted(counts)
+    pts = [c for c in candidates if counts.get(c, 0) >= MIN_SESSIONS]
+    missing = [c for c in planned if c not in pts] if planned is not None else []
+    base = {"points": pts, "sessions": {c: int(counts.get(c, 0)) for c in (candidates or counts)}, "planned_points": planned, "missing_points": missing, "incomplete": bool(missing)}
     if not pts:
-        return base | {"testable": False, "reason": f"no point has ≥ {MIN_SESSIONS} sessions with all of {TOPO_ARMS}"}
+        return base | {"testable": False, "reason": f"no {'planned ' if planned else ''}point has ≥ {MIN_SESSIONS} sessions with all of {TOPO_ARMS}" + (f" (planned: {planned})" if planned else "")}
     ok = ok[ok["point"].isin(pts)]
     w = {c: 1.0 / len(pts) for c in pts}
     kw = {"alpha": alpha, "reps": reps, "seed": seed, "flip": flip, "primary": primary}
@@ -879,7 +900,7 @@ def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[
 # ---------- descriptive ----------
 
 
-def cost_table(sessions: pd.DataFrame, meters: Sequence[str] = COST_METERS, by: Sequence[str] = ("block", "point", "arm")) -> list[dict]:
+def cost_table(sessions: pd.DataFrame, meters: Sequence[str] = COST_METERS, by: Sequence[str] = ("block", "point", "arm", "N")) -> list[dict]:
     """Cost per solved item per meter (Σ meter / Σ items solved), with sessions, items solved and probe tokens apart."""
     if sessions is None or not len(sessions):
         return []
@@ -942,7 +963,7 @@ def _mean(g: pd.DataFrame, col: str) -> float | None:
     return float(s.mean()) if len(s) else None
 
 
-def probe_table(sessions: pd.DataFrame, by: Sequence[str] = ("block", "point", "arm")) -> list[dict]:
+def probe_table(sessions: pd.DataFrame, by: Sequence[str] = ("block", "point", "arm", "N")) -> list[dict]:
     """Probe F1 per checkpoint: the mean over sessions of the epoch-mean F1 (a checkpoint not taken scores 0), its
     95% session-clustered t-interval, and the share of session-epochs that took it."""
     if sessions is None or not len(sessions) or "probes" not in sessions:
@@ -967,7 +988,7 @@ def probe_table(sessions: pd.DataFrame, by: Sequence[str] = ("block", "point", "
     return out
 
 
-def probe_behaviour(sessions: pd.DataFrame, items: pd.DataFrame, by: Sequence[str] = ("block", "point", "arm")) -> list[dict]:
+def probe_behaviour(sessions: pd.DataFrame, items: pd.DataFrame, by: Sequence[str] = ("block", "point", "arm", "N")) -> list[dict]:
     """Audit §5.3's consistency check: across (session-epoch, checkpoint) pairs, the correlation of probe F1 at k with
     the success of the dependency items after k up to the next checkpoint. A weak correlation means the probes
     measure something the policy does not use."""
@@ -1005,7 +1026,7 @@ def probe_behaviour(sessions: pd.DataFrame, items: pd.DataFrame, by: Sequence[st
 TAX_LABELS = ("forgot_constraint", "stale_state", "resurrected_done_item", "dropped_item", "hallucinated_state", "overflow")
 
 
-def taxonomy_table(sessions: pd.DataFrame, by: Sequence[str] = ("block", "point", "arm")) -> list[dict]:
+def taxonomy_table(sessions: pd.DataFrame, by: Sequence[str] = ("block", "point", "arm", "N")) -> list[dict]:
     """Failure labels (scorers.session.taxonomy) per group: counts, rate per item and share of failed items."""
     if sessions is None or not len(sessions):
         return []
@@ -1070,7 +1091,7 @@ def degradation(items: pd.DataFrame, *, block: str | None = None, by: Sequence[s
     return out
 
 
-def glmm(items: pd.DataFrame, capability, *, block: str | None = "topo", arms: Sequence[str] | None = None, reference: str | None = None, max_rows: int | None = 60_000, seed: int = SEED) -> dict:
+def glmm(items: pd.DataFrame, capability, *, block: str | None = "topo", arms: Sequence[str] | None = None, reference: str | None = None, length: str | None = "long", max_rows: int | None = 60_000, seed: int = SEED) -> dict:
     """D-029's descriptive mixed model: success ~ arm × capability (centred) + (1 | session) + (1 | item), by
     statsmodels' BinomialBayesMixedGLM (variational Bayes). Never raises: a failed or non-finite fit is reported."""
     from statsmodels.genmod.bayes_mixed_glm import BinomialBayesMixedGLM
@@ -1083,6 +1104,8 @@ def glmm(items: pd.DataFrame, capability, *, block: str | None = "topo", arms: S
     df = items if block is None or "block" not in items else items[items["block"] == block]
     if arms is not None:
         df = df[df["arm"].isin(list(arms))]
+    if length is not None and "N" in df:  # the N = 10 control is its own length, not a capability point's session
+        df = df[(pd.to_numeric(df["N"], errors="coerce") <= SHORT_N) == (length == "short")]
     df = df[df["point"].isin(list(x))]
     if not len(df) or df["arm"].nunique() < 1 or df["point"].nunique() < 2:
         return {"status": "skipped", "reason": "needs ≥ 2 capability points with measured capability"}
