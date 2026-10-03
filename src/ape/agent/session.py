@@ -10,6 +10,9 @@ its own tools), one turn cap per case and one nominal window W; only the view di
   current case's messages. The upper bound that defines Gap_T and R_x.
 - **CM-prune, CM-trim, CM-sum, CM-todo, CM-reset, CM-native and S-CM***: the context-management arms
   (`ape.agent.cm_arms`, B8).
+- **S1, M1 and M2**: the topology arms (`ape.agent.multi.session_team`, B9). S1 is CM0 under its topology name; in
+  M1 and M2 the session's agent is an orchestrator (CM0's view, the answer and report tools only) that delegates
+  each case's work to isolated workers through a policy tool.
 
 **Window and threshold.** The harness enforces W for every policy: an agent call whose view, or a management call
 whose input, would exceed W is an **overflow**, and that case and every later one fail (the report too). Before a
@@ -77,11 +80,12 @@ from .context_policy import (
     usage_record,
     view_tokens,
 )
+from .multi.session_team import TOPOLOGY_ARMS
 from .session_checkpoint import SessionCheckpoints, checkpoint_root, code_version, model_identity, resume_summary, usage_summary
 
 log = logging.getLogger(__name__)
 
-SESSION_ARMS = ("CM0", "O-state", *CM_ARMS)  # the built arms (importing cm_arms registers its own); tests register more
+SESSION_ARMS = ("CM0", "O-state", *CM_ARMS, *TOPOLOGY_ARMS)  # the built arms (cm_arms and session_team register their own); tests register more
 PROBE_ROLE = "probe"
 CM_ROLE = "cm"
 PROBE_PROMPT = (
@@ -130,7 +134,8 @@ def f8_session_agent(
         world = load_world(state.metadata["world_id"])
         n = len(world.tasks)
         rec = SessionRecorder(world)
-        base_tools = list(build_session_tools(world, rec).values())
+        session_tools = build_session_tools(world, rec)
+        base_tools = list(session_tools.values())
         model = get_model()
         cm_model = get_model(role=CM_ROLE, default=model)
         probe_model = get_model(role=PROBE_ROLE, default=model)
@@ -153,7 +158,7 @@ def f8_session_agent(
                     "max_turns_per_item": max_turns_per_item,
                     "checkpoints": list(checkpoints),
                     "world": {"id": world.id, "hash": world.content_hash()},
-                    "code": code_version([cls.__module__]),
+                    "code": code_version([cls.__module__, *cls.CODE_MODULES]),
                 },
             )
         payload = ckpt.load() if ckpt else None
@@ -168,13 +173,15 @@ def f8_session_agent(
                 payload, restored, records, ckpt.last = None, None, SessionRecords(), None
         if payload is None:
             done, segments, failures = 0, [], []
-        ctx = SessionContext(world=world, window=window, threshold=t_abs, agent_model=model, cm_model=cm_model, records=records)
+        ctx = SessionContext(world=world, window=window, threshold=t_abs, agent_model=model, cm_model=cm_model, records=records,
+                             session_tools=session_tools, max_turns_per_item=max_turns_per_item)
         policy = cls(ctx, **knobs)
         extra = list(policy.tools())
         policy_tools = [tool_name(t) for t in extra]
         if clash := sorted(set(policy_tools) & {tool_name(t) for t in base_tools}):
             raise ValueError(f"{cls.__name__} tools {clash} clash with the session's own tools")
-        tools = [*base_tools, *extra]
+        agent_base = list(policy.agent_tools(base_tools))
+        tools = [*agent_base, *extra]
         ctx.tools = tools
         arm_record = {
             "name": arm,
@@ -187,6 +194,8 @@ def f8_session_agent(
             "policy_tools": policy_tools,
             "policy_tool_tokens": tool_schema_tokens(extra),
         }
+        if len(agent_base) != len(base_tools):
+            arm_record["agent_tools"] = [tool_name(t) for t in agent_base]
         saved = [len(records.views), len(records.probes)]  # records already in the last checkpoint
         segments.append({"attempt": len(segments) + 1, "sample_uuid": state.uuid, "after_item": done, "views_from": len(records.views), "probes_from": len(records.probes)})
         overflow_at = None
@@ -382,6 +391,8 @@ def f8_session_agent(
             store().set(USAGE, {"by_kind": usage_by(calls, "kind"), "by_model": usage_by(calls, "model")})
             store().set(RESUME, resume_summary(records.views, records.probes, records.resumes, segments, failures))
             store().set("arm", arm_record)
+            for key, value in policy.records().items():
+                store().set(key, value)
             if finished and ckpt is not None:
                 ckpt.complete()
         return state
