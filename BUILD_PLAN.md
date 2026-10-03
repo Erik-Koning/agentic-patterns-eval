@@ -107,7 +107,7 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | B10 | ✅ statistics core merged f413dd2; run-dir glue after B1 | D-029, D-032; power gaps P-2 |
 | B3 | 🔄 building | |
 | B9 | 🔄 building | |
-| Analysis glue | `analyze_main` ✅ merged f6eeac6; `analyze_g` 🔄 building | B1's `analyze(run)` interface |
+| Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
 | B5, B11, B12 | ⏳ waiting on dependencies | |
 
 **Follow-ups found during the build** (must be done before any paid run):
