@@ -325,10 +325,14 @@ def test_offline_all_runs_each_study_end_to_end(offline):
         freeze = read_freeze(run)
         assert freeze["rehearsal"] is True and freeze["test_seeds"]["base"] == seeds["offline_test"] and freeze["role"] == {"kind": "primary", "of": None}
         assert (run.work_dir / "PROVENANCE.freeze.md").is_file() and f"study={study} run=t1 base={seeds['offline_test']}" in (run.work_dir / "PROVENANCE.freeze.md").read_text()
-        # The analysis hook: no analysis module yet, so an offline stub report says so.
-        report = json.loads((run.dir / "report" / "analysis.json").read_text())
-        assert report["status"] == "not_implemented" and "analysis not implemented" in (run.dir / "report" / "report.md").read_text()
-        assert manifests["analyze"]["analysis"]["status"] == "not_implemented" and any("analysis not implemented" in w for w in manifests["analyze"]["warnings"])
+        # The analysis hook: the main study's analysis exists (ape.analyze_main, tests/test_analyze_main.py); Study G's
+        # stub stays until ape.analyze_g lands.
+        if run_study.analysis_available(run):
+            assert manifests["analyze"]["analysis"]["status"] == "done" and (run.dir / "report" / "report.md").is_file()
+        else:
+            report = json.loads((run.dir / "report" / "analysis.json").read_text())
+            assert report["status"] == "not_implemented" and "analysis not implemented" in (run.dir / "report" / "report.md").read_text()
+            assert manifests["analyze"]["analysis"]["status"] == "not_implemented" and any("analysis not implemented" in w for w in manifests["analyze"]["warnings"])
     assert not (ROOT / "runs" / "main" / "t1").exists() and not (ROOT / "runs" / "study_g" / "t1").exists()
 
 
