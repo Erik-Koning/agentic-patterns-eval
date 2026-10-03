@@ -346,6 +346,204 @@ def f8_session_verdict(arms: Mapping[str, Mapping], categories: Sequence[str]) -
     return result(FAIL if reasons else PASS, {"arms": measured}, reason="; ".join(reasons) or None)
 
 
+# --- The studies' new arm families (BUILD_PLAN B12) -------------------------------------------------
+# One small task set or one short session per family, run as `ape.run_study` runs them (the cache nonce set, the
+# wall-clock guard on). Each check combines its parts (`combine`): the arm's records, the effort sent on every call, the
+# cache nonce on every agent prompt, and the realised cost against the check's projection.
+
+SANE_STOPS = ("done", "text", "turn_cap")  # how a main-study agent may end its loop in a healthy sample
+SANE_WORKER_STOPS = ("reported", "text", "turn_cap")  # a session team's worker
+MAS_RECORDS = ("mas_switches", "mas_params", "mas_agents", "mas_accounting", "compile_log", "step_log", "turns_used", "arm")
+MAS_ARM_RECORDS = {"M1": ("mas_plan", "mas_rounds"), "M1k": ("mas_plan", "mas_rounds"), "M7": ("mas_council",), "S8k3": ("mas_ensemble",)}
+MAS_ARM_ROLES = {"M1": {"orchestrator": 1, "worker": 1}, "M1k": {"orchestrator": 1, "worker": 1}, "M7": {"member": 3, "chair": 1}, "S8k3": {"attempt": 3}}
+MAS_TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "input_tokens_cache_read", "input_tokens_cache_write")
+SESSION_MANAGEMENT = {"CM-sum": ("summary", "sum_drop"), "CM-todo": ("todo_extract", "todo_drop")}  # cm purpose, T_abs drop event
+COST_BAND = (0.05, 2.0)  # live: realised / projected (conservative) cost of a check; outside it, a cost-model finding
+
+
+def combine(parts: Mapping[str, Mapping]) -> dict:
+    """One check from named parts: the worst status (fail > warn > pass), every part's reason prefixed with its name,
+    each part's result under `measured`."""
+    statuses = [p["status"] for p in parts.values()]
+    status = FAIL if FAIL in statuses else WARN if WARN in statuses else PASS
+    reasons = [f"{name}: {p['reason']}" for name, p in parts.items() if p.get("reason") and p["status"] != PASS]
+    return result(status, {name: dict(p) for name, p in parts.items()}, reason="; ".join(reasons) or None)
+
+
+def effort_sent_verdict(calls: Sequence[Mapping], expected: Mapping[str, str | None]) -> dict:
+    """The configured effort reached every model call of the check (the probe's `effort` check shows the provider
+    honours it). `calls`: {"role" (None = the agent model), "effort", "reasoning_tokens"}; `expected`: role -> effort
+    (the profile's; calls on the agent model, management and probe calls included, expect the agent's)."""
+    seen: dict[str, dict] = {}
+    wrong = []
+    for c in calls:
+        role = c.get("role") or "agent"
+        want = expected.get(role, expected.get("agent"))
+        s = seen.setdefault(role, {"calls": 0, "effort": want, "reasoning_tokens": 0})
+        s["calls"] += 1
+        s["reasoning_tokens"] += int(c.get("reasoning_tokens") or 0)
+        if want is not None and c.get("effort") != want:
+            wrong.append(f"{role} call sent effort {c.get('effort')!r}, the profile's is {want!r}")
+    if not calls:
+        return result(FAIL, {"roles": seen}, reason="no model calls")
+    return result(FAIL if wrong else PASS, {"roles": seen}, reason="; ".join(sorted(set(wrong))) or None)
+
+
+def nonce_verdict(expected: str | None, metadata: Sequence[str | None], calls: Sequence[Mapping]) -> dict:
+    """The per-run cache nonce (`ape.agent.cache_nonce`): every sample records the task's nonce, and every call on the
+    agent model (agents, management calls, probes) opens with its line. `calls`: {"kind", "prefixed"}."""
+    measured = {"nonce": expected, "samples": len(metadata), "agent_model_calls": len(calls), "prefixed": sum(bool(c.get("prefixed")) for c in calls)}
+    if not expected:
+        return result(FAIL, measured, reason="the task carries no cache nonce (APE_CACHE_NONCE was not set when it was built)")
+    reasons = []
+    if bad := [m for m in metadata if m != expected]:
+        reasons.append(f"{len(bad)} sample(s) record cache_nonce {sorted(set(map(str, bad)))}, not {expected}")
+    if missing := [c.get("kind") for c in calls if not c.get("prefixed")]:
+        reasons.append(f"{len(missing)} agent-model call(s) do not open with the nonce line ({sorted(set(map(str, missing)))})")
+    if not calls:
+        reasons.append("no agent-model calls")
+    return result(FAIL if reasons else PASS, measured, reason="; ".join(reasons) or None)
+
+
+def cost_band_verdict(realised: float | None, projected: float, dry: bool, band: tuple[float, float] = COST_BAND) -> dict:
+    """The check's realised cost against its conservative projection. Dry: not measured (mock models are unpriced).
+    Live: $0 means the calls were not metered (fail); outside `band` x the projection is a finding about the cost
+    model's priors for this arm (warn), as the cost-model check's."""
+    measured = {"realised_usd": None if realised is None else round(realised, 6), "projected_usd": round(projected, 6), "band": list(band)}
+    if dry:
+        return result(PASS, measured, reason="dry: mock models are unpriced, cost not measured")
+    if realised is None or realised <= 0:
+        return result(FAIL, measured, reason="no metered cost: the check's calls were not priced")
+    ratio = realised / projected if projected > 0 else float("inf")
+    measured["ratio"] = round(ratio, 3)
+    if not band[0] <= ratio <= band[1]:
+        return result(WARN, measured, reason=f"realised ${realised:.4f} is {ratio:.2f}x the projection ${projected:.4f} (band {band[0]}-{band[1]}x): recalibrate this arm's priors")
+    return result(PASS, measured)
+
+
+def _usage_mismatch(acc: Mapping | None, usage: Mapping | None, fields: Sequence[str]) -> list[str]:
+    return [f"{f} {int((acc or {}).get(f) or 0)} vs {int((usage or {}).get(f) or 0)}" for f in fields if int((acc or {}).get(f) or 0) != int((usage or {}).get(f) or 0)]
+
+
+def mas_verdict(arm: str, samples: Sequence[Mapping]) -> dict:
+    """A main-study multi-agent or ensemble arm's samples (`readiness/smoke.py` `_mas_record`). Each: {"label",
+    "log_status", "sample_error", "limit", "store_keys", "accounting" {"error", "unattributed", "totals"}, "usage"
+    (the sample's Inspect usage summed over models), "agents" [{"id", "role", "stop", "error"}], "answered",
+    "kg_calls"}.
+
+    Fail, per sample: the log or sample errored or a sample limit fired; a record is missing (MAS_RECORDS and the arm's
+    own); `mas_accounting` failed, left calls unattributed or does not sum to the sample's usage on every token field;
+    an agent recorded an error or stopped otherwise than done, text or turn cap; the arm's roles did not all run; M1k's
+    workers made no kg call. Warn: a sample never answered (a model finding, not the harness)."""
+    if not samples:
+        return result(FAIL, {}, reason=f"{arm}: no samples")
+    reasons: list[str] = []
+    warnings: list[str] = []
+    rows = []
+    for s in samples:
+        tag = f"{arm}{' ' + s['label'] if s.get('label') else ''} {s.get('id', '')}".strip()
+        agents = list(s.get("agents") or [])
+        roles: dict[str, int] = {}
+        for a in agents:
+            roles[str(a.get("role"))] = roles.get(str(a.get("role")), 0) + 1
+        acc = s.get("accounting") or {}
+        rows.append({"sample": tag, "agents": len(agents), "roles": roles, "stops": sorted({str(a.get("stop")) for a in agents}), "kg_calls": s.get("kg_calls"),
+                     "total_tokens": (s.get("usage") or {}).get("total_tokens"), "answered": bool(s.get("answered"))})  # fmt: skip
+        if s.get("log_status") != "success":
+            reasons.append(f"{tag}: log status {s.get('log_status')}")
+        if s.get("sample_error"):
+            reasons.append(f"{tag}: sample error {str(s['sample_error'])[:160]}")
+        if s.get("limit"):
+            reasons.append(f"{tag}: a sample limit fired ({s['limit']})")
+        if missing := [k for k in (*MAS_RECORDS, *MAS_ARM_RECORDS.get(arm, ())) if k not in set(s.get("store_keys") or [])]:
+            reasons.append(f"{tag}: records missing {missing}")
+        if acc.get("error"):
+            reasons.append(f"{tag}: mas_accounting failed ({acc['error']})")
+        if acc.get("unattributed"):
+            reasons.append(f"{tag}: calls outside every agent span {sorted(acc['unattributed'])}")
+        if off := _usage_mismatch(acc.get("totals"), s.get("usage"), MAS_TOKEN_FIELDS):
+            reasons.append(f"{tag}: mas_accounting does not sum to the sample's usage ({'; '.join(off)})")
+        if errs := [f"{a.get('id')}: {str(a['error'])[:120]}" for a in agents if a.get("error")]:
+            reasons.append(f"{tag}: agent error(s) {errs}")
+        if odd := [f"{a.get('id')}={a.get('stop')}" for a in agents if a.get("stop") not in SANE_STOPS]:
+            reasons.append(f"{tag}: agent stop(s) {odd} (expected one of {list(SANE_STOPS)})")
+        if short := [f"{role} ({roles.get(role, 0)} of {n})" for role, n in MAS_ARM_ROLES.get(arm, {}).items() if roles.get(role, 0) < n]:
+            reasons.append(f"{tag}: roles that did not run: {short}")
+        if arm == "M1k" and not s.get("kg_calls"):
+            reasons.append(f"{tag}: the KG workers made no kg call")
+        if not s.get("answered"):
+            warnings.append(f"{tag}: never answered")
+    status = FAIL if reasons else WARN if warnings else PASS
+    return result(status, {"arm": arm, "samples": rows}, reason="; ".join(reasons + warnings) or None)
+
+
+def session_arm_verdict(arm: str, rec: Mapping, categories: Sequence[str], *, window: int, threshold: int, dry: bool) -> dict:
+    """One short F8 session of a Study G arm (`readiness/smoke.py` `_session_record`, plus "views" with each call's
+    kind, purpose and usage, "cm_events", "policy_tools", "overflow", "usage_by_kind", "inspect_usage", and for the
+    team "mas_agents" and "mas_accounting").
+
+    The session itself as `f8_session_verdict` judges it (records per case, the report, schema-valid forked probes
+    kept out of the history), and: W enforced (no recorded call over `window`, no overflow); every call's kind is
+    agent or cm, probes apart; the Inspect usage equals the per-call records' by kind. CM-sum and CM-todo: their
+    management call fired (`summary`, `todo_extract`), is metered as `cm` (live: with usage), and the view crossed T_abs
+    and the arm dropped the completed cases (`sum_drop`, `todo_drop`); CM-todo warns when the agent never wrote the
+    todo list (todo_write). M1: workers ran, none stopped on a limit, an overflow or an interruption, and
+    `mas_accounting` sums to the session's agent usage."""
+    base = f8_session_verdict({arm: rec}, categories)
+    reasons = [base["reason"]] if base["status"] == FAIL and base.get("reason") else []
+    warnings: list[str] = []
+    views = list(rec.get("views") or [])
+    probes = list(rec.get("probes") or [])
+    cm = [v for v in views if v.get("kind") == "cm"]
+    by_kind = rec.get("usage_by_kind") or {}
+    measured = dict((base.get("measured") or {}).get("arms", {}).get(arm, {})) | {
+        "window": window,
+        "threshold": threshold,
+        "max_call_tokens": max((int(v.get("view_tokens") or 0) for v in [*views, *probes]), default=0),
+        "overflow": rec.get("overflow"),
+        "kinds": sorted({str(v.get("kind")) for v in views}),
+        "cm_calls": {p: sum(v.get("purpose") == p for v in cm) for p in sorted({str(v.get("purpose")) for v in cm})},
+        "cm_events": sorted({str(e.get("event")) for e in rec.get("cm_events") or []}),
+        "policy_tool_calls": len(rec.get("policy_tools") or []),
+    }
+    if over := [v.get("view_tokens") for v in [*views, *probes] if int(v.get("view_tokens") or 0) > window]:
+        reasons.append(f"{len(over)} call(s) over W={window} were sent (max {max(over)})")
+    if rec.get("overflow") is not None:
+        reasons.append(f"the session overflowed W={window} at item {rec['overflow']}: the smoke's window is too small for this model")
+    if odd := sorted({str(v.get("kind")) for v in views} - {"agent", "cm"}):
+        reasons.append(f"calls of unexpected kind {odd}")
+    usage_total = sum(int((u or {}).get("total_tokens") or 0) for u in by_kind.values())
+    if int(rec.get("inspect_usage") or 0) != usage_total:
+        reasons.append(f"Inspect's usage ({rec.get('inspect_usage')} tokens) is not the per-call records' ({usage_total}, by kind)")
+    if arm in SESSION_MANAGEMENT:
+        purpose, drop = SESSION_MANAGEMENT[arm]
+        mine = [v for v in cm if v.get("purpose") == purpose]
+        if not mine:
+            reasons.append(f"no {purpose} management call (kind cm) was made")
+        elif not dry and (bad := [v for v in mine if not int(((v.get("usage") or {}).get("total_tokens")) or 0)]):
+            reasons.append(f"{len(bad)} {purpose} call(s) recorded without usage: management is not metered")
+        if drop not in measured["cm_events"]:
+            reasons.append(f"the view never crossed T_abs={threshold} with completed cases to drop (no {drop} event): management never fired")
+        if arm == "CM-todo" and not rec.get("policy_tools"):
+            warnings.append("the agent never called todo_write (the list came from extraction only)")
+    if arm in ("M1", "M2"):
+        workers = [a for a in rec.get("mas_agents") or [] if a.get("role") != "orchestrator"]
+        measured["workers"] = len(workers)
+        measured["worker_stops"] = sorted({str(a.get("stop")) for a in workers})
+        if not workers:
+            reasons.append("no worker ran: the orchestrator never delegated, so the team was not exercised")
+        if odd := [f"{a.get('id')}={a.get('stop')}" for a in workers if a.get("stop") not in SANE_WORKER_STOPS]:
+            reasons.append(f"worker stop(s) {odd} (expected one of {list(SANE_WORKER_STOPS)})")
+        totals = (rec.get("mas_accounting") or {}).get("totals") or {}
+        agent_usage = by_kind.get("agent") or {}
+        if int(totals.get("calls") or 0) != sum(1 for v in views if v.get("kind") == "agent"):
+            reasons.append(f"mas_accounting counts {totals.get('calls')} agent calls, the session recorded {sum(1 for v in views if v.get('kind') == 'agent')}")
+        if off := _usage_mismatch(totals, agent_usage, ("input_tokens", "output_tokens", "total_tokens")):
+            reasons.append(f"mas_accounting does not sum to the session's agent usage ({'; '.join(off)})")
+    status = FAIL if reasons else WARN if warnings else PASS
+    return result(status, measured, reason="; ".join(reasons + warnings) or None)
+
+
 # --- Real extraction on one F7-1000 world ----------------------------------------------------------
 
 

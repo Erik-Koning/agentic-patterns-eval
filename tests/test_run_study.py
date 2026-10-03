@@ -468,6 +468,36 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     assert _manifest(run, "micro-pilot")["operational_env"]["APE_SESSION_CHECKPOINTS"] == str(run.session_checkpoints_dir)
 
 
+def test_offline_runs_give_each_eval_set_its_own_nonce_and_every_task_the_wall_clock_guard(offline):
+    """B12: every eval set the runner runs (micro-pilot, tune candidates, pilot, test groups) has its own cache-nonce
+    seed, each arm its own nonce within it, carried by every sample and at the head of its system prompt; every task has
+    the runaway wall-clock guard (Inspect's `working_limit`)."""
+    from inspect_ai.log import read_eval_log
+
+    from ape.agent.cache_nonce import derive
+    from ape.budget import sample_working_limit
+
+    for study in ("main", "study_g"):
+        run = _run(offline, study)
+        created = run_gate.read_run_info(run)["created"]
+        nonces: dict[tuple, str] = {}
+        for phase in STUDIES[study].phases:
+            for f in sorted(run.phase_dir(phase).rglob("*.eval")):
+                log = read_eval_log(str(f))
+                md, args = log.eval.metadata, log.eval.task_args
+                seed, nonce = md["cache_nonce_seed"], md["cache_nonce"]
+                assert seed.startswith(f"{study}/t1@{created}/{phase if phase != 'tune' else 'tune/'}"), seed
+                parts = (args["arm"], args.get("delivery", "push"), args.get("exposure", "retrieved")) if "family" in args else (args["arm"],)
+                assert nonce == derive(seed, *parts)
+                assert all(s.metadata["cache_nonce"] == nonce and s.messages[0].text.startswith(f"Run reference: {nonce}\n\n") for s in log.samples)
+                nonces[(seed, *parts)] = nonce
+                level = args["level"]
+                family = args.get("family") or md.get("family")
+                assert log.eval.config.working_limit == sample_working_limit(family, level, md.get("max_turns"), run_study.plan(run)) > 0
+        assert len(set(nonces.values())) == len(nonces) > 5, "no two eval sets or arms share a nonce"
+        assert len({k[0] for k in nonces}) > 3
+
+
 def test_a_second_all_reuses_every_completed_phase(offline):
     for study in ("main", "study_g"):
         run = _run(offline, study)
@@ -1007,6 +1037,9 @@ def test_a_live_study_preflight_needs_a_fresh_smoke_and_the_studys_own_checks(cl
         run_phases(StudyRun("study_g", "g1", **kw), "preflight")
     assert "g.pilot.luna: CM-native needs confirmed native compaction for openai/gpt-6-luna" in str(e.value)
     _write_smoke(clean_env / "smoke", ["effort", "orchestrator"])
+    with pytest.raises(PreflightError, match="smoke check 'g_cm_sum' has no live result"):
+        run_phases(StudyRun("study_g", "g0", **kw), "preflight")  # B12: Study G's own checks are required
+    _write_smoke(clean_env / "smoke", ["effort", "orchestrator", *STUDIES["study_g"].smoke_checks])
     with pytest.raises(PreflightError, match="g.cm.luna-high: CM-native needs confirmed native compaction") as e:
         run_phases(StudyRun("study_g", "g1", **kw), "preflight")
     assert "no live smoke record" not in str(e.value), "CM-native's support is checked at preflight, before any sample"

@@ -4,6 +4,7 @@
     uv run --locked python readiness/smoke.py --dry                # offline wiring check (mock models, fake embeddings), $0
     uv run --locked python readiness/smoke.py --only pull,burst    # some checks (with the checks they need)
     uv run --locked python readiness/smoke.py --skip orchestrator  # all but some
+    uv run --locked python readiness/smoke.py --only main,study_g  # a group: gate, main or study_g (CHECK_GROUPS)
     uv run --locked python readiness/smoke.py --profile gate --agent openai/gpt-6-sol   # a flag swaps a role's model, keeps its effort
 
 Checks, in run order (`STEPS`; pass criteria in `smoke_checks.py`):
@@ -36,6 +37,27 @@ Checks, in run order (`STEPS`; pass criteria in `smoke_checks.py`):
                   (RELIABILITY_REVIEW L12): no sample error, a per-item record with view tokens for every case,
                   the report submitted (or its nudge fired), a forked probe at k=5 with schema-valid JSON that
                   never enters the history; reasoning-only assistant turns are counted and must not end a session
+    mas_orchestrator, mas_council, mas_ensemble, mas_kg_workers
+                  (the main study's, BUILD_PLAN B12) M1 and M7 on F1-2, S8k3 and M1k on F7-10, 2 dev tasks each,
+                  M1k once under APG-s (the real builder's graph) and once under LightRAG (LGR-s over a real
+                  extraction; dry LGRo-s), the two KG arms the gate can resolve. Each task is built as ape.run_study
+                  builds it (cache nonce set, wall-clock guard on). Per sample: no error and no sample limit; the
+                  arm's records (`mas_*`, compile and step logs); `mas_accounting` attributes every call and sums to
+                  the sample's usage on every token field; no `mas_agents[*].error`, every stop done/text/turn_cap;
+                  every role ran (orchestrator and workers; 3 members and a chair; 3 attempts); M1k's workers made kg
+                  calls; an unanswered sample warns
+    g_cm_sum, g_cm_todo, g_team_session
+                  (Study G's) CM-sum, CM-todo and M1 in one F8 session of N=6 cases at W=16K and T_abs=4K (so the
+                  management fires), probe at k=6: the f8_session checks above, plus W enforced (no call over W, no
+                  overflow), call kinds agent/cm only (probes apart), Inspect's usage equal to the per-call records';
+                  CM-sum/CM-todo: a summary/extraction call metered as kind cm (live: with usage) and a drop of the
+                  completed cases at T_abs (CM-todo warns when the agent never called todo_write); M1: workers ran
+                  and stopped sanely, `mas_accounting` sums to the session's agent usage
+                  Every study check also judges: the profile's effort on every call (`effort` above shows the
+                  provider honours it), the per-run cache nonce in every sample's metadata and at the head of every
+                  agent, management and probe call (`ape.agent.cache_nonce`; kg calls carry none), and the realised
+                  cost against the check's projection (live: $0 fails, outside 0.05-2x warns). Each needs `effort`.
+                  The gate requires none of them; `ape.run_study` requires its study's (`STUDY_CHECKS`)
     retrieval     no LLM: S3s evidence recall at its budget and APG's embedding-shortlist gold rate on F7-100
                   (warn below 0.8; the authored graph when D017 built it, else the oracle graph), plus LightRAG's
                   context recall with the query as its keywords when L2 built the index (reported only). Facts
@@ -60,9 +82,13 @@ projection (GPT-6 Luna, high; 2026-10-03 priors): L2 $0.10, D017 $0.04, H4 $0.01
 perstep_reasoning $0.01, pull $0.05, recovery $0.01, burst $0.10, f8_session $0.12 (two N=5 sessions priced as
 Study G sessions: full-history views at the window's share, so conservative), extract_f7_1000 $1.34 (one F7-1000
 world, 547 chunks, both systems), orchestrator $1.15 (build-dev $0.08, tune $0.13, anchor $0.58 with gpt-4o-mini,
-pilot $0.37; $1.01 with the Luna anchor fallback), total ≈ $2.95 (≈ $2.81 with the Luna fallback) under the $4
-default cap: the $1 of headroom covers checks that spend somewhat over their projection. The effort check reads the
-probe, which costs ≈ $0.02 on its own. `--dry` spends $0. Spend is this invocation's: Inspect-metered calls, plus
+pilot $0.37; $1.01 with the Luna anchor fallback): the gate's checks ≈ $2.95 (≈ $2.81 with the Luna fallback). The
+studies' checks (B12, 2026-10-03 priors): mas_orchestrator $0.02, mas_council $0.05, mas_ensemble $0.02,
+mas_kg_workers $0.07 (both KG arms, and the F7-10 world's APG authoring and LightRAG extraction), g_cm_sum $0.06,
+g_cm_todo $0.06, g_team_session $0.13 (sessions priced at the plan's view shares of the smoke's W = 16K: conservative),
+≈ $0.41. Total ≈ $3.36 under the $4 default cap, with $0.64 of headroom for checks that spend somewhat over their
+projection; `--only gate` (≈ $2.95) and `--only main,study_g` (≈ $0.41) split it when a full run is cut short. The
+effort check reads the probe, which costs ≈ $0.02 on its own. `--dry` spends $0. Spend is this invocation's: Inspect-metered calls, plus
 the growth of the build/embedding ledger and of the orchestrator run. A live smoke's log dirs and ledger also
 register in the program spend registry (`ape.spend`, label `smoke`), so they count toward the program's
 $5,000 in run_gate's guard and in `python -m ape.budget spend`.
@@ -85,9 +111,11 @@ Live record and the gate. A live run also updates cache/smoke/live/checks.json: 
 (status, finish time, commit and its uncommitted code changes `code_dirty`, profile, model overrides, the probe's
 snapshots), so a check re-run alone with --only replaces its own entry. run_gate's live preflight
 (`ape.run_gate.check_live_smoke`) refuses a live gate run unless the latest live report passed (warn allowed) on the
-gate profile and every check here has a passing result no older than 7 days, of committed code that is exactly the
-code that would run (src/, power/, uv.lock), on PROVENANCE.md's pinned snapshots; or the run passes
---skip-smoke-check "<reason>". A run settles this once, at its first preflight (run.json).
+gate profile and every gate check (`GATE_CHECKS`, the record's `required`) has a passing result no older than 7 days,
+of committed code that is exactly the code that would run (src/, power/, uv.lock), on PROVENANCE.md's pinned
+snapshots; or the run passes --skip-smoke-check "<reason>". A run settles this once, at its first preflight
+(run.json). `ape.run_study`'s live preflight requires the same plus its study's own checks (`STUDY_CHECKS`, equal to
+`Study.smoke_checks`).
 
 Cost model check. After a live run, its own Inspect logs go through `ape.budget.calibrate` into
 cache/smoke/live/calibration_measured.yaml (never config/), and report.md's "Cost model check" compares the
@@ -127,7 +155,17 @@ RUN_TASKS = {"H4": 2, "L4_L5": 2, "APG": 2, "perstep_reasoning": 2, "pull": 4, "
 BURST = {"tasks": 12, "epochs": 2}  # 24 samples
 F8 = {"N": 5, "arms": ("CM0", "O-state"), "message_limit": 400}  # one short session per arm; the probe at k = N
 F7_1000_TASKS = 2  # the extraction check builds one F7-1000 dev world; its tasks are not run
-DEFAULT_MAX_USD = 4.0  # the full live smoke projects ≈ $2.9; $3 left no headroom for checks that run near their projection
+# BUILD_PLAN B12: the main study's multi-agent and ensemble arms, as (arm, family, level), 2 tasks each; M1k runs under
+# both KG arms the gate can resolve (APG if GO, LightRAG if NO_GO; dry: LightRAG's oracle index).
+MAS = {"tasks": 2, "message_limit": 200}
+MAS_CELLS = {"mas_orchestrator": ("M1", "F1", "2"), "mas_council": ("M7", "F1", "2"), "mas_ensemble": ("S8k3", "F7", "10"), "mas_kg_workers": ("M1k", "F7", "10")}
+KG_WORKER_ARMS = {"live": ("APG-s", "LGR-s"), "dry": ("APG-s", "LGRo-s")}
+# Study G's new arm families: one short F8 session each (N cases, default knobs), at a small W and T_abs so that
+# management fires (the reference trajectory's view passes 4K at the third case and ends near 8.6K; a live agent's
+# grows faster); the probe at k = N.
+G_SESSION = {"N": 6, "window": 16_000, "threshold": 4_000, "message_limit": 600}
+G_ARMS = {"g_cm_sum": "CM-sum", "g_cm_todo": "CM-todo", "g_team_session": "M1"}
+DEFAULT_MAX_USD = 4.0  # the full live smoke projects ≈ $3.36 (gate checks ≈ $2.95, the studies' ≈ $0.41): $0.64 of headroom
 # name -> (checks it needs, what it checks), in run order: the costly extraction runs late, the orchestrator last.
 STEPS: dict[str, tuple[tuple[str, ...], str]] = {
     "effort": ((), "per role and call path: config accepted, effort honoured (from the probe)"),
@@ -141,10 +179,22 @@ STEPS: dict[str, tuple[tuple[str, ...], str]] = {
     "recovery": ((), "a first-attempt harness fault is retried and recorded"),
     "burst": ((), "24 samples at the profile's max_connections"),
     "f8_session": ((), "one F8 session (N=5) per arm, CM0 and O-state, with a forked probe"),
+    "mas_orchestrator": (("effort",), "main: M1 on F1-2 (orchestrator + workers): records, accounting, effort, nonce, cost"),
+    "mas_council": (("effort",), "main: M7 on F1-2 (council, critique rounds, chair): records, accounting, effort, nonce, cost"),
+    "mas_ensemble": (("effort",), "main: S8k3 on F7-10 (3 attempts, vote): records, accounting, effort, nonce, cost"),
+    "mas_kg_workers": (("effort",), "main: M1k on F7-10 under APG-s and LightRAG (KG workers): records, kg calls, effort, nonce, cost"),
+    "g_cm_sum": (("effort",), "Study G: CM-sum in one F8-6 session at a small W and T_abs: summaries metered as cm, W, probes, nonce"),
+    "g_cm_todo": (("effort",), "Study G: CM-todo in one F8-6 session: extraction (cm) and todo traffic, W, probes, nonce"),
+    "g_team_session": (("effort",), "Study G: M1 in one F8-6 session: orchestrator + workers, accounting, W, probes, nonce"),
     "retrieval": ((), "real-embedding retrieval, no LLM"),
     "extract_f7_1000": ((), "the real builder on one F7-1000 world: APG authoring and LightRAG extraction"),
     "orchestrator": ((), "run_gate preflight..pilot at SMOKE_SCALE; freeze refuses"),
 }
+# Who requires which checks. The gate's live preflight requires GATE_CHECKS (checks.json `required`); a study's
+# (`ape.run_study`, `Study.smoke_checks`) requires them plus its own, which must equal STUDY_CHECKS here.
+STUDY_CHECKS = {"main": ("mas_orchestrator", "mas_council", "mas_ensemble", "mas_kg_workers"), "study_g": ("g_cm_sum", "g_cm_todo", "g_team_session")}
+GATE_CHECKS = tuple(s for s in STEPS if not any(s in checks for checks in STUDY_CHECKS.values()))
+CHECK_GROUPS = {"gate": GATE_CHECKS, **STUDY_CHECKS}  # names --only / --skip also accept
 # The checks that run on the shared F7-100 / F3 worlds (built once, up front); the others build their own.
 SHARED_WORLD_STEPS = {"L2", "D017", "H4", "L4_L5", "APG", "pull", "recovery", "burst", "retrieval"}
 
@@ -236,10 +286,13 @@ class Spend:
 
 def select_steps(only: Sequence[str] | None, skip: Sequence[str] | None) -> list[str]:
     """The checks to run, in STEPS order: `only` (default all) minus `skip`, plus every check they need. A
-    needed check that `skip` names is an error, since the dependent check cannot run without it."""
+    needed check that `skip` names is an error, since the dependent check cannot run without it. A group name
+    (`CHECK_GROUPS`: gate, main, study_g) stands for its checks."""
+    expand = lambda names: [c for n in names or [] for c in CHECK_GROUPS.get(n, (n,))]  # noqa: E731
+    only, skip = (expand(only) if only else only), (expand(skip) if skip else skip)
     for name in [*(only or []), *(skip or [])]:
         if name not in STEPS:
-            raise SystemExit(f"unknown check {name!r}; checks are {', '.join(STEPS)}")
+            raise SystemExit(f"unknown check {name!r}; checks are {', '.join(STEPS)} (groups: {', '.join(CHECK_GROUPS)})")
     chosen = set(only or STEPS) - set(skip or [])
     todo = list(chosen)
     while todo:
@@ -275,6 +328,16 @@ def step_cells(profile: str) -> dict[str, list]:
         # Study G's session pricing: full-history views at the window's share, probes at the agent's prices.
         "f8_session": [_cell("f8_session", profile, kind="session", arms=list(F8["arms"]), N=F8["N"], sessions=1, epochs=1)],
         "extract_f7_1000": [_cell("extract_f7_1000", profile, kind="build", systems=["apg", "lightrag"], worlds={"F7-1000": 1})],
+        # The studies' arm families (B12), priced as the plan prices them (M1 2.5x, M7 5x, S8k3 3x S1's generations).
+        **{step: [agent(step, [arm], f"{fam}-{lvl}", MAS["tasks"])] for step, (arm, fam, lvl) in MAS_CELLS.items() if step != "mas_kg_workers"},
+        # M1k under APG-s and under LightRAG (priced at LightRAG's 2,300-token context), plus both KG builds of its world.
+        "mas_kg_workers": [
+            agent("mas_kg_workers.apg", ["M1k"], "F7-10", MAS["tasks"]),
+            agent("mas_kg_workers.lgr", ["M1k"], "F7-10", MAS["tasks"], context=2300),
+            _cell("mas_kg_workers.build", profile, kind="build", systems=["apg", "lightrag"], worlds={"F7-10": 1}),
+        ],
+        # Study G's sessions: the plan's per-call view priors at the smoke's small window (conservative: full-window shares).
+        **{step: [_cell(step, profile, kind="session", arms=[arm], N=G_SESSION["N"], sessions=1, epochs=1, window=G_SESSION["window"])] for step, arm in G_ARMS.items()},
     }
 
 
@@ -441,10 +504,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f7 = World.load(cfg.world_path(asyncio.run(build("dev", "F7", ["100"], n_worlds=1, n_tasks=F7_TASKS, relational=True, embed=True))[0]))
         f3 = World.load(cfg.world_path(asyncio.run(build("dev", "F3", ["5", "60"], n_worlds=1, n_tasks=2, relational=True, embed=True))[0]))
 
-    def run_gate_check(name: str, task_or_tasks, *, model=None, message_limit: int = 40, **kw):
-        """One check's eval set through the FX-3 runner, in its own fresh log dir; the full logs. `model` swaps the
-        agent (the F8 session's dry run needs the session mock); `message_limit` caps a sample's messages."""
-        _, headers = run_evals(task_or_tasks, log_root / name, profile=profile, model=model or agent, model_roles=roles, display="none", message_limit=message_limit, **kw)
+    def run_gate_check(name: str, task_or_tasks, *, model=None, model_roles=None, message_limit: int = 40, **kw):
+        """One check's eval set through the FX-3 runner, in its own fresh log dir; the full logs. `model` and
+        `model_roles` swap the agent and roles (dry runs of sessions and multi-agent arms need their own mocks);
+        `message_limit` caps a sample's messages."""
+        _, headers = run_evals(task_or_tasks, log_root / name, profile=profile, model=model or agent, model_roles=model_roles or roles, display="none", message_limit=message_limit, **kw)
         logs = [read_eval_log(h.location) for h in headers]
         spend.logs += logs
         return logs
@@ -457,7 +521,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ctx = {
         "args": args, "profile": profile, "cfg": cfg, "f7": f7, "f3": f3, "report": report, "spend": spend,
         "run_gate_check": run_gate_check, "orchestrator_run": orchestrator_run, "build_model": build_model, "build_effort": build_effort,
-        "provenance0": provenance0, "config0": config0,
+        "provenance0": provenance0, "config0": config0, "proj": proj,
+        # The studies' checks run as ape.run_study runs its eval sets: under a cache-nonce seed, this invocation's own.
+        "nonce_seed": f"smoke/{report['mode']}/{log_root.name}",
     }
     status = 0
     try:
@@ -511,7 +577,8 @@ def _finish(report: dict, args, out: Path, spend: "Spend", log_root: Path, orche
         out.mkdir(parents=True, exist_ok=True)
         record_path = out / RECORD_NAME
         previous = json.loads(record_path.read_text()) if record_path.is_file() else None
-        record_path.write_text(json.dumps(sc.update_live_record(previous, report, list(STEPS)), indent=1, default=str))
+        # `required` is what the gate needs; the studies add their own checks (`ape.run_study`, `Study.smoke_checks`).
+        record_path.write_text(json.dumps(sc.update_live_record(previous, report, list(GATE_CHECKS)), indent=1, default=str))
     write_report(report)
     return failed
 
@@ -572,7 +639,8 @@ def cost_model_check(out: Path, log_root: Path, run, since: float, profile) -> d
 
     - Inspect logs (this invocation's checks, plus the orchestrator run's when it ran) go through
       `ape.budget.calibrate` into `<out>/calibration_measured.yaml`; config/ is never written. The exact command to
-      promote them into config/budget_calibration_measured.yaml is returned (and printed in report.md).
+      promote them into config/budget_calibration_measured.yaml is returned (and printed in report.md). Study G's
+      checks (`G_ARMS`) are left out: their sessions run at the smoke's small W and T_abs, not the plan's.
     - Output tokens per call (reasoning included) per role and effort, and calls per sample per measured cell,
       against the priors; build calls per system from the ledgers.
     - Two re-projections of the whole plan, conservative, against the current one: `measured_cells` (the
@@ -582,7 +650,9 @@ def cost_model_check(out: Path, log_root: Path, run, since: float, profile) -> d
     """
     from ape.budget import calibrate, estimate, load_assumptions, load_measured, load_plan
 
-    logs = sorted(log_root.rglob("*.eval")) if log_root.is_dir() else []
+    # Study G's checks run their sessions at a smaller W and T_abs than the plan's, so their per-call views say nothing
+    # about the plan's session cells: they never enter the calibration (or its promote command).
+    logs = sorted(p for p in log_root.rglob("*.eval") if p.relative_to(log_root).parts[0] not in G_ARMS) if log_root.is_dir() else []
     if run is not None and run.dir.is_dir():
         logs += sorted(run.dir.rglob("*.eval"))
     out.mkdir(parents=True, exist_ok=True)
@@ -917,6 +987,184 @@ def check_f8_session(c: dict) -> tuple[dict, list]:
     return sc.f8_session_verdict(arms, gen_f8.PROBE_CATEGORIES), logs
 
 
+# --- the studies' new arm families (BUILD_PLAN B12) ---------------------------------------------------------------------
+
+
+NONCE_ROLES = (None, "agent", "cm", "probe")  # calls that carry the nonce: agents, management calls, forked probes
+
+
+def _call_records(sample) -> tuple[list[dict], list[dict]]:
+    """Per model call of a sample: (the effort it was sent with, for `sc.effort_sent_verdict`; whether it opens with the
+    sample's cache-nonce line, for `sc.nonce_verdict`). kg-role calls carry no nonce (`ape.agent.cache_nonce`), so only
+    agent, management (`cm`) and probe calls are judged for it."""
+    from ape.agent import cache_nonce
+
+    nonce = cache_nonce.of(sample.metadata)
+    efforts, prefixes = [], []
+    for e in sample.events:
+        if e.event != "model" or getattr(e, "pending", False):
+            continue
+        usage = getattr(getattr(e, "output", None), "usage", None)
+        efforts.append({"role": e.role, "effort": getattr(e.config, "reasoning_effort", None), "reasoning_tokens": getattr(usage, "reasoning_tokens", None)})
+        if e.role in NONCE_ROLES:
+            first = (e.input or [None])[0]
+            prefixes.append({"kind": e.role or "agent", "prefixed": bool(nonce) and first is not None and first.role == "system" and cache_nonce.starts_with_nonce(first.text, nonce)})
+    return efforts, prefixes
+
+
+def _study_parts(c: dict, step: str, logs: list, verdict: dict, spent0: float) -> dict:
+    """A study check's verdict combined with the effort, nonce and cost parts every one of them has."""
+    from ape.agent import cache_nonce
+
+    efforts: list[dict] = []
+    per_log: dict[str, dict] = {}
+    for lg in logs:  # each task (an arm, or one of M1k's KG arms) carries its own nonce: judged per log
+        md = lg.eval.metadata or {}
+        prefixes, recorded = [], []
+        for s in lg.samples or []:
+            e, p = _call_records(s)
+            efforts += e
+            prefixes += p
+            recorded.append(cache_nonce.of(s.metadata))
+        kg = (md.get("knobs") or {}).get("APE_KG_ARM") if md.get("arm") == "M1k" else None
+        per_log[f"{md.get('arm')}{'/' + kg if kg else ''}"] = sc.nonce_verdict(md.get(cache_nonce.METADATA_KEY), recorded, prefixes)
+    nonce = next(iter(per_log.values())) if len(per_log) == 1 else sc.combine(per_log) if per_log else sc.result(sc.FAIL, {}, reason="no logs")
+    role_efforts = {r: s.reasoning_effort for r, s in c["profile"].roles.items()}
+    return sc.combine({
+        "records": verdict,
+        "effort": sc.effort_sent_verdict(efforts, role_efforts),
+        "nonce": nonce,
+        "cost": sc.cost_band_verdict(c["spend"].total() - spent0, c["proj"].get(step, 0.0), bool(c["args"].dry)),
+    })
+
+
+def _study_task(c: dict, build_task, *parts: str):
+    """A task built as `ape.run_study` builds one: under a cache-nonce seed of this invocation's own (`parts` separate
+    the eval sets of one check, as run_study's groups are), with the wall-clock guard."""
+    from ape import run_gate as rg
+    from ape.agent.cache_nonce import NONCE_ENV
+    from ape.runner import working_guard
+
+    with rg._environ({NONCE_ENV: "/".join([c["nonce_seed"], *parts])}):
+        return working_guard(build_task())
+
+
+def _mas_record(log, s, label: str | None = None) -> dict:
+    """What `sc.mas_verdict` needs from one main-study multi-agent sample."""
+    from ape.worlds.env_tools import ANSWER
+
+    acc = s.store.get("mas_accounting") or {}
+    agents = acc.get("agents") or {}
+    return {
+        "id": s.id,
+        "label": label,
+        "log_status": log.status,
+        "sample_error": s.error.message if s.error else None,
+        "limit": s.limit.type if s.limit is not None else None,
+        "store_keys": sorted(s.store),
+        "accounting": {"error": acc.get("error"), "unattributed": acc.get("unattributed"), "totals": acc.get("totals")},
+        "usage": {f: sum(int(getattr(u, f) or 0) for u in (s.model_usage or {}).values()) for f in sc.MAS_TOKEN_FIELDS},
+        "agents": [{k: a.get(k) for k in ("id", "role", "stop", "error")} for a in s.store.get("mas_agents") or []],
+        "answered": s.store.get(ANSWER) is not None,
+        "kg_calls": sum(int((a.get("models") or {}).get("kg", {}).get("calls") or 0) for a in agents.values()),
+        "success": s.scores["task_success"].value if s.scores and "task_success" in s.scores else None,
+    }
+
+
+def check_mas(c: dict, step: str) -> tuple[dict, list]:
+    """A main-study multi-agent or ensemble arm (`MAS_CELLS`) on 2 dev tasks, its task built as the study runner builds
+    it (cache nonce, wall-clock guard): the arm's records and per-agent accounting (`sc.mas_verdict`), the effort on
+    every call, the nonce on every agent prompt, and the realised cost against the projection. Dry: `GoldMulti` plays
+    every role (the naive mock would never plan or delegate). M1k runs once per KG arm the gate can resolve: APG-s
+    over the world's authored graph (the real builder live, the fake author dry) and LightRAG (LGR-s over a real
+    extraction live; dry, LGRo-s over the oracle index)."""
+    from ape import run_gate as rg
+    from ape.agent.arms import KG_ARM_ENV
+    from ape.build import build
+    from ape.models import agent_model, role_models
+    from ape.tasks.main import main_study
+
+    spent0 = c["spend"].total()
+    dry, cfg, profile = bool(c["args"].dry), c["cfg"], c["profile"]
+    arm, family, level = MAS_CELLS[step]
+    world_id = asyncio.run(build("dev", family, [level], n_worlds=1, n_tasks=MAS["tasks"], relational=True, embed=True))[0]
+    variants: list[tuple[str | None, dict]] = [(None, {})]
+    if arm == "M1k":
+        from ape.apg.author import author_world, build_llm_author
+        from ape.lgr.build import build_index
+        from ape.llm.ledger import Ledger
+        from ape.worlds.spec import World
+
+        world = World.load(cfg.world_path(world_id))
+        if dry:
+            from ape.llm.fake import perfect_author as author
+        else:
+            author = build_llm_author(c["build_model"], Ledger(cfg.ledger_path), world.id, c["build_effort"])
+        asyncio.run(author_world(world, cfg, author))
+        asyncio.run(build_index(world, "oracle" if dry else "extract", cfg))
+        variants = [(kg, {KG_ARM_ENV: kg}) for kg in KG_WORKER_ARMS["dry" if dry else "live"]]
+    model = roles = None
+    if dry:
+        from ape.llm.mock_multi import GoldMulti
+
+        gold = GoldMulti(cfg.worlds_dir)
+        model = agent_model(profile, model="mockllm/model", custom_outputs=gold)
+        roles = role_models(profile, ("kg",), model="mockllm/model", custom_outputs=gold.kg)
+    logs, records = [], []
+    for kg, env in variants:
+        with rg._environ(env):  # the KG arm is read when the arm is built inside the run, as under run_study's kg_env
+            task = _study_task(c, lambda: main_study(family=family, level=level, split="dev", arm=arm), step, kg or "")
+            mine = _resolved(c["run_gate_check"](f"{step}{'_' + kg if kg else ''}", task, model=model, model_roles=roles, limit=MAS["tasks"], message_limit=MAS["message_limit"]))
+        logs += mine
+        records += [_mas_record(lg, s, kg) for lg in mine for s in (lg.samples or [])]
+    for lg in logs:  # a task that produced no sample still counts
+        if not lg.samples:
+            records.append({"id": None, "label": None, "log_status": lg.status, "sample_error": "no sample"})
+    return _study_parts(c, step, logs, sc.mas_verdict(arm, records), spent0), logs
+
+
+def check_g_session(c: dict, step: str) -> tuple[dict, list]:
+    """A Study G arm (`G_ARMS`) in one short F8 session (N = 6, default knobs) at a small window and threshold, so that
+    the context-management arms' management fires, built as the study runner builds it (cache nonce, wall-clock guard,
+    the plan's arm knobs at their defaults): the session's records (`sc.session_arm_verdict`), the effort on every call,
+    the nonce on every agent, management and probe call, and the realised cost against the projection. Dry: the gold
+    session agent, which delegates under M1, writes the todo list under CM-todo and answers management calls and probes
+    (the naive mock does neither of the first two)."""
+    from ape.build import build
+    from ape.tasks.study_g import f8_session
+    from ape.worlds import gen_f8
+    from ape.worlds.env_f8 import CM_EVENTS, EVENTS, OVERFLOW, USAGE
+
+    spent0 = c["spend"].total()
+    dry, cfg, n = bool(c["args"].dry), c["cfg"], G_SESSION["N"]
+    arm = G_ARMS[step]
+    world_id = asyncio.run(build("dev", "F8", [str(n)], n_worlds=1, n_tasks=0, relational=True, embed=True))[0]
+    model = None
+    if dry:  # the gold session agent: it delegates under M1 and writes the todo list under CM-todo (the naive mock does neither)
+        from ape.llm.mock_session import gold_session_agent
+        from ape.models import agent_model
+        from ape.worlds.spec import World
+
+        model = agent_model(c["profile"], model="mockllm/model", custom_outputs=gold_session_agent(World.load(cfg.world_path(world_id))))
+    task = _study_task(c, lambda: f8_session(level=str(n), split="dev", arm=arm, limit_worlds=1, window=G_SESSION["window"], threshold=G_SESSION["threshold"], checkpoints=str(n)), step)
+    logs = _resolved(c["run_gate_check"](step, task, model=model, message_limit=G_SESSION["message_limit"]))
+    sample = next((s for lg in logs for s in (lg.samples or [])), None)
+    if sample is None:
+        rec: dict = {"log_status": logs[0].status if logs else "missing", "sample_error": "no sample", "n_cases": n}
+    else:
+        rec = _session_record(logs[0], sample, gen_f8.PROBE_CATEGORIES) | {
+            "cm_events": sample.store.get(CM_EVENTS, []),
+            "policy_tools": [e for e in sample.store.get(EVENTS, []) if e.get("policy") and e.get("tool") == "todo_write"],
+            "overflow": sample.store.get(OVERFLOW),
+            "usage_by_kind": (sample.store.get(USAGE) or {}).get("by_kind") or {},
+            "inspect_usage": sum(int(u.total_tokens or 0) for u in (sample.model_usage or {}).values()),
+            "mas_agents": sample.store.get("mas_agents") or [],
+            "mas_accounting": sample.store.get("mas_accounting") or {},
+        }
+    verdict = sc.session_arm_verdict(arm, rec, gen_f8.PROBE_CATEGORIES, window=G_SESSION["window"], threshold=G_SESSION["threshold"], dry=dry)
+    return _study_parts(c, step, logs, verdict, spent0), logs
+
+
 def check_extract_f7_1000(c: dict) -> tuple[dict, list]:
     """The real builder on one F7-1000 dev world (the gate's hard cell): APG authoring and LightRAG extraction through
     `ape.artifacts`, then D-017's coverage (`ape.build_quality`) and build health (lost chunks), wall-clock and the
@@ -1122,6 +1370,8 @@ STEP_FUNCS: dict[str, Callable[[dict], tuple[dict, list]]] = {
     "recovery": check_recovery,
     "burst": check_burst,
     "f8_session": check_f8_session,
+    **{step: (lambda c, step=step: check_mas(c, step)) for step in MAS_CELLS},
+    **{step: (lambda c, step=step: check_g_session(c, step)) for step in G_ARMS},
     "retrieval": check_retrieval,
     "extract_f7_1000": check_extract_f7_1000,
     "orchestrator": check_orchestrator,

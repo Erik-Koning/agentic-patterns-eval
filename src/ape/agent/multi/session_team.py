@@ -72,6 +72,7 @@ from inspect_ai.util import LimitExceededError
 
 from ...llm.tokens import count_tokens, truncate_to_tokens
 from ...worlds import gen_f8
+from ..cache_nonce import with_nonce
 from ..context_policy import FullHistory, SessionOverflow, register_policy, tool_name, view_tokens
 from . import session_prompts as P
 from .specialists import N_WORKERS, Specialist, specialists
@@ -277,7 +278,7 @@ class SessionTeam(FullHistory):
         tools = [*self.worker_tools(spec).values(),
                  ToolDef(report, name="report", description=P.REPORT_DESCRIPTION, parameters=_params(result=ToolParam(type="string", description="Your result.")))]
         note = P.WORKER_NOTE if spec is None else f"{P.WORKER_NOTE} {P.WORKER_SPECIALTY.format(covers=spec.coverage)}"
-        messages: list[ChatMessage] = [ChatMessageSystem(content=gen_f8.system_prompt(ctx.world)),
+        messages: list[ChatMessage] = [ChatMessageSystem(content=with_nonce(gen_f8.system_prompt(ctx.world), ctx.nonce)),
                                        ChatMessageUser(content=P.WORKER_SUBTASK.format(note=note, subtask=subtask))]
         status, t0 = "turn_cap", time.perf_counter()
         try:
