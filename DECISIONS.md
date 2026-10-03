@@ -427,6 +427,15 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Completeness check** (`tuning.study_grid_problems`) before any dev run: candidate counts equal under `equal_budgets`, distinct ids, each candidate runs its own arm and sets only its own valid knobs, no knob shared across systems, and counts and dev cells match the run plan.
 - **Known limits:** with about 40 dev tasks per candidate the standard error of a difference between candidates is about 11 pp, so the tune catches broken variants, not small gains. The gate gave S5's systems 6 configurations and S3s 3, not 4. Sol cells reuse the Luna selections.
 
+**D-042 (2026-10-03, BUILD_PLAN B11: PREREGISTRATION_G.md drafted).** The Study G pre-registration is written; its hypothesis and design tables are generated from `analysis/g_hypotheses.py` and a test keeps them identical. Decisions made with it:
+- **T_abs is fixed at 20K for every arm** (run_plan `study_g.threshold`), not tuned. It defines when management fires, so tuning it per arm would let arms differ in a structural parameter; the runner never passes it as a candidate.
+- **Each tuned arm runs with exactly its own selection's knobs.** CM knobs share one namespace (D-037), and the runner applied every selection's env to every arm of a cell, so S-CM* would have run with CM-prune's and CM-sum's knobs; being fixed in the runner (per-arm env groups).
+- **Topology is a primary test group** (G-H3 has been confirmatory since D-033), so a budget stop cannot drop it first; being fixed in the runner.
+- **A missing planned capability point** makes a confirmatory row INCOMPLETE, never SUPPORTED (the claims are restricted to the planned points); being fixed in the analysis.
+- M1 and M2 are not tuned in Study G (they inherit the main study's protocol defaults), while S-CM* is tuned; the pre-registration states the asymmetry.
+- Study G's runner fills no `[PILOT: …]` items: tuned values come from the frozen `selected.yaml`.
+- **Open for the user** (`[USER: …]` in the pre-registration): CM-native tiers, S1+KG and S-subiso, the capability anchor, the go-ahead after the micro-pilot review, and the CM-arm owner, skeptic, analyst and independent prompt author.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
