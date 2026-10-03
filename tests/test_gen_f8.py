@@ -328,7 +328,7 @@ def test_unbuilt_arms_are_refused():
     from ape.agent.session import f8_session_agent
 
     with pytest.raises(ValueError, match="not built yet"):
-        f8_session_agent(arm="CM-sum")
+        f8_session_agent(arm="CM-lesson")  # Tier B: not built (CM-sum was, until B8)
 
 
 def test_plan_knobs_make_short_sessions_cross_the_window_like_long_ones():
