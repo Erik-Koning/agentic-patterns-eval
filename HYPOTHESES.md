@@ -10,7 +10,7 @@ This is the single ID space for every hypothesis in the program. Other documents
 
 Families: F3 tool load · F5 relational/temporal · F7 policy compliance (levels 10/100/1000; renderings descriptive / id_only / messy) · F1/F2/F4/F8/F9 (planned).
 
-Last updated 2026-09-30.
+Last updated 2026-10-03 (D-033, D-034).
 
 ## Gate (APG vs LightRAG): `GATE_PREREG.md`
 
@@ -23,7 +23,8 @@ Last updated 2026-09-30.
 | ID | Statement | Source | Arms | Cells | Primary measure | Test | Status |
 |---|---|---|---|---|---|---|---|
 | K1 | Graph structure beats equally engineered flat retrieval on relational policies and tool scoping | brief H2-struct | APG*, LGR*, S3s | F7 (descriptive, id_only, messy), F3 | Success; error labels (missed_exception, wrong_tool); evidence recall | Paired contrasts per rendering and delivery mode | 🟡 data from the gate and its id_only/messy runs; the report shows the contrasts, but no multiplicity-corrected test across renderings and modes is implemented |
-| K2 | KG delivery substitutes for multi-agent specialization (negative delivery × architecture interaction) | brief H2 | S1, S5, M1, M1k | F3, F7 | Success | 2×2 interaction | ❌ needs M1, M1k |
+| K2 | KG delivery substitutes for multi-agent specialization (negative delivery × architecture interaction) | brief H2 | S1, S5, M1, M1k | F3, F7 | Success | 2×2 interaction, one-sided, Study B's four cells pooled | 🟡 arms and analysis built (B2, B4); ⏳ runs |
+| K2-NI | Operationally, the KG single agent is non-inferior to the specialist team at half its cost | brief H2 | S5, M2 | F3, F7 | Success; realized cost ratio | **D-033:** one NI test pooled over Study B's four cells at **5 pp**, its own Holm family, plus S5/M2 cost ≤ 0.5 (upper 95% ≤ 0.6) | 🟡 built; ⏳ runs |
 | K3 | Persona content adds ≈ 0 on objective tasks | brief H2b | S5 vs S5-P0 | F3, F7 | Success | TOST ±2 pp | ⏸ **dropped (D-028):** the worlds carry no persona content, so S5-P0 would equal S5; S5-P0 is removed from the run plan |
 | K4 | Monolith degrades with KB size; KG stays flat (only when policies are relational) | brief H2c | S1, S5, S3s | F7 levels 10/100/1000 × relational/independent | Success vs log(KB size) | **Descriptive (D-028):** slopes and their CIs are reported; no confirmatory TOST (two levels give a slope CI of about ±4.7 pp per decade against ±2 pp). The relational-vs-independent clause is not tested: the plan has no independent cells | 🟡 generators and arms exist (F7-10/100/1000) |
 | K5 | Authored-graph quality survives realistic documents | EXPERIMENT_AUDIT §3 | APG*, LGR* (authored vs oracle) | F7 messy vs descriptive | Success gap and extraction coverage | Paired contrast messy vs clean | ✅ generator; ⏳ dev diagnostic |
@@ -32,11 +33,12 @@ Last updated 2026-09-30.
 
 | ID | Statement | Source | Arms | Cells | Measure | Test | Status |
 |---|---|---|---|---|---|---|---|
-| M1 | Context isolation drives multi-agent gains on breadth tasks | brief H1a | M1s vs S9 | F1, F2 | Success | Paired contrast | ❌ |
-| M2 | Ensembling beats coordination at matched cost on dependency chains | brief H1b | S8 vs M1 | F1, F2 | Success at matched realized cost | Frontier interpolation | ❌ |
-| M3 | Communication adds ≈ 0 at matched cost | brief H1c | M7 vs S8, M9a/b | F1, F2 | Success | TOST ±3 pp | ❌ |
-| M4 | Concurrency affects latency only | brief H1d | M1 vs M1s | F1 | Success, wall-clock | **Descriptive (D-028):** the accuracy difference and the latency ratio are reported with CIs; no equivalence claim (n = 50 gives a 90% CI of ±6–10 pp against ±2 pp) | ❌ needs M1, M1s |
-| M5 | Role specialization adds ≈ 0 | brief H1e | M2 vs M1k | F3, F7 | Success | TOST ±3 pp | ❌ |
+| M1 | Context isolation drives multi-agent gains on breadth tasks | brief H1a | M1s vs S9 | F1, F2 | Success | Paired contrast (superiority on F1-32; planned MDE ≈ 15 pp) | 🟡 built; ⏳ runs |
+| M2 | Ensembling beats coordination at matched cost on dependency chains | brief H1b | S8 vs M1 | F1, F2 | Success at matched realized cost | Frontier interpolation, serial gatekeeping after M1 > S1 (MDE ≈ 15 pp) | 🟡 built; ⏳ runs |
+| M3 | Communication adds ≈ 0 at matched cost | brief H1c | M7 vs S8 (M9a/b Tier B) | F1, F2 | Success | TOST **±6 pp** (D-033; ±3 pp had power 0.13) | 🟡 built; ⏳ runs |
+| M4 | Concurrency affects latency only | brief H1d | M1 vs M1s | F1 | Success, wall-clock | **Descriptive (D-028):** the accuracy difference and the latency ratio are reported with CIs; no equivalence claim (n = 50 gives a 90% CI of ±6–10 pp against ±2 pp) | 🟡 built; ⏳ runs |
+| M5 | Role specialization adds ≈ 0 | brief H1e | M2 vs M1k | F3, F7 | Success | TOST **±6 pp** (D-033; ±3 pp had power 0.05) | 🟡 built; ⏳ runs |
+| T1 | The coordination payoff (M1 − S8 at matched cost) shrinks from Luna to Sol | brief H6 (tier clause) | M1, S8 on Luna and Sol | F1-32, F7-100 | Success at matched cost | **Descriptive (D-033):** estimate with interval (power 0.44–0.54 at 15 pp) | 🟡 built; ⏳ runs |
 
 ## C, F, A, P: cost meters, faults, auditability, predictability
 
@@ -51,9 +53,9 @@ Last updated 2026-09-30.
 
 | ID | Statement | Source | Arms | Measure | Status |
 |---|---|---|---|---|---|
-| G1 | The topology gap shrinks as capability rises | Study G H1 | S1, S1+KG, M1, M2 × Luna/Sol/Astra (± effort) | topology × capability interaction (logit); RER | ❌ needs M arms and F8 |
-| G2 | Context-management gains persist across tiers and grow with length | Study G H2 | CM0, CM-prune, CM-sum, CM-native, CM-todo, CM-reset, O-state × tiers | Equivalence on strategy × capability; strategy × log(view tokens); headroom recovered | ❌ needs the ContextPolicy layer, F8, probes |
-| G3 | Isolation, not specialization, carries most multi-agent gain; a single agent with context management recovers it more cheaply | Study G H3 (overlaps M1, M5) | S1, M1, M2, S-CM*, S-subiso | Isolation share; recovery at cost ratio | ❌ |
+| G1 | The topology gap shrinks as capability rises | Study G H1 | S-CM* (reference), M1, M2 × Luna low/high, Sol, Astra | **Descriptive (D-033):** slope of the M2 − S-CM* logit gap on measured capability, with interval; S1 on pre-overflow items as sensitivity; S1 itself descriptive only (power 0.12; no affordable design reaches 0.8) | 🟡 analysis built; topology in sessions is B9 |
+| G2 | Context-management gains persist across tiers and grow with length | Study G H2 | CM0, CM-prune, CM-sum, CM-native, CM-todo, CM-reset, O-state × tiers | Confirmatory: Gap_T > 0 at every capability point (G-H2a). **Descriptive (D-033):** headroom recovered R_x across capability (G-H2b; TOST power 0.01), degradation slopes | 🟡 arms and analysis built (B7, B8, B10); ⏳ runs |
+| G3 | Isolation, not specialization, carries most multi-agent gain; a single agent with context management recovers it more cheaply | Study G H3 (overlaps M1, M5) | S1, M1, M2, S-CM* (S-subiso Tier B) | Isolation share ≥ 0.5 (G-H3a); S-CM* recovers ≥ 80% of M2 − S1 at ≤ 60% of its cost per solved item (G-H3b); D-033 adds a Luna-low point and 16 Luna sessions | 🟡 analysis built; topology in sessions is B9 |
 
 ## B: benchmark predictions, `EVAL_DESIGN.md`
 

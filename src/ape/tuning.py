@@ -23,8 +23,9 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -74,7 +75,10 @@ def candidate_dir(log_dir: str | Path, cand: dict) -> Path:
 
 
 def _cell(log) -> str:
-    return f"{log.eval.task_args['family']}-{log.eval.task_args['level']}"
+    """A log's task cell: `family-level` from its task args (a task without a `family` arg, e.g. an F8 session, records
+    its family in the eval metadata)."""
+    args = log.eval.task_args
+    return f"{args.get('family') or (log.eval.metadata or {}).get('family')}-{args['level']}"
 
 
 def _succeeded(sample) -> bool:
@@ -83,19 +87,37 @@ def _succeeded(sample) -> bool:
     return score is not None and score.value == "C"
 
 
+def _gate_task(cell: str, cand: dict, limit_worlds: int | None):
+    from .tasks.gate import gate
+
+    family, level = cell.split("-", 1)
+    return gate(family=family, level=level, split="dev", arm=cand["arm"], delivery=cand.get("delivery", "push"), limit_worlds=limit_worlds)
+
+
 def run_candidate(
-    cand: dict, cells: list[str], model, model_roles: dict, limit_worlds: int | None, epochs: int, log_dir: str | Path, profile=None, costs_path: Path | None = None
+    cand: dict,
+    cells: list[str],
+    model,
+    model_roles: dict,
+    limit_worlds: int | None,
+    epochs: int,
+    log_dir: str | Path,
+    profile=None,
+    costs_path: Path | None = None,
+    make_task: Callable[[str, dict, int | None], Any] | None = None,
+    sample_success: Callable[[Any], float] | None = None,
 ) -> dict:
+    """One candidate on every dev cell. `make_task(cell, cand, limit_worlds)` builds a cell's task (default: the gate
+    task on the dev split; a study orchestrator passes its own, e.g. the main study's task or an F8 session);
+    `sample_success(sample)` scores one sample in [0, 1] (default: 1 when `task_success` is C)."""
     from inspect_ai.log import read_eval_log
 
     from .runner import log_path, run_evals
-    from .tasks.gate import gate
 
+    make_task = make_task or _gate_task
+    sample_success = sample_success or _succeeded
     with env(cand.get("env", {})):
-        tasks = [
-            gate(family=family, level=level, split="dev", arm=cand["arm"], delivery=cand.get("delivery", "push"), limit_worlds=limit_worlds)
-            for family, level in (cell.split("-", 1) for cell in cells)
-        ]
+        tasks = [make_task(cell, cand, limit_worlds) for cell in cells]
         # allow_dirty: logs of an earlier run with other models or --limit-worlds may share the dir.
         prices = {"costs_path": costs_path} if costs_path is not None else {}
         success, logs = run_evals(
@@ -108,7 +130,7 @@ def run_candidate(
     per_cell, cost, files = {}, 0.0, []
     for cell in cells:
         log = read_eval_log(headers[cell].location)
-        scores = [_succeeded(s) for s in log.samples]
+        scores = [float(sample_success(s)) for s in log.samples]
         per_cell[cell] = sum(scores) / len(scores)
         cost += _priced_cost(log, f"{cand['id']} {cell}")
         files.append(log_path(log))
@@ -137,10 +159,14 @@ def tune(
     profile=None,
     log_dir: Path | None = None,
     costs_path: Path | None = None,
+    make_task: Callable[[str, dict, int | None], Any] | None = None,
+    sample_success: Callable[[Any], float] | None = None,
 ) -> dict:
     """Run every candidate of `system`, log each to `log_path` (default cache/tuning_log.jsonl), and return
     the selected record. Eval logs go to `<log_dir>/<system>/...` (default cache/tuning_logs); `costs_path`
-    is the price table for Inspect (default config/model_costs.yaml)."""
+    is the price table for Inspect (default config/model_costs.yaml). Candidates run on the system's own
+    `dev_cells` when the grid gives it some (a study grid whose systems tune on different cells), else on the
+    grid's; `make_task` and `sample_success` as in `run_candidate`."""
     grid = grid or load_grid()
     cfg = Config()
     log_path = log_path or cfg.cache_dir / "tuning_log.jsonl"
@@ -149,7 +175,8 @@ def tune(
     records = []
     for cand in candidates(grid, system):
         try:
-            result = {"status": "ok", **run_candidate(cand, grid["dev_cells"], model, model_roles, limit_worlds, epochs, system_dir, profile, costs_path)}
+            cells = grid["systems"][system].get("dev_cells") or grid["dev_cells"]
+            result = {"status": "ok", **run_candidate(cand, cells, model, model_roles, limit_worlds, epochs, system_dir, profile, costs_path, make_task, sample_success)}
         except RuntimeError as e:  # run failure: logged (PC6 evidence) and unselectable; config errors still raise
             result = {"status": "failed", "error": str(e)[:500], "mean_success": None, "cost_usd": None}
         rec = {"system": system, "candidate": cand, **result, "ts": time.time()}

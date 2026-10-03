@@ -8,8 +8,8 @@ its own tools), one turn cap per case and one nominal window W; only the view di
 - **CM0**: the full, append-only history.
 - **O-state**: system prompt + the generator's true state after the previous case (`render_oracle_state`) + the
   current case's messages. The upper bound that defines Gap_T and R_x.
-
-B8 registers the managed arms (`context_policy.register_policy`).
+- **CM-prune, CM-trim, CM-sum, CM-todo, CM-reset, CM-native and S-CM***: the context-management arms
+  (`ape.agent.cm_arms`, B8).
 
 **Window and threshold.** The harness enforces W for every policy: an agent call whose view, or a management call
 whose input, would exceed W is an **overflow**, and that case and every later one fail (the report too). Before a
@@ -59,6 +59,7 @@ from ..config import ROOT
 from ..scorers.session import item_success, probe_score
 from ..worlds import gen_f8
 from ..worlds.env_f8 import CM_EVENTS, EVENTS, ITEMS, OVERFLOW, PROBES, REPORT, RESUME, USAGE, VIEWS, SessionRecorder, build_session_tools
+from .cm_arms import CM_ARMS
 from .context_policy import (
     ContextPolicy,
     SessionContext,
@@ -80,7 +81,7 @@ from .session_checkpoint import SessionCheckpoints, checkpoint_root, code_versio
 
 log = logging.getLogger(__name__)
 
-SESSION_ARMS = ("CM0", "O-state")  # the arms built here; `context_policy.POLICIES` holds every registered one
+SESSION_ARMS = ("CM0", "O-state", *CM_ARMS)  # the built arms (importing cm_arms registers its own); tests register more
 PROBE_ROLE = "probe"
 CM_ROLE = "cm"
 PROBE_PROMPT = (
@@ -119,7 +120,8 @@ def f8_session_agent(
 ) -> Solver:
     """One F8 session per sample under the arm's context policy. `threshold` (T_abs) defaults to run_plan.yaml's;
     the policy's knobs are read from APE_CM_* when the session starts (`context_policy.resolve_knobs`)."""
-    cls = policy_class(arm)  # an unbuilt arm fails when the task is created, not per sample
+    cls = policy_class(arm)  # an unbuilt arm, or knobs it cannot run with, fail when the task is created
+    cls.validate(resolve_knobs(cls))
     t_abs = plan_threshold() if threshold is None else int(threshold)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:

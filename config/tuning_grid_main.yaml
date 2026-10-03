@@ -1,0 +1,24 @@
+# PLACEHOLDER (BUILD_PLAN B1). This is NOT the main study's tuning grid. Package B3 declares the real one: equal
+# budgets for S1, S5, S9, M1, M7, M1k and M2, each system's candidates declared by its owner before any dev run, and
+# the owners' sign-off. Until then this grid tunes only an arm that exists today (S3s, on main.tune.b's dev cells), so
+# an offline `python -m ape.run_study all --study main --offline` runs end to end. A live tune refuses it
+# (`placeholder: true`, and no owner has signed off).
+#
+# Format (ape.tuning, as config/tuning_grid.yaml): `systems.<name>.candidates` ({id, arm, env}); a system may name its
+# own `dev_cells` (the main study's systems tune on different cells: main.tune.a's F1-32/F2-10, main.tune.b's
+# F3-60/F7-1000), else it uses the top-level `dev_cells`. The selection is keyed by the system's name: a plan arm of that
+# name runs as the selected candidate's arm under its knobs (ape.run_study `run_groups`). Every dev cell must be a cell
+# of a run_plan.yaml tuning cell, so its dev worlds are built. Selection: max mean dev success; candidates within tie_pp
+# of the best go to the lower cost.
+placeholder: true
+owners: {S3s: TODO}
+signed_off: {S3s: false}
+budget_per_system: 4
+tie_pp: 1.0
+dev_cells: [F3-60, F7-1000]
+
+systems:
+  S3s:
+    candidates:
+      - {id: s3s-1000, arm: S3s, env: {APE_S3S_BUDGET: "1000"}}
+      - {id: s3s-2000, arm: S3s, env: {APE_S3S_BUDGET: "2000"}}

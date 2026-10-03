@@ -125,12 +125,14 @@ studies:
            note: "+2 epochs on 15 tasks per MVS condition (brief: ~120 tasks)"}
         - {id: main.C.b, arms: [S1, S5, S8k3, M1, M2], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 15, epochs: 2}
       study_f:
-        - {id: main.F.luna, arms: [S5, M2], cells: [F1-32], n_tasks: 100, epochs: 3,
-           note: "Luna cells not already in Studies A/B (S1, M1 on F1-32 and all four on F7-1000 are reused)"}
+        - {id: main.F.luna, arms: [S5], cells: [F1-32], n_tasks: 100, epochs: 3,
+           note: "Luna cells not already in Studies A/B (S1, M1 on F1-32 and all four on F7-1000 are reused); M2 dropped on F1 (D-034)"}
         - {id: main.F.luna-f7-100, arms: [S1, S5, M1, M2], cells: [F7-100], n_tasks: 100, epochs: 3,
            note: "D-028: Luna at the same KB size as main.F.sol, so the tier contrast (H6) is not confounded with KB size"}
-        - {id: main.F.sol, profile: main_sol, arms: [S1, S5, M1, M2], cells: [F1-32, F7-100], n_tasks: 100, epochs: 3,
-           note: "tier replication on Sol (4 arms x 2 families x 3 epochs); F7-100 not F7-1000: KB scaling is K4's question (Luna), and the 83K monolith x Sol price dominated the budget"}
+        - {id: main.F.sol, profile: main_sol, arms: [S1, S5, M1], cells: [F1-32, F7-100], n_tasks: 100, epochs: 3,
+           note: "tier replication on Sol (3 arms x 2 families x 3 epochs); F7-100 not F7-1000: KB scaling is K4's question (Luna), and the 83K monolith x Sol price dominated the budget"}
+        - {id: main.F.sol-m2, profile: main_sol, arms: [M2], cells: [F7-100], n_tasks: 100, epochs: 3,
+           note: "D-034: M2 on F7 only (specialization is undefined on F1: routing to segment specialists is blind)"}
 
   # ------------------------------------------------------------------------------------------------
   study_g:
@@ -164,7 +166,10 @@ studies:
         - {id: g.cm.astra-high, kind: session, profile: study_g_astra, arms: [CM0, CM-sum, CM-todo, O-state],
            N: 24, sessions: 4, epochs: 2, knobs: {output_tokens: 1750}}
       topology:
-        - {id: g.topo.luna, kind: session, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2, knobs: {output_tokens: 2250}}
+        - {id: g.topo.luna, kind: session, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 16, epochs: 2, knobs: {output_tokens: 2250},
+           note: "D-033: 8 -> 16 sessions (G-H3a/G-H3b power)"}
+        - {id: g.topo.luna-low, kind: session, effort: low, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 16, epochs: 2,
+           knobs: {output_tokens: 2250}, note: "D-033: a fourth topology capability point (Luna-low), for G-H3 and the G-H1 estimate"}
         - {id: g.topo.sol, kind: session, profile: study_g_sol, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2,
            knobs: {output_tokens: 2250}}
         - {id: g.topo.astra, kind: session, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2,

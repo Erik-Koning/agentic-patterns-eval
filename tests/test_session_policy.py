@@ -251,7 +251,7 @@ def test_a_probe_view_must_not_change_the_policy(env, monkeypatch):
 
 def test_policy_registry_and_knobs(monkeypatch):
     with pytest.raises(ValueError, match="not built yet"):
-        f8_session_agent(arm="CM-sum")
+        f8_session_agent(arm="CM-lesson")  # Tier B: not built (CM-sum was, until B8)
     with pytest.raises(TypeError):
         context_policy.register_policy("CM-x", object)
     monkeypatch.setenv("APE_CM_KEEP_ITEMS", "5")

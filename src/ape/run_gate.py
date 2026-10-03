@@ -311,6 +311,7 @@ OPERATIONAL_ENV = ("APE_BACKUP_DIR", "APE_BUILD_LLM_CONCURRENCY", "APE_BUILD_PAR
 # Phases that call models or build artifacts: a live run refuses them in a stray environment (`stray_environment`).
 PAID_PHASES = ("build-dev", "tune", "anchor", "pilot", "build-test", "test")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+STUDY_RUN_DIRS = ("main", "study_g")  # runs/<study>/<id>/ are the other studies' runs (`ape.run_study`): not gate run ids
 
 
 class PhaseError(RuntimeError):
@@ -358,6 +359,8 @@ class GateRun:
     def __post_init__(self) -> None:
         if not _RUN_ID.match(self.run_id):
             raise PhaseError(f"run id {self.run_id!r}: use letters, digits, '.', '_' and '-' only")
+        if self.run_id in STUDY_RUN_DIRS:
+            raise PhaseError(f"run id {self.run_id!r}: runs/{self.run_id}/ holds that study's runs (`ape.run_study`); pick another gate run id")
         self.runs_root, self.config_dir = Path(self.runs_root), Path(self.config_dir)
         if not self.offline and self.config_dir.resolve() != (ROOT / "config").resolve():
             raise PhaseError("--config-dir is for offline runs and tests; live runs read config/ (build workers load config/models.yaml)")
@@ -995,7 +998,7 @@ def _smoke_time(entry: dict) -> datetime | None:
     return None
 
 
-def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> tuple[list[str], dict]:
+def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None, extra_required: Sequence[str] = ()) -> tuple[list[str], dict]:
     """Problems that stop a live gate run for want of a fresh passing live smoke (readiness/smoke.py), and what was
     checked. Two files in `run.smoke_dir` (cache/smoke/live/):
 
@@ -1007,6 +1010,9 @@ def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> 
       CODE_PATHS are exactly what would run now (`code_drift` of its commit is empty: ancestry alone would accept a
       smoke of older code), at most `run.smoke_max_age_days` old, and, where PROVENANCE.md pins snapshots, served by
       the pinned snapshot of every alias this profile calls.
+
+    `extra_required`: check ids another study's runs require on top of smoke.py's list (`ape.run_study`, the checks
+    of its new arm types), held to the same conditions.
     """
     from . import snapshots as snaps
 
@@ -1039,7 +1045,7 @@ def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> 
     pinned = {a: pins[a] for a in sorted(called & set(pins))}
     info["pinned"] = pinned
     checks = record.get("checks") or {}
-    required = list(record.get("required") or [])
+    required = list(dict.fromkeys([*(record.get("required") or []), *extra_required]))
     info["required"] = required
     drift: dict[str, list[str] | None] = {}
     rows = {}
@@ -1099,7 +1105,7 @@ def _smoke_code_changed(settled: dict) -> list[str]:
     return out
 
 
-def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict) -> tuple[list[str], dict | None]:
+def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict, extra_required: Sequence[str] = ()) -> tuple[list[str], dict | None]:
     """Live runs: the live smoke, settled once per run in run.json (`smoke_check`), so a later preflight (after the
     pre-registration's commit, a freeze, a resume) neither re-checks the smoke's age nor fails on it. Returns
     (problems, the settlement to record once preflight passes, or None to keep run.json as is).
@@ -1108,7 +1114,7 @@ def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict) -> tupl
     - Settled by an earlier preflight on a smoke: reused while CODE_PATHS still match the smoke's commits. Once the
       code changes, only a smoke of this code will do: `check_live_smoke` again, as at a first preflight.
     - Settled by an override: a passing smoke now replaces it; otherwise the override stands (a warning).
-    - Not settled: `check_live_smoke`."""
+    - Not settled: `check_live_smoke` (with `extra_required`, another study's own required checks)."""
     settled = read_run_info(run).get("smoke_check") or {}
     if run.skip_smoke_check is not None:
         reason = run.skip_smoke_check.strip()
@@ -1124,7 +1130,7 @@ def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict) -> tupl
             checks["smoke"] = f"ok (settled at this run's first preflight, {settled.get('at')}; its age is not re-checked)"
             record["smoke_check"] = settled | {"reused": True}
             return [], None
-    smoke_problems, info = check_live_smoke(run, gp)
+    smoke_problems, info = check_live_smoke(run, gp, extra_required=extra_required)
     if smoke_problems and settled.get("override"):
         checks["smoke"] = {"skipped": settled["override"], "reused": True}
         record["smoke_check"] = settled | {"reused": True, "smoke_now": info | {"problems": smoke_problems}}
@@ -1216,39 +1222,69 @@ def _build_dev_projected(run: GateRun) -> float:
     return project(run, [p.cell(cell_id) for cell_id in DEV_BUILD_CELLS.values()])
 
 
-def build_world_set(run: GateRun, record: dict, phase: str, split: str, specs: list[dict]) -> list[dict]:
+def build_world_set(run: GateRun, record: dict, phase: str, split: str, specs: list[dict], *, study: str = STUDY, profile: Profile | None = None) -> list[dict]:
     """Generate the worlds of `specs` in `split` (world i of a spec has seed base+i) and build their artifacts
     through `ape.artifacts` (offline: oracle LightRAG indices, the fake author); writes `<phase>/worlds.json`
-    and the record's outputs and world counts. Raises (after recording) when any world failed to build."""
+    and the record's outputs and world counts. Raises (after recording) when any world failed to build.
+
+    The gate's specs build every artifact kind at the split's seed base. Another study (`ape.run_study`, `study` its
+    name, `profile` the profile whose builder builds) may add to a spec: `seed_base` (its own namespace), `knobs` (F8
+    generator settings), `kinds` (only the artifacts its arms read; none for an F8 session) and `shared` (a world of
+    the gate's dev namespace: it must be the gate's world exactly, so another version on disk is refused, never
+    overwritten). The test split needs `study`'s own unlock (`worlds.generate.require_test_split_unlocked`)."""
     from .artifacts import KINDS, build_artifacts
     from .worlds.generate import make_world
     from .worlds.spec import World
 
-    require_test_split_unlocked(split)  # the test split: only build-test, after the freeze guard
+    require_test_split_unlocked(split, study)  # the test split: only the study's build-test, after its freeze guard
     cfg = Config()
     worlds: list[dict] = []
+    kinds_of: dict[str, tuple[str, ...]] = {}
     for s in specs:
         for i in range(s["count"]):
-            w = make_world(s["family"], s["level"], split, i, s["n_tasks"], s["relational"], s["exception_style"])
+            w = make_world(s["family"], s["level"], split, i, s["n_tasks"], s["relational"], s["exception_style"], seed_base=s.get("seed_base"), knobs=s.get("knobs"))
             path = cfg.world_path(w.id)
             if not path.is_file() or World.load(path).content_hash() != w.content_hash():
+                if s.get("shared") and path.is_file():
+                    raise PhaseError(
+                        f"{_show(path)} holds another version of {w.id}, a world {study} shares with the gate's dev split: it was built with "
+                        "other parameters (or older generator code); it is never overwritten, since the gate's tuning and artifacts rest on it"
+                    )
                 w.save(path)  # unchanged worlds keep their file, so their artifacts stay current
-            worlds.append({"world_id": w.id, "path": _show(path), "group": s["group"], "family": s["family"], "level": s["level"], "exception_style": s["exception_style"], "n_tasks": s["n_tasks"]})
+            entry = {"world_id": w.id, "path": _show(path), "group": s["group"], "family": s["family"], "level": s["level"], "exception_style": s["exception_style"], "n_tasks": s["n_tasks"]}
+            if "kinds" in s:
+                entry["kinds"] = list(s["kinds"])
+            kinds_of[w.id] = tuple(k for k in KINDS if k in s.get("kinds", KINDS))
+            worlds.append(entry)
     lightrag_kind = "oracle" if run.offline else "extract"
     if run.offline:
         updates: dict[str, str | None] = {}
     else:
         from .models import require_preflight
 
-        gp = gate_profile(run)
+        gp = profile or gate_profile(run)
         require_preflight(gp, live=True, costs_path=run.costs_path, env_path=run.env_path)
         updates = {"APE_MODEL_PROFILE": gp.name}  # build workers read the build model from this profile
-    print(f"[{phase}] {len(worlds)} {split} world(s): building {','.join(KINDS)} (lightrag {lightrag_kind}{', fake author' if run.offline else ''})", flush=True)
-    with _environ(updates):
-        results = build_artifacts([cfg.world_path(w["world_id"]) for w in worlds], KINDS, lightrag_kind, run.offline, on_result=lambda r: print(r.summary(), flush=True))
-    for w, r in zip(worlds, results, strict=True):
-        w["artifacts"], w["errors"] = r.kinds, r.errors
-    record_build_health(run, record, phase, [w for w in worlds if not w["errors"]], lightrag_kind)
+    by_kinds: dict[tuple[str, ...], list[dict]] = {}
+    for w in worlds:
+        by_kinds.setdefault(kinds_of[w["world_id"]], []).append(w)
+    results = []
+    for kinds, group in by_kinds.items():
+        if not kinds:  # nothing to build (an F8 session, or a world only arms without artifacts read)
+            for w in group:
+                w["artifacts"], w["errors"] = {}, {}
+            continue
+        print(f"[{phase}] {len(group)} {split} world(s): building {','.join(kinds)} (lightrag {lightrag_kind}{', fake author' if run.offline else ''})", flush=True)
+        with _environ(updates):
+            built = build_artifacts([cfg.world_path(w["world_id"]) for w in group], kinds, lightrag_kind, run.offline, on_result=lambda r: print(r.summary(), flush=True))
+        for w, r in zip(group, built, strict=True):
+            w["artifacts"], w["errors"] = r.kinds, r.errors
+        results += built
+    if any("kinds" in s for s in specs):
+        kg = {w["world_id"]: tuple(k for k in kinds_of[w["world_id"]] if k in ("apg", "lightrag")) for w in worlds}
+        record_build_health(run, record, phase, [w for w in worlds if not w["errors"] and kg[w["world_id"]]], lightrag_kind, systems=kg)
+    else:
+        record_build_health(run, record, phase, [w for w in worlds if not w["errors"]], lightrag_kind)
     out = run.phase_dir(phase) / "worlds.json"
     _write_json(out, {"worlds_dir": _show(cfg.worlds_dir), "indices_dir": _show(cfg.indices_dir), "lightrag_kind": lightrag_kind, "fake_author": run.offline, "worlds": worlds})
     record["outputs"] |= {"worlds": _show(out), "worlds_dir": _show(cfg.worlds_dir), "indices_dir": _show(cfg.indices_dir)}
@@ -1258,16 +1294,17 @@ def build_world_set(run: GateRun, record: dict, phase: str, split: str, specs: l
     return worlds
 
 
-def record_build_health(run: GateRun, record: dict, phase: str, worlds: list[dict], lightrag_kind: str) -> None:
+def record_build_health(run: GateRun, record: dict, phase: str, worlds: list[dict], lightrag_kind: str, systems: dict[str, tuple[str, ...]] | None = None) -> None:
     """Every build phase (dev, pilot, test): degradation signals of the worlds just built (`ape.build_quality.build_health`:
     lost chunks, coverage under D-017's threshold) in `<phase>/build_health.json`, a summary in the manifest and a
-    warning per flagged world. Never fails the phase; D-017's builder verdict stays build-dev's (`record_build_quality`)."""
+    warning per flagged world. Never fails the phase; D-017's builder verdict stays build-dev's (`record_build_quality`).
+    `systems`: world id -> the KG systems built for it (another study's builds; default both, the gate's)."""
     from .build_quality import build_health
     from .worlds.spec import World
 
     cfg = Config()
     try:
-        health = build_health((World.load(cfg.world_path(w["world_id"])) for w in worlds), cfg, lightrag_kind, offline=run.offline)
+        health = build_health((World.load(cfg.world_path(w["world_id"])) for w in worlds), cfg, lightrag_kind, offline=run.offline, systems=systems)
     except Exception as e:  # noqa: BLE001  (a health report must never fail a build)
         record["warnings"].append(f"build health: could not be measured ({type(e).__name__}: {e})")
         return
