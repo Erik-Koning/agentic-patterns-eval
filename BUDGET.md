@@ -7,9 +7,9 @@
 | Study | Phases (conservative $) | Conservative | Expected | Allocation (D-035) |
 |---|---|---|---|---|
 | Gate | smoke 3 · anchor 11 · builds 57 · tuning 8 · pilot 13 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **214** | 188 | ≤ 300 |
-| Main study | builds 5 · micro-pilot 10 · tuning 36 · pilot 15 · A 141 · B 136 · C 27 · F 642 | **1,013** | 777 | ≤ 1,100 |
+| Main study | builds 5 · micro-pilot 10 · tuning 35 · pilot 15 · A 141 · B 136 · C 27 · F 642 | **1,012** | 776 | ≤ 1,100 |
 | Study G | micro-pilot 11 · tuning 26 · capability anchor 51 · context management 1,758 · topology 1,638 | **3,483** | 2,195 | ≤ 3,600 |
-| **Total** | | **4,710** | **3,160** | ≤ 5,000 |
+| **Total** | | **4,710** | **3,159** | ≤ 5,000 |
 | Contingency | $5,000 − conservative total | 290 | | ≥ 280 |
 
 - **By tier** (conservative / expected): Astra-high 1,966 / 1,230 · Sol-high 1,840 / 1,276 · Luna-high 801 / 596 · Luna-low 89 / 45 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
@@ -69,3 +69,4 @@ FX-6 calls `projected_cost()` and `remaining()` before each phase. It refuses th
 - **D-028 (2026-10-03):** +$6 net. Dropping S5-P0 (no persona content) saves $6.5; the Luna F7-100 tier cell (+$12.25) and the F7-100 and F1-2 KG builds (+$0.6) make the tier contrast and the micro-pilot's S5 runnable. Study G's larger tool files for short sessions don't change the projection (session views are priced at 0.6 W).
 - **D-033 / D-034 (2026-10-03):** −$84 net. Study G's topology gets a Luna-low cell and 16 Luna sessions per point (+$73, for G-H3's power); M7 is priced at its measured 5× a single agent (was 3×; +$33); M2 is dropped from F1-32 in Study F, where specialization is undefined (−$190). Contingency $238 → $322.
 - **B8 overheads (2026-10-03):** +$32. CM-todo, CM-reset and S-CM* are priced at their measured management overhead including `todo_write` traffic (0.20, 0.25, 0.25 of agent calls; were 0.15, 0.05, 0.15). Contingency $322 → $290.
+- **D-041 (2026-10-03):** −$0.8. S3s is no longer re-tuned in the main study (`main.tune.b`): S3s and S5 inherit the gate's selections.
