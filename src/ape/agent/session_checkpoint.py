@@ -69,6 +69,7 @@ CODE_MODULES = (
     "ape.agent.session",
     "ape.agent.context_policy",
     "ape.agent.session_checkpoint",
+    "ape.agent.cm_prompts",
     "ape.worlds.env_f8",
     "ape.worlds.gen_f8",
     "ape.worlds.render",

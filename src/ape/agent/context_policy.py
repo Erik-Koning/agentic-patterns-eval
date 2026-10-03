@@ -43,7 +43,8 @@ What Inspect 0.3.273 provides (verified in the installed package, B7):
   (an int) or a fraction of the model's context window (a float <= 1), measured Inspect's way: tiktoken o200k plus
   10% and the tool schemas, then the provider's reported input tokens after a call. That is not this harness's
   meter, so a policy that should trigger at T_abs sets Inspect's threshold out of reach and forces compaction
-  from `on_threshold` (tests/test_session_resume.py `InspectPrune`).
+  from `on_threshold` (tests/test_session_resume.py `InspectPrune`), or, as the CM arms do (`ape.agent.cm_arms`),
+  applies a strategy's `compact()` directly and keeps the result as its own state.
 - `CompactionEdit` (keep_tool_uses, keep_tool_inputs, keep_thinking_turns, exclude_tools): no model call; older
   tool results become "(Tool result removed)". `CompactionTrim` (preserve, a fraction of the conversation's
   messages): no model call; keeps the system message and the first user turn.
@@ -57,7 +58,8 @@ What Inspect 0.3.273 provides (verified in the installed package, B7):
 - Native sample checkpointing (`inspect_ai.util.checkpointer`) exists but resumes only on task-level retries
   (`ape.agent.session_checkpoint`).
 
-Built here (B7): CM0 (`FullHistory`) and O-state (`OracleState`). B8 adds the managed arms with `register_policy`.
+Built here: CM0 (`FullHistory`) and O-state (`OracleState`). The context-management arms (`ape.agent.cm_arms`, B8)
+register themselves with `register_policy`.
 """
 
 import dataclasses
@@ -83,11 +85,16 @@ KINDS = ("agent", "cm", "probe")  # call kinds: the arm's agent, its management 
 # --- Token meter, messages and usage ----------------------------------------------------------------------------
 
 
+OPAQUE_TOKENS = "opaque_tokens"  # message metadata: tokens the meter cannot read (an encrypted compaction block)
+
+
 def message_tokens(m: ChatMessage) -> int:
+    """o200k_base tokens of the message's text and tool calls, plus the `opaque_tokens` a policy declared in its
+    metadata for content the text does not show (CM-native's compacted blocks)."""
     n = count_tokens(m.text or "")
     if isinstance(m, ChatMessageAssistant) and m.tool_calls:
         n += sum(count_tokens(json.dumps({"function": c.function, "arguments": c.arguments})) for c in m.tool_calls)
-    return n
+    return n + int((m.metadata or {}).get(OPAQUE_TOKENS) or 0)
 
 
 def view_tokens(messages: Sequence[ChatMessage]) -> int:
@@ -235,6 +242,13 @@ class ContextPolicy:
             raise ValueError(f"{type(self).__name__}: unknown knobs {unknown}; known: {sorted(self.KNOBS)}")
         self.session = session
         self.knobs = {**self.KNOBS, **knobs}
+        self.validate(self.knobs)
+
+    @classmethod
+    def validate(cls, knobs: Mapping[str, Any]) -> None:
+        """Raise ValueError for knob values the policy cannot run with (the solver checks them when the task is
+        created, under the environment of that moment, and again per session)."""
+        return None
 
     def tools(self) -> list[Tool | ToolDef]:
         return []
@@ -305,7 +319,7 @@ def register_policy(arm: str, cls: type[ContextPolicy]) -> None:
 
 def policy_class(arm: str) -> type[ContextPolicy]:
     if arm not in POLICIES:
-        raise ValueError(f"session arm {arm!r} is not built yet; built: {tuple(POLICIES)} (the managed arms are B8, CONTEXT_MANAGEMENT_AUDIT §6)")
+        raise ValueError(f"session arm {arm!r} is not built yet; built: {tuple(POLICIES)}; Tier B arms (CONTEXT_MANAGEMENT_AUDIT §6) are not")
     return POLICIES[arm]
 
 
