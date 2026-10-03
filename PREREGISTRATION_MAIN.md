@@ -193,7 +193,7 @@ These are reported with intervals and labelled "descriptive" wherever they appea
 | M4 (brief H1d) | M1 − M1s accuracy on F1-32 (M1s's 60 tasks), with 95% and 90% intervals; the wall-clock ratio M1/M1s with its interval. | The brief's thresholds are \|Δ\| < 2 pp and a ratio < 0.6. At n = 60 the interval cannot reach ±2 pp (D-028). |
 | K4 (brief H2c) | Success slope per decade of KB size over F7-10, F7-100 and F7-1000 for S1, S5, S3s, M1 and M2. Also the paired slope differences S5 − S1 and S5 − S3s, with intervals. | S3s has no F7-100 cell, so its slope rests on two levels. The relational-vs-independent clause is not tested: there are no independent-policy cells (D-028). |
 | C1 (brief H3) | Per family (F1, F2, F3, F7; Study A and B cells), each arm's cost per solved task under tokens, cache-adjusted $ and wall-clock (Inspect working time); Kendall τ-b between the three rankings; the rule "the smallest pairwise τ < 0.8 in ≥ 2 of the 4 families", with world-clustered bootstrap support. LLM calls are reported, not ranked. | The brief asks for each predicted flip's direction to be pre-registered. None is, so the rule is reported on point estimates and is not a test. |
-| A1 (brief H5) | On the Study C subset (§4.4), per arm and cell: unbiased pass^k and pass@k, D1 outcome stability, D2 modal-answer share and normalised answer entropy ("no answer" counts as an answer), and D6 (the CV of tokens, cache-adjusted $ and wall-clock: median and p90 over tasks). Also S5 − M1 and S5 − M2 on D1, D2 (modal share) and success, with "matched accuracy" meaning the 95% cluster-t interval of the success difference lies within ±3 pp. | The metrics use each arm's first 5 runs: its 3 main epochs, then Study C's 2. S8k3 runs only in Study C, so its metrics rest on 2 runs. The auditability metrics (A2, A4, A6, A8) and D5 are not produced, so H5's auditability clause is not addressed. |
+| A1 (brief H5) | On the Study C subset (§4.4), per arm and cell: unbiased pass^k and pass@k, D1 outcome stability, D2 modal-answer share and normalised answer entropy ("no answer" counts as an answer), and D6 (the CV of tokens, cache-adjusted $ and wall-clock: median and p90 over tasks). Also S5 − M1 and S5 − M2 on D1, D2 (modal share) and success, with "matched accuracy" meaning the 95% cluster-t interval of the success difference lies within ±3 pp. | The metrics use each arm's first 5 runs: its 3 main epochs, then Study C's 2; S8k3's 5 runs all come from Study C (D-044). The auditability metrics (A2, A4, A6, A8) and D5 are not produced, so H5's auditability clause is not addressed. |
 | §4.3 mechanism contrasts | Each contrast per cell, where both arms ran, with intervals (table below). | Labels follow the brief: a mechanism claim must cite a single-switch row; anything else is a **bundle** contrast. |
 | S8 frontier | Each condition's S8(k) curve, k = 1..8, on every meter. Also every arm against S8 at its own realised cost on every meter, with the match status (inside, below, beyond). | Tokens is the confirmatory meter. The other meters are descriptive. |
 | Live S8k3 against post-hoc S8(3) | Live minus post hoc on the Study C tasks, per cell. | Their tie rules differ (§3.3). This stands in for the brief's M7-R0 invariant, which is not run. |
@@ -328,8 +328,9 @@ A cell sized in tasks uses whole worlds: the first ⌈n / 12⌉ worlds of the bl
 | main.A.m1s | A | M1s | F1-32 | 5 × 12 | 3 | Luna |
 | main.B.s1-pool | B | S1 | F3-5, F3-60, F7-10, F7-1000 | 9 × 12 | 8 (the pool) | Luna |
 | main.B.arms | B | S3s, S5, S7, M1, M1k, M2 | F3-5, F3-60, F7-10, F7-1000 | 9 × 12 | 3 | Luna |
-| main.C.a | C | S1, S8k3, M1, M7 | Study A's cells | 2 × 12 | +2 | Luna |
-| main.C.b | C | S1, S5, S8k3, M1, M2 | Study B's cells | 2 × 12 | +2 | Luna |
+| main.C.a | C | S1, M1, M7 | Study A's cells | 2 × 12 | +2 | Luna |
+| main.C.b | C | S1, S5, M1, M2 | Study B's cells | 2 × 12 | +2 | Luna |
+| main.C.s8 | C | S8k3 | Study A's and B's cells | 2 × 12 | 5 | Luna |
 | main.F.luna | F | S5 | F1-32 | 9 × 12 | 3 | Luna |
 | main.F.luna-f7-100 | F | S1, S5, M1, M2 | F7-100 | 9 × 12 | 3 | Luna |
 | main.F.sol | F | S1, S5, M1 | F1-32, F7-100 | 9 × 12 | 3 | Sol |
@@ -354,7 +355,7 @@ A cell sized in tasks uses whole worlds: the first ⌈n / 12⌉ worlds of the bl
 
 - **Tasks.** The first 2 test worlds (24 tasks) of every Study A and B cell. These are the same tasks the main cells run.
 - **Extra epochs.** 2 more epochs for S1, M1 and M7 (Study A cells) and for S1, S5, M1 and M2 (Study B cells). Each of these arms then has 5 runs per task.
-- **S8k3** runs only here, so it has 2 runs per task.
+- **S8k3** runs only here (`main.C.s8`), with 5 epochs, so it also has 5 runs per task (D-044).
 - **Use.** Study C's plan cells feed only the determinism section (A1) and the live S8k3 check. They are never in the confirmatory frame.
 
 ### 4.5 Study F tiers

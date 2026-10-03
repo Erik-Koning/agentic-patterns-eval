@@ -444,6 +444,16 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Probe** (`readiness/probe_openai.py --study study_g`): every Study G profile (Luna, Sol, Astra) is probed for honoured parameters; the API mode each model runs on in Inspect is recorded (a model on two modes is a problem); a native-compaction probe per agent model writes the CM-native support record. About $0.6 extra.
 - **Budget:** $4,712 conservative / $3,161 expected; contingency $288.
 
+**D-044 (2026-10-03, BUILD_PLAN B5: PREREGISTRATION_MAIN.md drafted).** The main pre-registration is written; its hypothesis table is generated from `analysis/main_hypotheses.py` and a test keeps them identical. Decisions made with it:
+- **No pre-registered extension** for the main study: any further data is a new pre-registration. `analyze_main` analyses an extension run alone as primary-only if one is ever frozen.
+- **The live S8k3 gets 5 runs** in its own Study C cell (`main.C.s8`, +$13): it runs only in Study C, so with 2 epochs its determinism metrics rested on 2 runs, against the brief's 5 per arm.
+- **Real sizes:** the runner builds whole worlds of 12 tasks, so "100 tasks" is 108 (9 worlds), M4's "n = 50" is 60 and Study C's 15 is 24; the pre-registration states the real sizes.
+- **Power figures:** the code table's (after D-033) are the ones that count: M3 0.87, M5 0.89 at Δ = 0 (±6 pp); K2's interaction 0.94 at −10 pp (0.82 at −8); K2-NI 0.78 at Δ = 0. D-033 quoted the earlier simulation's 0.84 / 0.87 / 0.86 / 0.79.
+- **Not implemented, stated in the pre-registration:** a per-run cache nonce (brief §6.2) and a wall-clock cap (brief §4.5). Both go to B12 (see BUILD_PLAN §6).
+- `HYPOTHESES.md` rows K1, M1, M2, M3, M5, K4, C1 and A1 were aligned with the code table; the GATE row now names the gate's actual test (cluster-t, D-023).
+- **Open for the user** (`[USER: …]`): the M-arm prompt author, the skeptic and the analyst. Two `[PILOT: …]` items are not yet written by the runner (`cap multiple`, `pilot σ and power`).
+- **Budget:** $4,725 conservative / $3,168 expected; contingency $275.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

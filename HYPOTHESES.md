@@ -16,7 +16,7 @@ Last updated 2026-10-03 (D-033, D-034; the main-study rows K1, K4, M1–M5, C1 a
 
 | ID | Statement | Source | Arms | Cells | Primary measure | Test | Status |
 |---|---|---|---|---|---|---|---|
-| GATE | APG* is non-inferior to LGR* (margin 5 pp), reported per delivery mode for F7 | GATE_PREREG §2 | APG*, LGR*, S3s; diagnostics S1, S5o, S6, S7, LGRo-* | F7-10, F7-1000 (descriptive), F3-5, F3-60; F5 reported separately | Task success (programmatic) | One-sided NI, world-clustered bootstrap; secondary conditions; PC1–PC6 | ✅ harness; ⏳ live runs |
+| GATE | APG* is non-inferior to LGR* (margin 5 pp), reported per delivery mode for F7 | GATE_PREREG §2 | APG*, LGR*, S3s; diagnostics S1, S5o, S6, S7, LGRo-* | F7-10, F7-1000 (descriptive), F3-5, F3-60; F5 reported separately | Task success (programmatic) | One-sided NI on the world-clustered t-interval (Satterthwaite df), push and pull Holm at familywise α 0.020, extension 0.005 (D-023, D-027); secondary conditions; PC1–PC6 | ✅ harness; ⏳ live runs |
 
 ## K: knowledge delivery
 
