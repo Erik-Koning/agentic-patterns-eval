@@ -12,7 +12,8 @@ and returns a short JSON-able summary (the analyze manifest records it under `an
 
 Inputs, each optional (a missing one is reported, never raised):
 - `test/manifest.json`: per plan cell, its groups with their arms (`{declared, run}`), the arms skipped as not built,
-  the token caps per task cell, the status and the final log files. Every finished group's logs are read with
+  the token caps per task cell, the status and the final log files (relative to the run directory; older manifests
+  recorded them absolute or relative to the repo, `run_study.resolve_log`). Every finished group's logs are read with
   `analysis.main_load.load_main`, labelled with their plan cell and group; each row's arm is the group's declared plan
   name (S5 = the KG arm the freeze resolved, which the task itself runs as S5), and its tier is the group's profile's
   agent model (`config/models.yaml`; offline, mock logs carry no tier of their own).
@@ -73,10 +74,13 @@ def profile_tiers(models_path: Path) -> dict[str, str]:
     return {name: tier_of(((p or {}).get("agent") or {}).get("model")) for name, p in profiles.items()}
 
 
-def load_test_rows(test: dict | None, require_cost: bool, tiers: dict[str, str] | None = None) -> tuple[pd.DataFrame, list[dict]]:
+def load_test_rows(test: dict | None, require_cost: bool, tiers: dict[str, str] | None = None, run_dir: Path | None = None) -> tuple[pd.DataFrame, list[dict]]:
     """Every sample-epoch of every finished agent group of the test manifest, labelled with its plan cell, group,
     declared arm (`arm`; the arm as run is `run_arm`) and the tier of the group's profile; and one coverage entry per
-    group (status, arms, skipped arms, samples, and the reason when its rows are missing)."""
+    group (status, arms, skipped arms, samples, and the reason when its rows are missing). `run_dir` resolves the
+    run-relative log paths (without it, relative paths are the repo's)."""
+    from .run_study import resolve_log
+
     frames, coverage = [], []
     for cell_id, cell in ((test or {}).get("cells") or {}).items():
         for g in cell.get("groups") or []:
@@ -85,7 +89,7 @@ def load_test_rows(test: dict | None, require_cost: bool, tiers: dict[str, str] 
                 "arms": [a.get("declared") for a in g.get("arms") or []], "skipped": [{"arm": s.get("declared"), "reason": s.get("reason")} for s in g.get("skipped") or []],
                 "cells": g.get("cells"), "profile": g.get("profile"), "samples": 0, "reason": None,
             }  # fmt: skip
-            files = [_resolve(f) for f in g.get("log_files") or []]
+            files = [resolve_log(run_dir, f) if run_dir is not None else _resolve(f) for f in g.get("log_files") or []]
             labels: dict[str, str] = {}
             clash = [a for a in g.get("arms") or [] if labels.setdefault(a.get("run"), a.get("declared")) != a.get("declared")]
             if g.get("kind", "agent") != "agent":
@@ -199,7 +203,7 @@ def analyze(run, reps: int | None = None, glmm: bool = True) -> dict:
         problems.append(role["note"])
     tiers = profile_tiers(run.models_path)
     try:
-        frame, coverage = load_test_rows(test, require_cost=not run.offline, tiers=tiers)
+        frame, coverage = load_test_rows(test, require_cost=not run.offline, tiers=tiers, run_dir=run.dir)
     except Exception as e:  # noqa: BLE001  (reported; the report still stands)
         frame, coverage = pd.DataFrame(columns=COLUMNS), []
         problems.append(f"test rows unreadable: {type(e).__name__}: {e}")
