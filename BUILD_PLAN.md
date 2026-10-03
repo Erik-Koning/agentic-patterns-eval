@@ -108,7 +108,9 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | B3 | 🔄 building | |
 | B9 | 🔄 building | |
 | Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
-| B5, B11, B12 | ⏳ waiting on dependencies | |
+| B5 | 🔄 building (PREREGISTRATION_MAIN.md) | |
+| B11 | 🔄 G tuning grid + probe extension building; PREREGISTRATION_G.md after B9 | |
+| B12 | ⏳ waiting on dependencies | |
 
 **Follow-ups found during the build** (must be done before any paid run):
 - **Pilot cap-hit gate (D-039):** M7 may outgrow the 8 × B0 token cap; the main runner doubles the cap multiple for all arms when any arm's pilot cap-hit rate exceeds 10% (with the B1 integration).
