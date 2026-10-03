@@ -341,10 +341,13 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
 
     run = _run(offline, "main")
     selected = yaml.safe_load(run.selected_path.read_text())
-    assert set(selected) == {"S3s"} and selected["S3s"]["arm"] == "S3s", "the placeholder grid tunes S3s only"
+    grid = yaml.safe_load((offline["config"] / "tuning_grid_main.yaml").read_text())
+    assert set(selected) == set(grid["systems"]) and all(sel["arm"] == name for name, sel in selected.items()), "each system runs as its plan arm"
     tune = _manifest(run, "tune")
-    assert any("placeholder" in w for w in tune["warnings"])
-    assert tune["tuning_completeness"]["pass"] is True and tune["tuning_completeness"]["systems"]["S3s"]["logged"] == ["s3s-1000", "s3s-2000"], "PC6-style"
+    assert not any("placeholder" in w for w in tune["warnings"]) and tune["tuning_completeness"]["pass"] is True, "PC6-style"
+    for name, sdef in grid["systems"].items():  # offline: each system's first candidates, one selected
+        ran = [c["id"] for c in sdef["candidates"][: run_study.OFFLINE_SCALE["tune_candidates_per_system"]]]
+        assert tune["tuning_completeness"]["systems"][name]["logged"] == sorted(ran) and selected[name]["candidate"] in ran
     kg = _manifest(run, "test")["kg"]
     assert kg["arm"] == "APG-s" and kg["system"] == "apg" and read_freeze(run)["kg"]["arm"] == "APG-s"
     targets = json.loads(run.s7_targets_path.read_text())
@@ -355,13 +358,13 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
         args, md = head.eval.task_args, head.eval.metadata
         assert head.status == "success" and head.eval.model == "mockllm/model"
         assert args["seed_base"] == STUDY_SEEDS["main"]["offline_test"] and args["split"] == "test" and args["plan_cell"] == md["plan_cell"]
-        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and md["knobs"]["APE_S3S_BUDGET"] == selected["S3s"]["env"]["APE_S3S_BUDGET"]
+        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and all(md["knobs"][k] == v for sel in selected.values() for k, v in sel["env"].items()), "every selection's knobs"
         if args["arm"] == "S7":
             assert args["group"] == "s7" and md["knobs"]["APE_S7_PER_STEP"] == "1", "S7 mirrors the per-step KG arm"
         seen.add((args["plan_cell"], args["arm"]))
     assert {("main.B.arms", "S5"), ("main.B.arms", "S7"), ("main.F.sol", "S1"), ("main.F.luna-f7-100", "S5")} <= seen
-    sol = next(f for f in (run.dir / "test" / "main.F.sol").rglob("*.eval"))
-    assert read_eval_log(str(sol), header_only=True).eval.metadata["arm"] in ("S1", "S5")
+    sol = {read_eval_log(str(f), header_only=True).eval.metadata["arm"] for f in (run.dir / "test" / "main.F.sol").rglob("*.eval")}
+    assert sol == {"S1", "S5", "M1"}, "main.F.sol's arms (M1 is built since B2)"
     # B6: the KG builds and their build-quality check, F1 included, in the one KG system built.
     bq = json.loads((run.phase_dir("micro-pilot") / "build_quality.json").read_text())
     assert bq["systems"] == ["apg"] and bq["verdict"] == "builder_passes" and {"F1-2", "F1-32", "F7-10", "F7-1000", "F3-5", "F3-60"} <= set(bq["cells"])
@@ -540,10 +543,11 @@ def test_build_quality_measures_registry_worlds_and_single_system_builds():
 
 def test_a_live_tune_refuses_a_placeholder_or_unsigned_grid(clean_env):
     grid = yaml.safe_load((ROOT / "config" / "tuning_grid_main.yaml").read_text())
-    assert grid["placeholder"] is True and any("placeholder" in p for p in run_study.tuning_signoff_problems(grid))
-    signed = grid | {"placeholder": False, "owners": {"S3s": "Ada"}, "signed_off": {"S3s": True}}
+    assert "placeholder" not in grid and "owners.M1 is not set" in run_study.tuning_signoff_problems(grid), "B3's grid, not signed off yet"
+    assert any("placeholder" in p for p in run_study.tuning_signoff_problems(grid | {"placeholder": True}))
+    signed = grid | {"owners": dict.fromkeys(grid["owners"], "Ada"), "signed_off": dict.fromkeys(grid["signed_off"], True)}
     assert run_study.tuning_signoff_problems(signed) == []
-    assert run_study.tuning_signoff_problems(signed | {"owners": {"S3s": "TODO"}}) == ["owners.S3s is not set"]
+    assert run_study.tuning_signoff_problems(signed | {"owners": signed["owners"] | {"M1": "TODO"}}) == ["owners.M1 is not set"]
     assert yaml.safe_load((ROOT / "config" / "tuning_grid_study_g.yaml").read_text())["placeholder"] is True
     run = StudyRun("study_g", "tune", runs_root=clean_env / "runs")
     assert "is not signed off for a live tune" in run_study._refuse_tune(run)
