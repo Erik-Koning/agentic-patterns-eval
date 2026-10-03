@@ -127,6 +127,13 @@ class World:
     def content_hash(self) -> str:
         return hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True).encode()).hexdigest()
 
+    def artifact_hash(self) -> str:
+        """Hash of what knowledge artifacts (APG graphs, LightRAG indices, fact matchers) are built from: the world
+        without its task list. The same world generated with 20 or 40 tasks shares its graphs and indices."""
+        d = self.to_dict()
+        d.pop("tasks", None)
+        return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
+
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(json.dumps(self.to_dict(), sort_keys=True, indent=1))

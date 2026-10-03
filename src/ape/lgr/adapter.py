@@ -12,12 +12,22 @@ Provenance (RELIABILITY_REVIEW K3): a compile's `fact_ids` are the facts its con
 rule of `ape.kb.provenance`, not every fact of every chunk an entity or relation was extracted from (a generic
 entity can name dozens of source chunks while its description restates a few facts).
 
-Keyword failures: when the kg model's reply yields no keywords (unparseable, a refusal, empty lists), the compile
-falls back to the query itself as the low-level keyword, as before, and its meta says so (`keyword_fallback`,
-`keyword_error`); the units are then fetched with the fallback keywords, so they match the delivered text.
+Keyword failures and empty retrievals mirror stock LightRAG 1.5.7 (`operate.kg_query`), with no retrieval attempt
+LightRAG would not make:
+- The kg reply yields no keywords (unparseable, a refusal, empty lists) and the query is under 50 characters:
+  LightRAG itself uses the query as the low-level keyword. The compile delivers that context; its meta records
+  `keyword_fallback: true` and a `keyword_error`.
+- The kg reply yields no keywords and the query is 50 characters or more: LightRAG builds no context (its fail
+  response). The compile delivers no context; `keyword_error` says why, and `keyword_fallback` stays false.
+- Keywords were extracted but retrieval found nothing (`failure_reason: no_results`): no context, `empty_retrieval:
+  true`. This is not a keyword failure.
+- Naive mode extracts no keywords: never a keyword fallback or error, only possibly an empty retrieval.
+`keyword_fallback` and `keyword_error` therefore mean exactly "keyword extraction failed" (the decision report's
+harness-health rates read them).
 
-Freshness (K6): an index is used only if its manifest records this world version, kind, embedding model and, for
-extract indices, the current build model and effort (`ape.lgr.build.build_key`).
+Freshness (K6): an index is used only if its manifest records this world version (tasks aside), the chunks, the
+LightRAG version, kind, embedding model and, for extract indices, the current build model and effort
+(`ape.lgr.build.build_key`).
 """
 
 import os
@@ -90,18 +100,25 @@ class LgrArm:
         self.manifest = manifest
 
     async def compile(self, query: str, task: TaskItem) -> ContextResult:
-        result = await self.rag.aquery_data(query, QueryParam(**self.params))
-        data, meta = result.get("data", {}), result.get("metadata", {})
-        kw = meta.get("keywords", {})
-        hl, ll = kw.get("high_level") or [], kw.get("low_level") or []
-        fallback = not hl and not ll
-        if fallback:
-            ll = [query]  # empty keywords would trigger a second, unmetered-by-design extraction
-            # The units of the context actually delivered: keywords pre-filled, so no second kg call.
-            result = await self.rag.aquery_data(query, QueryParam(**self.params, hl_keywords=hl, ll_keywords=ll))
-            data = result.get("data", {})
-        text = await self.rag.aquery(query, QueryParam(**self.params, only_need_context=True, hl_keywords=hl, ll_keywords=ll))
-        text = str(text or "")
+        mode = self.params["mode"]
+        result = await self.rag.aquery_data(query, QueryParam(**self.params)) or {}
+        data, meta = result.get("data") or {}, result.get("metadata") or {}
+        kw = meta.get("keywords")
+        hl, ll = (kw.get("high_level") or [], kw.get("low_level") or []) if kw else ([], [])
+        fallback, error, empty = False, None, False
+        if result.get("status") == "failure" and meta.get("failure_reason") == "no_results":
+            empty = True  # keywords in hand (or not needed: naive), nothing retrieved; stock LightRAG has no context
+        elif mode != "naive" and not kw:
+            # aquery_data returned LightRAG's fail response: no keywords, and a query too long for its own fallback.
+            error = "the kg model's reply yielded no keywords; LightRAG builds no context for a query of 50+ characters"
+        elif mode != "naive" and not hl and ll == [query]:
+            # LightRAG's own rule for short queries (operate.kg_query): the query itself as the low-level keyword.
+            fallback = True
+            error = "the kg model's reply yielded no keywords; LightRAG used the query itself (its rule for queries under 50 characters)"
+        text = ""
+        if not empty and (kw or mode == "naive") and not (error and not fallback):
+            # The native context string for the same retrieval: keywords pre-filled, so no second kg call.
+            text = str(await self.rag.aquery(query, QueryParam(**self.params, only_need_context=True, hl_keywords=hl, ll_keywords=ll)) or "")
         entities, relations, chunks = data.get("entities", []), data.get("relationships", []), data.get("chunks", [])
         return ContextResult(
             text=text,
@@ -110,10 +127,11 @@ class LgrArm:
             tools=None,
             meta={
                 "lightrag": {
-                    "mode": self.params["mode"],
-                    "keywords": {"high": hl, "low": ll},
+                    "mode": mode,
+                    "keywords": {"high": hl, "low": ll} if kw else None,
                     "keyword_fallback": fallback,
-                    "keyword_error": "the kg model's reply yielded no keywords; the query itself was used" if fallback else None,
+                    "keyword_error": error,
+                    "empty_retrieval": empty,
                     "counts": [len(entities), len(relations), len(chunks)],
                     "source_chunks": len({p for rec in (*entities, *relations, *chunks) for p in _paths(rec)}),
                 },
@@ -137,7 +155,7 @@ async def build_lgr_arm(arm: str, world: World, cfg: Config) -> LgrArm:
     if not (wd / "ape_manifest.json").exists():
         raise FileNotFoundError(f"{wd} missing: run `python -m ape.lgr.build --kind {kind}` first")
     manifest = read_manifest(wd)
-    if manifest.get("world_hash") != world.content_hash():
+    if manifest.get("world_hash") != world.artifact_hash():
         raise RuntimeError(f"{wd} was built from a different world version")
     emb = embedding_cache(cfg)
     if problems := manifest_problems(manifest, world, kind, emb.model):

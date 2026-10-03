@@ -60,6 +60,12 @@ class ScorerFailed(Exception):
     """The sample would be NaN in RAGAS's evaluate: dropped from the per-type mean, counted as a parse failure."""
 
 
+class Truncated(ScorerFailed):
+    """The judge stopped before finishing its reply (`finish_reason=length`). RAGAS raises LLMDidNotFinishException
+    for this and the sample is NaN; parsing a truncated classification would credit the statements it happened to
+    finish. Raised by the judge's `generate` wrapper (`ape.tasks.anchor_graphragbench`), never retried."""
+
+
 # --- LangChain core 0.3.65, langchain_core/utils/json.py (verbatim) ---------------------------------------
 
 
@@ -442,7 +448,9 @@ async def generate_model(spec: PromptSpec, data: BaseModel, generate: Generate, 
 
 
 def fbeta_score(tp: int, fp: int, fn: int, beta: float = 1.0) -> float:
-    """ragas/metrics/utils.py `fbeta_score` (same as the official scorer's)."""
+    """F-beta in the ε form of today's official scorer (`ape.anchor.accuracy.fbeta_score`). RAGAS e6305f5's own
+    `fbeta_score` (ragas/metrics/utils.py) is written differently; the two agree within 1e-10 on every count,
+    the all-zero case included (both give 0 there)."""
     precision = tp / (tp + fp + 1e-10)
     recall = tp / (tp + fn + 1e-10)
     return (1 + beta**2) * (precision * recall) / ((beta**2 * precision) + recall + 1e-10)

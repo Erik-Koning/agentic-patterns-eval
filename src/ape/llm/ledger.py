@@ -12,7 +12,10 @@ What is metered (RELIABILITY_REVIEW K7):
   its estimated input tokens, no output tokens and `context["status"]` ("cancelled" or "timeout").
 
 Not metered: the output of a call we stopped waiting for (unknowable), embedding requests cancelled in flight (a
-few hundred input tokens at most), and calls that fail with an API error (not billed).
+few hundred input tokens at most), and calls that fail with an API error (not billed). Nor are the OpenAI SDK's own
+retries inside one call (`max_retries`, on timeouts, 429s and 5xx): only the attempt that returned is recorded, so
+an earlier attempt the server completed and billed before the client timed out goes unrecorded. Inspect's calls
+(agent, kg, judge) have the same blind spot. On a healthy API it is rare; the OpenAI dashboard is the backstop.
 """
 
 import json

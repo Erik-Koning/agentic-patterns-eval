@@ -21,7 +21,7 @@ import pytest
 from lightrag import LightRAG
 
 from ape.apg.arm import graph_path
-from ape.apg.author import FAKE_AUTHOR_ID, author_world, authored_graph_current
+from ape.apg.author import FAKE_AUTHOR_ID, author_prompt_version, author_world, authored_graph_current
 from ape.artifacts import build_artifacts, main, world_paths
 from ape.build import build
 from ape.config import BuildConcurrency, Config
@@ -31,6 +31,7 @@ from ape.llm.embeddings import EmbeddingCache
 from ape.llm.fake import FakeEmbeddingsClient, perfect_author
 from ape.llm.ledger import Ledger, LedgerEntry
 from ape.worlds.generate import make_world
+from ape.worlds.render import chunk_world, chunks_hash
 from ape.worlds.spec import World
 
 ALL = ("chunks", "apg", "lightrag")
@@ -97,7 +98,7 @@ def test_parallel_builds_match_serial_builds(offline_env, monkeypatch):
         cfg = Config()
         runs[name] = {w.id: _artifacts(cfg, w) for w in worlds}
         for w in worlds:
-            assert runs[name][w.id]["manifest"]["world_hash"] == w.content_hash()
+            assert runs[name][w.id]["manifest"]["world_hash"] == w.artifact_hash()
             assert authored_graph_current(w, cfg, FAKE_AUTHOR_ID)
     for w in worlds:
         s, p = runs["serial"][w.id], runs["parallel"][w.id]
@@ -126,14 +127,23 @@ def test_reruns_skip_current_worlds_and_rebuild_only_what_changed(offline_env):
         {"chunks": "skipped", "apg": "skipped", "lightrag": "skipped"},
     ]
 
-    regenerated = make_world("F3", "5", "dev", 0, n_tasks=5)  # same world ID, new content
-    assert regenerated.id == c.id and regenerated.content_hash() != c.content_hash()
+    # Same world ID with other tasks: graphs and indices are built from the world without its tasks, so nothing rebuilds.
+    regenerated = make_world("F3", "5", "dev", 0, n_tasks=5)
+    assert regenerated.id == c.id and regenerated.content_hash() != c.content_hash() and regenerated.artifact_hash() == c.artifact_hash()
     regenerated.save(paths[2])
     fourth = _build(paths, 3)
-    assert [r.status for r in fourth] == ["skipped", "skipped", "built"]
-    assert fourth[2].kinds == {"chunks": "skipped", "apg": "built", "lightrag": "built"}  # tasks changed, chunks did not
-    assert read_manifest(index_dir(cfg, c.id, "oracle"))["world_hash"] == regenerated.content_hash()
-    assert json.loads(graph_path(cfg, c.id, "authored").read_text())["meta"]["worldHash"] == regenerated.content_hash()
+    assert [r.status for r in fourth] == ["skipped", "skipped", "skipped"], [r.summary() for r in fourth]
+
+    # A changed document is a new world version: its graph and index rebuild.
+    edited = World.load(paths[2])
+    para = next(p for d in edited.documents for p in d.paragraphs if p.fact_ids)
+    para.text += " (revised)"
+    edited.save(paths[2])
+    fifth = _build(paths, 3)
+    assert [r.status for r in fifth] == ["skipped", "skipped", "built"]
+    assert fifth[2].kinds["apg"] == "built" and fifth[2].kinds["lightrag"] == "built"
+    assert read_manifest(index_dir(cfg, c.id, "oracle"))["world_hash"] == edited.artifact_hash()
+    assert json.loads(graph_path(cfg, c.id, "authored").read_text())["meta"]["worldHash"] == edited.artifact_hash()
 
 
 def test_a_failing_world_is_reported_while_the_others_build(offline_env, capsys):
@@ -167,7 +177,14 @@ def test_authored_graph_records_world_author_and_embedding_model(offline_env):
     world, cfg = World.load(path), Config()
     asyncio.run(author_world(world, cfg, perfect_author, author_id=FAKE_AUTHOR_ID))
     meta = json.loads(graph_path(cfg, world.id, "authored").read_text())["meta"]
-    assert meta == {"worldHash": world.content_hash(), "author": FAKE_AUTHOR_ID, "embeddingModel": "fake-bow", "embeddingDim": 256}
+    assert meta == {
+        "worldHash": world.artifact_hash(),
+        "chunksHash": chunks_hash(chunk_world(world)),
+        "author": FAKE_AUTHOR_ID,
+        "authorVersion": author_prompt_version(),
+        "embeddingModel": "fake-bow",
+        "embeddingDim": 256,
+    }
     assert authored_graph_current(world, cfg, FAKE_AUTHOR_ID)
     assert not authored_graph_current(world, cfg, "gpt-6-luna@high"), "another author means a rebuild"
 
@@ -285,7 +302,7 @@ def test_failed_extraction_writes_no_manifest_and_the_rebuild_reuses_the_llm_cac
     assert not (wd / "ape_manifest.json").exists(), "an index with FAILED documents must not look complete"
 
     rebuilt = _extract(script, path, fail_after=-1)
-    assert rebuilt["error"] is None and read_manifest(wd)["world_hash"] == World.load(path).content_hash()
+    assert rebuilt["error"] is None and read_manifest(wd)["world_hash"] == World.load(path).artifact_hash()
     assert rebuilt["calls"] == clean["calls"] - 3, "the rebuild pays only for extractions the failed build did not cache"
     assert _lightrag_content(wd) == _lightrag_content(offline_env / "indices-clean" / wd.relative_to(Config().indices_dir))
     again = _extract(script, path, fail_after=-1)  # a forced rebuild with the same build model: all cached

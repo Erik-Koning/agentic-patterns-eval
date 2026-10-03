@@ -249,10 +249,14 @@ async def answer_correctness(question: str, answer: str, ground_truth: str, gene
     """One sample's ACC in [0, 1] plus its parts. `generate` is the judge (one user message per call); `embed`
     is the official `aembed_query` (`ape.anchor.bge` `queries`). `classification_raw` is the judge's reply,
     kept so the tolerant re-parse needs no second call (None when both statement lists were empty)."""
-    answer_stmts, gt_stmts = await asyncio.gather(
-        generate(STATEMENT_GENERATOR_PROMPT.format(question=question, answer=answer)),
-        generate(STATEMENT_GENERATOR_PROMPT.format(question=question, answer=ground_truth)),
-    )
+    # A TaskGroup, not gather: if one call raises (e.g. a truncated reply), the other is cancelled, not left running.
+    try:
+        async with asyncio.TaskGroup() as tg:
+            a = tg.create_task(generate(STATEMENT_GENERATOR_PROMPT.format(question=question, answer=answer)))
+            g = tg.create_task(generate(STATEMENT_GENERATOR_PROMPT.format(question=question, answer=ground_truth)))
+    except* Exception as eg:
+        raise eg.exceptions[0] from None
+    answer_stmts, gt_stmts = a.result(), g.result()
     answer_stmts, gt_stmts = parse_statements(answer_stmts), parse_statements(gt_stmts)
     raw = None
     if not answer_stmts and not gt_stmts:

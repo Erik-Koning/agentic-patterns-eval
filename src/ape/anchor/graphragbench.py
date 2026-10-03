@@ -59,8 +59,10 @@ from lightrag.kg.shared_storage import initialize_pipeline_status
 
 from lightrag.utils import EmbeddingFunc
 
+from lightrag.base import DocStatus
+
 from ..config import Config
-from ..lgr.build import _dir_hash
+from ..lgr.build import BUILD_MARKER, _dir_hash, _prepare_dir, _read_store
 from ..lgr.common import index_dir, read_manifest, workspace_name, write_manifest
 from ..llm.build_client import BuildLlm
 from ..llm.ledger import Ledger
@@ -79,6 +81,11 @@ CHUNK_TOKEN_SIZE, CHUNK_OVERLAP_TOKENS = 1200, 100  # App. H.2
 # PC1 (GATE_PREREG §7, D-025): (macro, per type) tolerance in pp; parse failures above this make PC1 not evaluable.
 TOLERANCE_PAPER_MODEL, TOLERANCE_OTHER = (5.0, 10.0), (10.0, 15.0)
 PARSE_FAILURE_LIMIT = 0.05
+# Local bge serialises every embedding call behind one lock, and LightRAG's per-call timeout counts time spent
+# queued. LightRAG 1.5.7's defaults (30 s, x2 internally; 8 concurrent calls of 10 texts) would time out under a
+# CPU-bound model (RELIABILITY_REVIEW 2, finding 2): one call in flight, and a generous timeout.
+EMBEDDING_TIMEOUT_S = 600
+EMBEDDING_MAX_ASYNC = 1
 
 
 def slug(qtype: str) -> str:
@@ -146,7 +153,10 @@ async def open_anchor_rag(wd: Path, llm_func, emb: AnchorEmbedder, query_time: b
         working_dir=str(wd),
         workspace=workspace_name(ANCHOR_ID),
         llm_model_func=llm_func,
-        embedding_func=EmbeddingFunc(embedding_dim=emb.dim, max_token_size=8192, func=emb.retrieval),
+        # A closure, not the bound method: LightRAG deep-copies its config, and the model behind it holds locks.
+        embedding_func=EmbeddingFunc(embedding_dim=emb.dim, max_token_size=8192, func=emb.lightrag_func()),
+        embedding_func_max_async=EMBEDDING_MAX_ASYNC,
+        default_embedding_timeout=EMBEDDING_TIMEOUT_S,
         enable_llm_cache=not query_time,
         enable_llm_cache_for_entity_extract=True,
         chunk_token_size=CHUNK_TOKEN_SIZE,
@@ -157,32 +167,85 @@ async def open_anchor_rag(wd: Path, llm_func, emb: AnchorEmbedder, query_time: b
     return rag
 
 
+class AnchorBuildError(RuntimeError):
+    """The anchor index build left a document unprocessed or empty; no manifest was written."""
+
+
+def _health(docs: dict[str, dict]) -> dict:
+    healthy = bool(docs) and all(d["status"] == DocStatus.PROCESSED.value and d["entities"] > 0 for d in docs.values())
+    return {"documents": docs, "healthy": healthy}
+
+
+def _status_value(status) -> str | None:
+    return getattr(status, "value", status)
+
+
+def _entity_count(rec: dict | None) -> int:
+    rec = rec or {}
+    return int(rec.get("count", len(rec.get("entity_names") or [])))
+
+
+async def rag_extraction_health(rag: LightRAG, names: list[str]) -> dict:
+    """Per corpus document: LightRAG's processing status and entity count, read from the open instance's stores (what
+    `finalize_storages` writes). Healthy when every document is PROCESSED with at least one entity. The Medical
+    corpus is one document, so a single chunk whose extraction kept failing fails the whole document, and LightRAG
+    records that in its doc-status store without raising."""
+    docs = {}
+    for n in names:
+        st = await rag.doc_status.get_by_id(n) or {}
+        docs[n] = {"status": _status_value(st.get("status")), "entities": _entity_count(await rag.full_entities.get_by_id(n)), "error": st.get("error_msg")}
+    return _health(docs)
+
+
+def extraction_health(wd: Path, names: list[str]) -> dict:
+    """`rag_extraction_health` from a built index's files (for inspecting an index on disk)."""
+    status = _read_store(wd, "doc_status")
+    entities = _read_store(wd, "full_entities")
+    return _health({n: {"status": (status.get(n) or {}).get("status"), "entities": _entity_count(entities.get(n)), "error": (status.get(n) or {}).get("error_msg")} for n in names})
+
+
 async def build_index(bench: Bench, cfg: Config, llm_func, build_model: str | None, build_effort: str | None = None) -> dict:
-    """LightRAG's own extraction over the whole corpus (offline, never inside Inspect)."""
+    """LightRAG's own extraction over the whole corpus (offline, never inside Inspect).
+
+    Starts from a cleared working directory, keeping LightRAG's LLM response cache when the previous (complete or
+    interrupted) build used the same build model and effort, as `ape.lgr.build` does: a rebuild after a failure pays
+    only for the chunks that were not extracted. Raises `AnchorBuildError`, and writes no manifest, unless every
+    document is PROCESSED with entities (`rag_extraction_health`). As with `ape.lgr.build`, LightRAG keeps a
+    workspace's stores in process memory, so a rebuild belongs in a fresh process (run_gate's anchor phase builds
+    at most once per process)."""
     wd = working_dir(cfg)
     emb = anchor_embedder(cfg)
+    key = {"kind": "extract", "anchor": ANCHOR_ID, "corpus_hash": bench.corpus_hash(), "embedding_model": emb.identity, "build_model": build_model, "build_effort": build_effort}
+    _prepare_dir(wd, key)
     rag = await open_anchor_rag(wd, llm_func, emb, query_time=False)
     names = [d["corpus_name"] for d in bench.documents]
     try:
         await rag.ainsert([d["context"] for d in bench.documents], ids=names, file_paths=names)
+        health = await rag_extraction_health(rag, names)
     finally:
         await rag.finalize_storages()
+    if not health["healthy"]:
+        raise AnchorBuildError(
+            f"anchor index build incomplete in {wd}: "
+            + "; ".join(f"{n}: status {d['status']}, {d['entities']} entities" + (f" ({str(d['error'])[:200]})" if d["error"] else "") for n, d in health["documents"].items())
+            + ". No manifest was written; re-running the build re-asks only the chunks LightRAG did not extract."
+        )
     manifest = {
-        "anchor": ANCHOR_ID,
-        "corpus_hash": bench.corpus_hash(),
+        **key,
         "documents": len(names),
         "chunking": [CHUNK_TOKEN_SIZE, CHUNK_OVERLAP_TOKENS],
         "lightrag_version": importlib.metadata.version("lightrag-hku"),
-        "embedding_model": emb.identity,
-        "build_model": build_model,
-        "build_effort": build_effort,
+        "extraction": health,
     }
     manifest["index_hash"] = _dir_hash(wd)
     write_manifest(wd, manifest)
+    (wd / BUILD_MARKER).unlink(missing_ok=True)
     return manifest
 
 
 def index_manifest(cfg: Config, bench: Bench) -> dict:
+    """The anchor index's manifest, if the index can be used: same corpus and embeddings, and a healthy extraction.
+    The anchor task calls this when it is created, so an unusable index stops the run before any answer is paid for."""
     wd = working_dir(cfg)
     if not (wd / "ape_manifest.json").exists():
         raise FileNotFoundError(f"{wd} missing: run `python -m ape.anchor.graphragbench build` first")
@@ -191,6 +254,13 @@ def index_manifest(cfg: Config, bench: Bench) -> dict:
         raise RuntimeError(f"{wd} was built from a different corpus")
     if manifest.get("embedding_model") != (want := anchor_embedder(cfg).identity):
         raise RuntimeError(f"{wd} was built with embeddings {manifest.get('embedding_model')!r}, not {want!r}: rebuild it")
+    if not (manifest.get("extraction") or {}).get("healthy"):
+        raise RuntimeError(
+            f"{wd} records no healthy extraction (every document PROCESSED with entities): it was built before that check "
+            "or the build failed. Move it aside to rebuild (the LLM response cache inside makes a rebuild cheap)."
+        )
+    if manifest.get("index_hash") != _dir_hash(wd):
+        raise RuntimeError(f"{wd}: its files no longer match the manifest's index_hash (damaged or partly copied); move it aside to rebuild")
     return manifest
 
 

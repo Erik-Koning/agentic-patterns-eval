@@ -25,6 +25,7 @@ import asyncio
 import threading
 from collections import OrderedDict
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -41,16 +42,24 @@ CACHE_ITEMS = 50_000
 
 
 class BgeOnnx:
-    """bge-large-en-v1.5 (pinned) through onnxruntime. Thread-safe; the session loads on first use."""
+    """bge-large-en-v1.5 (pinned) through onnxruntime. Thread-safe; the session loads on first use.
+
+    A process-wide singleton (`bge()`), so copying it would only duplicate a 1.3 GB session: `copy.deepcopy` returns
+    the instance itself. LightRAG deep-copies its configuration (`dataclasses.asdict`), embedding function included,
+    and a lock cannot be copied (RELIABILITY_REVIEW 2, finding 1)."""
 
     identity = f"{REPO}@{REVISION}"
 
     def __init__(self, threads: int | None = None):
         self._threads = threads
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # the ONNX session
+        self._cache_lock = threading.Lock()  # the pooled-vector cache
         self._session = None
         self._tokenizer = None
         self._cache: OrderedDict[tuple[str, str], np.ndarray] = OrderedDict()
+
+    def __deepcopy__(self, memo) -> "BgeOnnx":
+        return self
 
     def files(self) -> dict[str, str]:
         from huggingface_hub import hf_hub_download
@@ -88,17 +97,26 @@ class BgeOnnx:
             return out
 
     def _pooled(self, kind: str, texts: Sequence[str]) -> np.ndarray:
-        missing = [t for t in dict.fromkeys(texts) if (kind, t) not in self._cache]
+        """The vectors come from this call's own lookups and computations, never from a second cache read, so a
+        concurrent insert evicting an entry (FIFO at CACHE_ITEMS) cannot raise a KeyError here."""
+        if not texts:
+            return np.zeros((0, DIM), dtype=np.float32)
+        found: dict[str, np.ndarray] = {}
+        with self._cache_lock:
+            for t in dict.fromkeys(texts):
+                if (v := self._cache.get((kind, t))) is not None:
+                    found[t] = v
+        missing = [t for t in dict.fromkeys(texts) if t not in found]
         if missing:
             for t, h in zip(missing, self.hidden_states(missing), strict=True):
-                if kind == "mean":
-                    v = h.mean(axis=0)
-                else:
-                    v = h[0] / np.linalg.norm(h[0])
-                self._cache[(kind, t)] = v.astype(np.float32)
+                v = h.mean(axis=0) if kind == "mean" else h[0] / np.linalg.norm(h[0])
+                found[t] = v.astype(np.float32)
+            with self._cache_lock:
+                for t in missing:
+                    self._cache[(kind, t)] = found[t]
                 while len(self._cache) > CACHE_ITEMS:
                     self._cache.popitem(last=False)
-        return np.stack([self._cache[(kind, t)] for t in texts]) if texts else np.zeros((0, DIM), dtype=np.float32)
+        return np.stack([found[t] for t in texts])
 
     # The three poolings the anchor needs (module docstring). Sync; the async wrappers run them in a thread.
     def mean_pooled(self, texts: Sequence[str]) -> np.ndarray:
@@ -111,9 +129,29 @@ class BgeOnnx:
         return self._pooled("cls", [QUERY_INSTRUCTION + t.replace("\n", " ") for t in texts])
 
 
+_EXECUTOR: ThreadPoolExecutor | None = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def _executor() -> ThreadPoolExecutor:
+    """One dedicated worker thread for embedding work. bge serialises on its session lock anyway; running it here
+    keeps blocked calls from tying up the event loop's default executor, which LightRAG and Inspect also use."""
+    global _EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _EXECUTOR is None:
+            _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ape-anchor-embed")
+        return _EXECUTOR
+
+
+async def _run(fn, texts):
+    return await asyncio.get_running_loop().run_in_executor(_executor(), fn, texts)
+
+
 @dataclass
 class AnchorEmbedder:
-    """Async face of an embedder for the anchor: `retrieval` for LightRAG, `documents` / `queries` for the judges."""
+    """Async face of an embedder for the anchor: `retrieval` for LightRAG, `documents` / `queries` for the judges.
+
+    Deep-copying returns the instance itself: it wraps a process-wide model (see `BgeOnnx`)."""
 
     identity: str
     dim: int
@@ -121,14 +159,26 @@ class AnchorEmbedder:
     _documents: object
     _queries: object
 
+    def __deepcopy__(self, memo) -> "AnchorEmbedder":
+        return self
+
     async def retrieval(self, texts: list[str]) -> np.ndarray:
-        return await asyncio.to_thread(self._mean, texts)
+        return await _run(self._mean, texts)
 
     async def documents(self, texts: list[str]) -> list[list[float]]:
-        return (await asyncio.to_thread(self._documents, texts)).tolist()
+        return (await _run(self._documents, texts)).tolist()
 
     async def queries(self, texts: list[str]) -> list[list[float]]:
-        return (await asyncio.to_thread(self._queries, texts)).tolist()
+        return (await _run(self._queries, texts)).tolist()
+
+    def lightrag_func(self):
+        """The function for LightRAG's `EmbeddingFunc`: a plain closure (functions deep-copy as themselves), so
+        LightRAG's `dataclasses.asdict` of its config never reaches the model's locks."""
+
+        async def embed(texts: list[str], **_kwargs) -> np.ndarray:
+            return await self.retrieval(list(texts))
+
+        return embed
 
 
 _BGE: BgeOnnx | None = None
