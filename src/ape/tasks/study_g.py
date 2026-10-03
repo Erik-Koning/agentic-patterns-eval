@@ -20,6 +20,11 @@ passes them), so other callers' task identities are unchanged; `threshold` (T_ab
 and run_plan.yaml's `study_g.threshold` applies otherwise. The task metadata records the variant's knobs, the
 resolved threshold and every APE_CM_* variable (policy knobs: they are not task args, so a run that varies them
 needs its own log directory, as with the gate's APE_* knobs).
+
+Cache nonce (`agent.cache_nonce`): when APE_CACHE_NONCE is set as the task is created (the study runner sets it per eval
+set), the task's nonce, derived from it and the arm, is in every sample's metadata and the task's (`cache_nonce`), and
+the session's system prompt (so every view, probe and compaction input), the team's workers' and the management calls
+start with it. Unset, nothing changes.
 """
 
 import re
@@ -28,6 +33,7 @@ from pathlib import Path
 from inspect_ai import Task, task
 from inspect_ai.dataset import MemoryDataset, Sample
 
+from ape.agent import cache_nonce
 from ape.agent.context_policy import knob_env
 from ape.agent.session import f8_session_agent, plan_threshold
 from ape.config import Config
@@ -90,6 +96,8 @@ def f8_session(
 ) -> Task:
     points = tuple(int(x) for x in str(checkpoints).split(",") if str(x).strip())
     samples = session_samples(level, split, limit_worlds, variant, seed_base, skip_worlds)
+    nonce = cache_nonce.task_nonce(arm)  # None unless the run sets APE_CACHE_NONCE
+    cache_nonce.stamp(samples, nonce)
     run = {k: v for k, v in {"plan_cell": plan_cell, "group": group, "seed_base": seed_base, "skip_worlds": skip_worlds}.items() if v is not None}
     return Task(
         dataset=MemoryDataset(samples, name=f"F8-{level}-{split}"),
@@ -107,5 +115,6 @@ def f8_session(
             "threshold": plan_threshold() if threshold is None else int(threshold),
             "policy_env": knob_env(),
         }
-        | run,
+        | run
+        | cache_nonce.task_metadata(nonce),
     )

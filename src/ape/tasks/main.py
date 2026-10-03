@@ -15,6 +15,10 @@ mock orchestrator uses.
 
 `plan_cell`, `group`, `seed_base` and `skip_worlds` are as in the gate task: a study orchestrator passes them, and they
 are task args only when passed.
+
+Cache nonce (`agent.cache_nonce`): when APE_CACHE_NONCE is set as the task is created (the study runner sets it per eval
+set), the task's nonce, derived from it and the task's arm, delivery and exposure, is in every sample's metadata and the
+task's (`cache_nonce`), and every agent prompt of the sample starts with it. Unset, nothing changes.
 """
 
 import os
@@ -22,6 +26,7 @@ import os
 from inspect_ai import Task, task
 from inspect_ai.dataset import MemoryDataset
 
+from ..agent import cache_nonce
 from ..agent.arms import KG_ARM_ENV
 from ..agent.solvers import arm_solver, is_multi_agent
 from ..config import Config
@@ -63,6 +68,8 @@ def main_study(
             s.metadata["task"]["setup"] = {**s.metadata["task"]["setup"], "faults_enabled": True}
     max_turns = max(cfg.max_turns, turn_cap(family, level)) if family in REGISTRY_LEVELS else cfg.max_turns
     knobs = {k: v for k, v in sorted(os.environ.items()) if k.startswith(ARM_KNOB_PREFIXES) or k == KG_ARM_ENV}
+    nonce = cache_nonce.task_nonce(arm, delivery, exposure)  # None unless the run sets APE_CACHE_NONCE
+    cache_nonce.stamp(samples, nonce)
     return Task(
         dataset=MemoryDataset(samples, name=f"{family}-{level}-{split}"),
         solver=arm_solver(arm, exposure=exposure, max_turns=max_turns, delivery=delivery),
@@ -79,5 +86,6 @@ def main_study(
             "max_turns": max_turns,
             "knobs": knobs,
         }
-        | ({"plan_cell": plan_cell, "group": group} if plan_cell or group else {}),
+        | ({"plan_cell": plan_cell, "group": group} if plan_cell or group else {})
+        | cache_nonce.task_metadata(nonce),
     )

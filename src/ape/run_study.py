@@ -99,7 +99,19 @@ Budget. Before a phase (and before each test group, the primary groups at the st
 (`ape.budget` over the plan cells it runs, at live sizes) must fit in both what is left of the program's budget
 (budget.total_usd, or a lower --budget-usd) and of the study's allocation (budget.allocations), from the spend
 registry, where every log dir this run writes is labelled `<study>/<run id>` (offline `<study>-offline/<run id>`, in
-the run's own registry). Every eval set gets the runner's per-sample `cost_limit`.
+the run's own registry). Every eval set gets the runner's per-sample `cost_limit`, and every task the runaway wall-clock
+guard (`runner.working_guard`: Inspect's `working_limit` from run_plan.yaml `budget.sample_working_limit`, scaled with
+the task's turn cap or the session's cases; a hit is a limit hit like the cost guard's). The gate applies no such guard.
+
+Cache nonce (brief §6.2, §9; `agent.cache_nonce`). Every eval set runs under its own APE_CACHE_NONCE seed
+(`cache_nonce_seed`: study, run id and creation time, phase and group directory; tune: system and candidate), from
+which each task derives its arm's nonce; every agent prompt starts with it and every sample records it (`cache_nonce`).
+So provider prompt caches work within one arm's eval set but never cross runs, phases, cells, groups, candidates or
+arms. A value in the shell is cleared.
+
+Live smoke (BUILD_PLAN B12). A live run's preflight requires readiness/smoke.py's gate checks and the study's own
+(`Study.smoke_checks`: main the multi-agent orchestrator, council, ensemble and KG-worker checks; Study G the CM-sum,
+CM-todo and session-team checks), each passed live on exactly this code (`run_gate.check_live_smoke`).
 
 Run directory: `runs/<study>/<id>/`, laid out as a gate run's (`ape.run_gate`): run.json, <phase>/manifest.json,
 config/ (live outputs: selected.yaml, token_caps.json, token_caps_pilot.json, cap_gate.json, s7_targets.json,
@@ -129,6 +141,7 @@ import yaml
 
 from . import run_gate as rg
 from .agent.arms import KG_ARM_ENV
+from .agent.cache_nonce import NONCE_ENV
 from .budget import BudgetError, Plan, PlanCell, require_affordable
 from .config import ROOT, Config
 from .freeze_scope import config_input
@@ -157,8 +170,9 @@ ORACLE_KG_ARMS = ("APGo-q", "S5o", "LGRo-q", "LGRo-s")  # read the world spec: n
 SMOKE_PROFILE = "gate"  # the profile readiness/smoke.py runs (`check_live_smoke` compares the smoke's profile with it)
 SESSION_CHECKPOINTS_ENV = "APE_SESSION_CHECKPOINTS"  # BUILD_PLAN B7: where F8 sessions checkpoint, for mid-session resume
 # Set by this orchestrator for every phase, so never "knobs from the shell" in a fingerprint: the KG arm (its knobs are
-# part of the KG resolution, recorded in params) and the session checkpoint directory (operational).
-STUDY_MANAGED_ENV = (KG_ARM_ENV, SESSION_CHECKPOINTS_ENV)
+# part of the KG resolution, recorded in params), the session checkpoint directory (operational) and the per-run cache
+# nonce's seed (one per eval set, `cache_nonce_seed`; a shell value is cleared).
+STUDY_MANAGED_ENV = (KG_ARM_ENV, SESSION_CHECKPOINTS_ENV, NONCE_ENV)
 SEED_MARKER = re.compile(r"<!-- ape:test-seeds study=(\S+) run=(\S+) base=(\d+) count=(\d+) -->")
 FROZEN_CONFIG = ("models.yaml", "model_costs.yaml", "run_plan.yaml")
 REPORT_DIR = "report"
@@ -171,7 +185,7 @@ class Study:
     phases whose cells run first (the confirmatory evidence, so a budget stop loses only the rest); `analysis`: the
     module whose `analyze(run)` the analyze phase calls, `analysis_code` the code the freeze hashes with it; `kg_build`:
     the plan's KG build cell (projection and B6's world-count check); `caps`: token caps from the micro-pilot;
-    `smoke_checks`: live smoke check ids its live runs need on top of smoke.py's (BUILD_PLAN B12 adds them)."""
+    `smoke_checks`: live smoke check ids its live runs need on top of smoke.py's gate checks (BUILD_PLAN B12)."""
 
     name: str
     title: str
@@ -203,6 +217,9 @@ STUDIES = {
         analysis_code=("src/ape/analyze_main.py", "src/ape/analysis"),
         kg_build="main.build.kg",
         caps=True,
+        # readiness/smoke.py's checks of the main study's new arm families (BUILD_PLAN B12): orchestrator, council,
+        # ensemble, KG workers (`smoke.STUDY_CHECKS["main"]`).
+        smoke_checks=("mas_orchestrator", "mas_council", "mas_ensemble", "mas_kg_workers"),
     ),
     "study_g": Study(
         name="study_g",
@@ -213,6 +230,9 @@ STUDIES = {
         prereg="PREREGISTRATION_G.md",
         analysis="ape.analyze_g",
         analysis_code=("src/ape/analyze_g.py", "src/ape/analysis"),
+        # readiness/smoke.py's checks of Study G's new arm families (BUILD_PLAN B12): CM-sum, CM-todo and M1 in a short
+        # F8 session each (`smoke.STUDY_CHECKS["study_g"]`); CM0 and O-state are the gate's f8_session check.
+        smoke_checks=("g_cm_sum", "g_cm_todo", "g_team_session"),
     ),
 }
 ALL_PHASES = tuple(dict.fromkeys(p for s in STUDIES.values() for p in s.phases))
@@ -1147,20 +1167,32 @@ def threshold(run: StudyRun) -> int:
 
 
 def agent_task(run: StudyRun, *, family: str, level: str, split: str, arm: str, delivery: str = "push", exposure: str = "retrieved", limit_worlds: int | None, seed_base: int, cap: int | None, **labels: Any):
-    """One main-study task (`tasks.main.main_study`) with the cell's token cap as Inspect's `token_limit`."""
+    """One main-study task (`tasks.main.main_study`) with the cell's token cap as Inspect's `token_limit` and the runaway
+    wall-clock guard (`runner.working_guard`)."""
     from inspect_ai import task_with
 
+    from .runner import working_guard
     from .tasks.main import main_study
 
     t = main_study(family=family, level=level, split=split, arm=arm, exposure=exposure, delivery=delivery, limit_worlds=limit_worlds, seed_base=seed_base, **{k: v for k, v in labels.items() if v})
-    return task_with(t, token_limit=int(cap)) if cap is not None else t
+    return working_guard(task_with(t, token_limit=int(cap)) if cap is not None else t, plan(run))
 
 
 def session_task(run: StudyRun, *, level: str, split: str, arm: str, limit_worlds: int, variant: str, seed_base: int, **labels: Any):
-    """One F8 session task (`tasks.study_g.f8_session`): the run's seed block, the plan's window and threshold."""
+    """One F8 session task (`tasks.study_g.f8_session`): the run's seed block, the plan's window and threshold, and the
+    runaway wall-clock guard scaled to the session's length (`runner.working_guard`)."""
+    from .runner import working_guard
     from .tasks.study_g import f8_session
 
-    return f8_session(level=level, split=split, arm=arm, limit_worlds=limit_worlds, window=window(run), variant=variant, threshold=threshold(run), seed_base=seed_base, **labels)
+    return working_guard(f8_session(level=level, split=split, arm=arm, limit_worlds=limit_worlds, window=window(run), variant=variant, threshold=threshold(run), seed_base=seed_base, **labels), plan(run))
+
+
+def cache_nonce_seed(run: StudyRun, *parts: Any) -> str:
+    """APE_CACHE_NONCE for one eval set (`agent.cache_nonce`): the study, the run id and the run's creation time (a run
+    id reused after its directory was deleted gets new nonces), then `parts` (the phase and the group's directory; or
+    tune, the system and the candidate). Each task derives its own nonce from it and its arm."""
+    created = rg.read_run_info(run).get("created") or ""
+    return "/".join([run.study, f"{run.run_id}@{created}", *(str(p) for p in parts)])
 
 
 def group_tasks(run: StudyRun, g: dict) -> list:
@@ -1198,7 +1230,9 @@ def run_group(run: StudyRun, g: dict, base_dir: Path, what: str) -> list[str]:
     limit); its final logs."""
     profile = group_profile(run, g)
     models = group_models(run, profile, g["kind"])
-    with rg._environ(g["env"]):
+    # The group's cache-nonce seed (`cache_nonce_seed`): its tasks' prompts never share a provider cache with another
+    # run's, phase's, cell's or group's (each arm derives its own nonce from it).
+    with rg._environ(g["env"] | {NONCE_ENV: cache_nonce_seed(run, base_dir.name, g["dir"])}):
         tasks = group_tasks(run, g)
         per = rg.sample_usd(group_projected(run, g), [(tasks, g["epochs"])])
         arms = ", ".join(a["run"] for a in g["arms"])
@@ -1649,12 +1683,15 @@ def _tune(run: StudyRun, record: dict) -> None:
     for name in grid["systems"]:
         kind = _system_kind(grid, name)
 
-        def make_task(cell: str, cand: dict, limit_worlds: int | None, kind: str = kind):
-            if kind == "session":
-                n, _, tag = cell.removeprefix("F8-").partition("-")
-                return session_task(run, level=n, split="dev", arm=cand["arm"], limit_worlds=limit_worlds or 1, variant=tag, seed_base=dev_base)
-            family, level = cell.split("-", 1)
-            return agent_task(run, family=family, level=level, split="dev", arm=cand["arm"], delivery=cand.get("delivery", "push"), limit_worlds=limit_worlds, seed_base=dev_base, cap=caps.get(cell))
+        def make_task(cell: str, cand: dict, limit_worlds: int | None, kind: str = kind, system: str = name):
+            # Each candidate's own cache-nonce seed: a later candidate never reads an earlier one's cache, which would
+            # make it look cheaper in the tie-break on cost.
+            with rg._environ({NONCE_ENV: cache_nonce_seed(run, "tune", system, cand["id"])}):
+                if kind == "session":
+                    n, _, tag = cell.removeprefix("F8-").partition("-")
+                    return session_task(run, level=n, split="dev", arm=cand["arm"], limit_worlds=limit_worlds or 1, variant=tag, seed_base=dev_base)
+                family, level = cell.split("-", 1)
+                return agent_task(run, family=family, level=level, split="dev", arm=cand["arm"], delivery=cand.get("delivery", "push"), limit_worlds=limit_worlds, seed_base=dev_base, cap=caps.get(cell))
 
         agent, roles = group_models(run, profile, kind)
         print(f"[tune] {name}: {len(grid['systems'][name]['candidates'])} candidate(s) x {_system_cells(grid, name)}", flush=True)
@@ -2686,6 +2723,7 @@ def run_environment(run: StudyRun) -> Iterator[None]:
     else:
         updates = {} if os.environ.get("APE_EMBEDDING_MODEL") else {"APE_EMBEDDING_MODEL": study_profile(run).role("embeddings").model}
     updates |= {"APE_S7_TARGETS": run.s7_targets_path, TEST_SPLIT_ENV: None, TEST_SEED_BASE_ENV: None, SESSION_CHECKPOINTS_ENV: run.session_checkpoints_dir}
+    updates[NONCE_ENV] = None  # each eval set sets its own seed (`cache_nonce_seed`); a shell value never applies
     updates[LABEL_ENV] = f"{run.study}{'-offline' if run.offline else ''}/{run.run_id}"
     if run.offline:
         updates[REGISTRY_ENV] = run.work_dir / "spend_registry.jsonl"

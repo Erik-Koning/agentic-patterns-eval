@@ -42,6 +42,8 @@ from ..llm.embeddings import EMBED_CONTEXT
 from ..llm.tokens import truncate_to_tokens
 from ..worlds.env_tools import ANSWER, always_on, build_tools
 from ..worlds.spec import TaskItem, World
+from .cache_nonce import of as nonce_of
+from .cache_nonce import with_nonce
 from .step import exposed_tools, step_query
 
 BASE_SYSTEM = (
@@ -194,7 +196,9 @@ def kb_agent(
         ctx = await compile_(task.prompt, "push") if push else EMPTY
         # The history lives in state.messages itself: Inspect enforces the sample's message limit on its appends, and
         # when a limit stops the loop the logged conversation is exactly what ran.
-        state.messages = [ChatMessageSystem(content=system_prompt(push, pull, arm.per_step, ctx.text)), ChatMessageUser(content=task.prompt)]
+        # A study run's per-run cache nonce (`cache_nonce`) leads the system prompt; without one it is unchanged.
+        system = with_nonce(system_prompt(push, pull, arm.per_step, ctx.text), nonce_of(state.metadata))
+        state.messages = [ChatMessageSystem(content=system), ChatMessageUser(content=task.prompt)]
         messages = state.messages
         model = get_model()
         nudges, streak, output = 0, False, None

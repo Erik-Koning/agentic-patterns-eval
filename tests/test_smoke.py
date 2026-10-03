@@ -341,6 +341,23 @@ def test_the_dry_smoke_passes_every_check_end_to_end(clean_env, monkeypatch):
     assert ex["verdict"] == "builder_passes" and ex["offline"] is True and ex["chunks"] > 500 and ex["kinds"] == dict.fromkeys(("chunks", "apg", "lightrag"), "built")
     rt = report["checks"]["retrieval"]["measured"]
     assert "delivered-text" in rt["provenance"] and rt["lightrag_recall_query_keywords"] is not None
+    # B12: the studies' arm families, each with its records, the effort on every call and the nonce on every agent call.
+    for step in (*smoke.STUDY_CHECKS["main"], *smoke.STUDY_CHECKS["study_g"]):
+        parts = report["checks"][step]["measured"]
+        assert set(parts) == {"records", "effort", "nonce", "cost"} and all(p["status"] == sc.PASS for p in parts.values()), step
+    kg = report["checks"]["mas_kg_workers"]["measured"]
+    assert {r["sample"].split()[1] for r in kg["records"]["measured"]["samples"]} == set(smoke.KG_WORKER_ARMS["dry"]) and all(r["kg_calls"] for r in kg["records"]["measured"]["samples"])
+    assert set(kg["nonce"]["measured"]) == {"M1k/APG-s", "M1k/LGRo-s"} and len({p["measured"]["nonce"] for p in kg["nonce"]["measured"].values()}) == 2
+    council = report["checks"]["mas_council"]["measured"]["records"]["measured"]["samples"]
+    assert all(r["roles"] == {"member": 3, "chair": 1} for r in council)
+    g = {step: report["checks"][step]["measured"] for step in smoke.STUDY_CHECKS["study_g"]}
+    assert g["g_cm_sum"]["records"]["measured"]["cm_calls"]["summary"] >= 1 and "sum_drop" in g["g_cm_sum"]["records"]["measured"]["cm_events"]
+    assert g["g_cm_todo"]["records"]["measured"]["cm_calls"]["todo_extract"] >= 1 and g["g_cm_todo"]["records"]["measured"]["policy_tool_calls"] > 0
+    assert g["g_team_session"]["records"]["measured"]["workers"] > 0 and "cm" not in g["g_team_session"]["records"]["measured"]["kinds"]
+    for step, parts in g.items():  # every agent, management and probe call opens with the session's nonce
+        n = parts["nonce"]["measured"]
+        assert n["agent_model_calls"] == n["prefixed"] > 0 and {"agent", "probe"} <= set(parts["effort"]["measured"]["roles"]), step
+    assert {"cm"} <= set(g["g_cm_sum"]["effort"]["measured"]["roles"])
     assert (ROOT / "PROVENANCE.md").read_bytes() == provenance and smoke._tree_hash(ROOT / "config") == config
 
 
@@ -710,3 +727,181 @@ def test_the_anchor_index_build_never_counts_as_a_gate_build():
     ]
     b = sc.build_per_call(rows, load_assumptions())["lightrag_extract"]
     assert b["calls"] == 1 and b["input_per_call"] == 3000.0 and b["worlds"] == ["F7-100-rel-desc-dev-s1000"]
+
+
+# ---------- B12: the studies' arm families ----------
+
+
+def test_the_gate_requires_only_its_own_checks_and_each_study_its_own():
+    """The gate's preflight requires exactly the checks it did before B12; each study requires its own on top
+    (`ape.run_study`, `Study.smoke_checks`), which are smoke.py's STUDY_CHECKS."""
+    from ape.run_study import STUDIES
+
+    before_b12 = ("effort", "L2", "D017", "H4", "L4_L5", "APG", "perstep_reasoning", "pull", "recovery", "burst", "f8_session", "retrieval", "extract_f7_1000", "orchestrator")
+    assert smoke.GATE_CHECKS == before_b12
+    assert {s: STUDIES[s].smoke_checks for s in ("main", "study_g")} == smoke.STUDY_CHECKS
+    study = [c for checks in smoke.STUDY_CHECKS.values() for c in checks]
+    assert set(smoke.STEPS) == {*smoke.GATE_CHECKS, *study} and all(smoke.STEPS[c][0] == ("effort",) for c in study)
+    assert smoke.select_steps(["main"], None) == ["effort", *smoke.STUDY_CHECKS["main"]]
+    assert smoke.select_steps(None, ["main", "study_g"]) == list(smoke.GATE_CHECKS)
+    assert smoke.select_steps(["gate"], None) == list(smoke.GATE_CHECKS)
+
+
+def test_the_studies_checks_are_priced_and_the_whole_smoke_fits_the_default_cap(clean_env):
+    proj = smoke.projections([s for s in smoke.STEPS if s != "orchestrator"], "gate", dry=True)
+    study = {c: proj[c] for checks in smoke.STUDY_CHECKS.values() for c in checks}
+    assert all(v > 0 for v in study.values()), study
+    assert proj["mas_council"] > proj["mas_orchestrator"], "M7 is priced at 5x a single agent, M1 at 2.5x"
+    assert proj["g_team_session"] > proj["g_cm_sum"], "the team's 2.5x generations"
+    assert 0.3 < sum(study.values()) < 0.6
+    # With the orchestrator's ≈ $1.15 (its projection needs a run; the dry end-to-end test checks the whole total).
+    assert sum(proj.values()) + 1.2 <= smoke.DEFAULT_MAX_USD
+
+
+def test_the_cost_model_check_leaves_out_the_small_window_sessions(clean_env):
+    """Study G's checks run at W = 16K and T_abs = 4K: their logs never enter the calibration the smoke offers to promote."""
+    import os
+    import time
+
+    from inspect_ai import eval as inspect_eval
+    from inspect_ai.model import GenerateConfig, get_model
+
+    from ape.build import build
+    from ape.llm.mock_agent import mock_agent
+    from ape.models import load_profile
+    from ape.tasks.gate import gate
+
+    for k, v in {"APE_WORLDS": "worlds", "APE_CACHE": "cache", "APE_INDICES": "indices"}.items():
+        os.environ[k] = str(clean_env / v)
+    os.environ["APE_EMBEDDINGS"] = "fake"
+    asyncio.run(build("dev", "F7", ["10"], n_worlds=1, n_tasks=1, relational=True, embed=True))
+    out, log_root = clean_env / "live", clean_env / "live" / "logs" / "now"
+    model = get_model("mockllm/model", config=GenerateConfig(reasoning_effort="high"), custom_outputs=mock_agent)
+    for name in ("S1", "g_cm_sum"):
+        inspect_eval(gate(family="F7", level="10", split="dev", arm="S1"), model=model, log_dir=str(log_root / name), display="none")
+    res = smoke.cost_model_check(out, log_root, None, time.time() - 60, load_profile("gate"))
+    assert res["logs"] == 1 and "g_cm_sum" not in (out / "calibration_logs.txt").read_text()
+
+
+def test_a_live_record_requires_the_gates_checks_only(clean_env, monkeypatch):
+    import ape.models as models
+
+    monkeypatch.setattr(smoke, "SMOKE_ROOT", clean_env / "smoke")
+    monkeypatch.setattr(smoke, "PROBE_PATH", clean_env / "no-probe.json")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-never-sent")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(models, "require_preflight", lambda *a, **k: None)
+    monkeypatch.setattr(smoke, "cost_model_check", lambda *a, **k: {"status": "not measured", "reason": "test"})
+    monkeypatch.setitem(smoke.STEP_FUNCS, "effort", lambda c: (sc.result(sc.PASS, {"probe": "ok"}), []))
+    monkeypatch.setitem(smoke.STEP_FUNCS, "mas_orchestrator", lambda c: (sc.result(sc.PASS, {}), []))
+    assert smoke.main(["--only", "mas_orchestrator"]) == 0
+    rec = json.loads((clean_env / "smoke" / "live" / smoke.RECORD_NAME).read_text())
+    assert rec["required"] == list(smoke.GATE_CHECKS) and rec["checks"]["mas_orchestrator"]["status"] == sc.PASS
+
+
+def _mas_sample(**over) -> dict:
+    good = {
+        "id": "t0", "label": None, "log_status": "success", "sample_error": None, "limit": None,
+        "store_keys": [*sc.MAS_RECORDS, "mas_plan", "mas_rounds"],
+        "accounting": {"error": None, "unattributed": {}, "totals": {"calls": 4, "input_tokens": 900, "output_tokens": 100, "total_tokens": 1000}},
+        "usage": {"input_tokens": 900, "output_tokens": 100, "total_tokens": 1000},
+        "agents": [{"id": "orchestrator", "role": "orchestrator", "stop": "done", "error": None}, {"id": "w1.1", "role": "worker", "stop": "done", "error": None}],
+        "answered": True, "kg_calls": 2,
+    }  # fmt: skip
+    return good | over
+
+
+def test_the_multi_agent_verdict_checks_records_accounting_stops_and_roles():
+    assert sc.mas_verdict("M1", [_mas_sample(), _mas_sample(id="t1")])["status"] == sc.PASS
+    cases = {
+        "sample error": _mas_sample(sample_error="boom"),
+        "a sample limit fired (cost)": _mas_sample(limit="cost"),
+        "records missing ['mas_rounds']": _mas_sample(store_keys=[*sc.MAS_RECORDS, "mas_plan"]),
+        "does not sum to the sample's usage (total_tokens 1000 vs 1200": _mas_sample(usage={"input_tokens": 900, "output_tokens": 100, "total_tokens": 1200}),
+        "calls outside every agent span": _mas_sample(accounting={"unattributed": {"agent": {}}, "totals": _mas_sample()["accounting"]["totals"]}),
+        "agent error(s)": _mas_sample(agents=[*_mas_sample()["agents"][:1], {"id": "w1.1", "role": "worker", "stop": "error", "error": "RuntimeError: x"}]),
+        "agent stop(s) ['w1.1=interrupted']": _mas_sample(agents=[*_mas_sample()["agents"][:1], {"id": "w1.1", "role": "worker", "stop": "interrupted"}]),
+        "roles that did not run: ['worker (0 of 1)']": _mas_sample(agents=_mas_sample()["agents"][:1]),
+    }
+    for needle, s in cases.items():
+        res = sc.mas_verdict("M1", [_mas_sample(), s])
+        assert res["status"] == sc.FAIL and needle in res["reason"], (needle, res["reason"])
+    assert "no kg call" in sc.mas_verdict("M1k", [_mas_sample(kg_calls=0)])["reason"]
+    assert sc.mas_verdict("M1", [_mas_sample(answered=False)])["status"] == sc.WARN
+    council = _mas_sample(store_keys=[*sc.MAS_RECORDS, "mas_council"], agents=[{"id": f"member_{i}", "role": "member", "stop": "done"} for i in (1, 2)] + [{"id": "chair", "role": "chair", "stop": "done"}])
+    assert "member (2 of 3)" in sc.mas_verdict("M7", [council])["reason"]
+    assert sc.mas_verdict("S8k3", [])["status"] == sc.FAIL
+
+
+def _g_session(**over) -> dict:
+    views = [{"item": 1, "view_tokens": 3000, "kind": "agent", "usage": {"total_tokens": 3100}}, {"item": 2, "view_tokens": 4500, "kind": "agent", "usage": {"total_tokens": 4600}},
+             {"item": 2, "view_tokens": 2000, "kind": "cm", "purpose": "summary", "usage": {"total_tokens": 2300}}]  # fmt: skip
+    return _session(views=views) | {
+        "probes": [{"k": 2, "answer": dict.fromkeys(CATS, []), "error": None, "view_tokens": 3500, "usage": {"total_tokens": 3600}}],
+        "cm_events": [{"event": "threshold"}, {"event": "summary"}, {"event": "sum_drop"}], "policy_tools": [], "overflow": None,
+        "usage_by_kind": {"agent": {"total_tokens": 7700}, "cm": {"total_tokens": 2300}, "probe": {"total_tokens": 3600}}, "inspect_usage": 13600,
+    } | over  # fmt: skip
+
+
+def test_the_session_verdict_checks_management_window_kinds_and_usage():
+    kw = {"window": 16000, "threshold": 4000, "dry": False}
+    assert sc.session_arm_verdict("CM-sum", _g_session(), CATS, **kw)["status"] == sc.PASS
+    unmetered = [*_g_session()["views"][:2], {"item": 2, "view_tokens": 2000, "kind": "cm", "purpose": "summary"}]
+    cases = {
+        "no summary management call": _g_session(views=_g_session()["views"][:2], usage_by_kind={"agent": {"total_tokens": 7700}, "probe": {"total_tokens": 3600}}, inspect_usage=11300),
+        "management never fired": _g_session(cm_events=[{"event": "summary"}]),
+        "recorded without usage": _g_session(views=unmetered, usage_by_kind={"agent": {"total_tokens": 7700}, "probe": {"total_tokens": 3600}}, inspect_usage=11300),
+        "over W=16000 were sent": _g_session(probes=[{"k": 2, "answer": dict.fromkeys(CATS, []), "view_tokens": 17000, "usage": {"total_tokens": 3600}}]),
+        "overflowed W=16000 at item 2": _g_session(overflow=2),
+        "is not the per-call records'": _g_session(inspect_usage=99),
+        "unexpected kind ['probe']": _g_session(views=[*_g_session()["views"], {"item": 2, "view_tokens": 10, "kind": "probe", "usage": {"total_tokens": 0}}]),
+    }
+    for needle, rec in cases.items():
+        res = sc.session_arm_verdict("CM-sum", rec, CATS, **kw)
+        assert res["status"] == sc.FAIL and needle in res["reason"], (needle, res["reason"])
+    # Dry: mock calls carry no usage, so management is checked as recorded, not as priced.
+    dry = _g_session(views=unmetered, usage_by_kind={"agent": {"total_tokens": 7700}, "probe": {"total_tokens": 3600}}, inspect_usage=11300)
+    assert sc.session_arm_verdict("CM-sum", dry, CATS, **kw | {"dry": True})["status"] == sc.PASS
+    todo = _g_session(views=[*_g_session()["views"][:2], {"item": 0, "view_tokens": 900, "kind": "cm", "purpose": "todo_extract", "usage": {"total_tokens": 2300}}],
+                      cm_events=[{"event": "todo_extract"}, {"event": "threshold"}, {"event": "todo_drop"}])  # fmt: skip
+    assert sc.session_arm_verdict("CM-todo", todo, CATS, **kw)["status"] == sc.WARN, "no todo_write traffic warns"
+    assert sc.session_arm_verdict("CM-todo", todo | {"policy_tools": [{"tool": "todo_write"}]}, CATS, **kw)["status"] == sc.PASS
+
+
+def test_the_session_team_verdict_needs_workers_and_accounting_that_sums():
+    views = [{"item": 1, "view_tokens": 2500, "kind": "agent", "usage": {"input_tokens": 2400, "output_tokens": 100, "total_tokens": 2500}},
+             {"item": 1, "view_tokens": 2600, "kind": "agent", "agent": "w1.1", "role": "worker", "usage": {"input_tokens": 2500, "output_tokens": 100, "total_tokens": 2600}}]  # fmt: skip
+    rec = _session(views=views) | {
+        "probes": [{"k": 2, "answer": dict.fromkeys(CATS, []), "view_tokens": 2000, "usage": {"total_tokens": 2100}}], "cm_events": [], "policy_tools": [], "overflow": None,
+        "usage_by_kind": {"agent": {"input_tokens": 4900, "output_tokens": 200, "total_tokens": 5100}, "probe": {"total_tokens": 2100}}, "inspect_usage": 7200,
+        "mas_agents": [{"id": "orchestrator", "role": "orchestrator"}, {"id": "w1.1", "role": "worker", "stop": "reported"}],
+        "mas_accounting": {"totals": {"calls": 2, "input_tokens": 4900, "output_tokens": 200, "total_tokens": 5100}},
+    }  # fmt: skip
+    kw = {"window": 16000, "threshold": 4000, "dry": False}
+    assert sc.session_arm_verdict("M1", rec, CATS, **kw)["status"] == sc.PASS
+    assert "no worker ran" in sc.session_arm_verdict("M1", rec | {"mas_agents": rec["mas_agents"][:1]}, CATS, **kw)["reason"]
+    assert "w1.1=limit" in sc.session_arm_verdict("M1", rec | {"mas_agents": [rec["mas_agents"][0], {"id": "w1.1", "role": "worker", "stop": "limit"}]}, CATS, **kw)["reason"]
+    off = rec | {"mas_accounting": {"totals": {"calls": 2, "input_tokens": 4900, "output_tokens": 200, "total_tokens": 5000}}}
+    assert "does not sum to the session's agent usage (total_tokens 5000 vs 5100)" in sc.session_arm_verdict("M1", off, CATS, **kw)["reason"]
+
+
+def test_effort_nonce_cost_and_combine():
+    expected = {"agent": "high", "kg": "low"}
+    ok = [{"role": None, "effort": "high", "reasoning_tokens": 40}, {"role": "kg", "effort": "low"}, {"role": "cm", "effort": "high"}, {"role": "probe", "effort": "high"}]
+    res = sc.effort_sent_verdict(ok, expected)
+    assert res["status"] == sc.PASS and set(res["measured"]["roles"]) == {"agent", "kg", "cm", "probe"} and res["measured"]["roles"]["agent"]["reasoning_tokens"] == 40
+    bad = sc.effort_sent_verdict([*ok, {"role": None, "effort": "medium"}], expected)
+    assert bad["status"] == sc.FAIL and "agent call sent effort 'medium', the profile's is 'high'" in bad["reason"]
+    assert sc.effort_sent_verdict([], expected)["status"] == sc.FAIL
+    calls = [{"kind": "agent", "prefixed": True}, {"kind": "cm", "prefixed": True}]
+    assert sc.nonce_verdict("abc", ["abc", "abc"], calls)["status"] == sc.PASS
+    assert "carries no cache nonce" in sc.nonce_verdict(None, [None], calls)["reason"]
+    assert "do not open with the nonce line (['probe'])" in sc.nonce_verdict("abc", ["abc"], [*calls, {"kind": "probe", "prefixed": False}])["reason"]
+    assert "1 sample(s) record cache_nonce" in sc.nonce_verdict("abc", ["abc", "xyz"], calls)["reason"]
+    assert sc.cost_band_verdict(0.0, 0.05, dry=True)["status"] == sc.PASS
+    assert sc.cost_band_verdict(0.03, 0.05, dry=False)["status"] == sc.PASS
+    assert sc.cost_band_verdict(0.0, 0.05, dry=False)["status"] == sc.FAIL
+    over = sc.cost_band_verdict(0.2, 0.05, dry=False)
+    assert over["status"] == sc.WARN and over["measured"]["ratio"] == 4.0 and "recalibrate" in over["reason"]
+    both = sc.combine({"records": sc.result(sc.PASS, {}), "cost": over, "nonce": sc.result(sc.FAIL, {}, reason="x")})
+    assert both["status"] == sc.FAIL and both["reason"].startswith("cost: realised") and both["reason"].endswith("nonce: x")

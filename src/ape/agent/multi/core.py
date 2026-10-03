@@ -61,6 +61,8 @@ from ...llm.tokens import count_tokens, truncate_to_tokens
 from ...worlds.env_tools import ANSWER
 from ...worlds.spec import TaskItem, World
 from ..arms import load_world
+from ..cache_nonce import of as nonce_of
+from ..cache_nonce import with_nonce
 from ..kb_react import COMPILE_LOG, EMPTY, MAX_NUDGES, SEARCH_ERRORS, STEP_LOG, step_view, system_prompt
 from ..step import exposed_tools, step_query
 
@@ -271,8 +273,9 @@ class Delivery:
         return ctx
 
     def system(self, ctx: ContextResult) -> ChatMessageSystem:
-        """The single-agent arms' system prompt (push delivery): the knowledge itself for per-query arms."""
-        return ChatMessageSystem(content=system_prompt(True, False, self.per_step, ctx.text))
+        """The single-agent arms' system prompt (push delivery): the knowledge itself for per-query arms, after the
+        sample's cache nonce when the run sets one (`agent.cache_nonce`; every role of the arm shares it)."""
+        return ChatMessageSystem(content=with_nonce(system_prompt(True, False, self.per_step, ctx.text), nonce_of(self.team.state.metadata)))
 
 
 # --- the turn loop ----------------------------------------------------------------------------------------------------

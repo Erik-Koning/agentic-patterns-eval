@@ -30,6 +30,7 @@ correctly (`log_samples`). Inspect logs a sample's last attempt only, so each lo
 (`ape.usage_ledger`, every model call as it happens) adds the errored attempts Inspect retried and a killed run's
 in-flight samples (`unlogged_spend`, D-030). `program_spend` sums every log dir (logs plus that), and every build
 ledger, in the program's spend registry (`ape.spend`). `sample_cost_limit` is the per-sample runaway guard the runner passes to Inspect.
+`sample_working_limit` is the main study's and Study G's per-sample wall-clock guard (`ape.runner.working_guard`).
 """
 
 import argparse
@@ -879,6 +880,23 @@ def sample_cost_limit(projected_sample_usd: float | None, plan: Plan | None = No
     if projected_sample_usd is None or projected_sample_usd <= 0:
         return default
     return max(floor, multiple * float(projected_sample_usd))
+
+
+# run_plan.yaml budget.sample_working_limit: the defaults when the plan sets none.
+WORKING_LIMIT_DEFAULTS = {"agent_s": 1800, "agent_turns": 12, "session_base_s": 1800, "session_per_case_s": 600}
+
+
+def sample_working_limit(family: str | None, level: str | int | None = None, max_turns: int | None = None, plan: Plan | None = None) -> int:
+    """Inspect's per-sample `working_limit` in seconds, the main study's and Study G's runaway wall-clock guard
+    (ORCHESTRATOR_BRIEF_v2 §4.5; run_plan.yaml budget.sample_working_limit). Not an experimental cap: at about 30 s a
+    call, S1 on F7 needs at most 6 min (12 turns), M7's council about 24 min in its worst case (some 48 calls in
+    sequence), an F8 case at most 4 min (8 turns). An agent sample gets `agent_s` at the default turn cap
+    (`agent_turns`), scaled up with its own turn cap (`max_turns`; F1-32's 44 turns get 44/12 of it); an F8 session of N
+    cases gets `session_base_s` + N x `session_per_case_s`."""
+    cfg = WORKING_LIMIT_DEFAULTS | (((plan or load_plan()).budget or {}).get("sample_working_limit") or {})
+    if family == "F8":
+        return int(float(cfg["session_base_s"]) + int(level or 0) * float(cfg["session_per_case_s"]))
+    return int(float(cfg["agent_s"]) * max(1.0, float(max_turns or 0) / float(cfg["agent_turns"])))
 
 
 def require_affordable(projected_usd: float, remaining_usd: float, what: str = "phase") -> None:

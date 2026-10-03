@@ -27,6 +27,14 @@ Every entry point (gate runs, tuning, anchor, smoke) runs through `run_evals`, s
   enforce it, so a run with an unpriced model (offline mockllm) gets none. A sample that hits it ends with
   `limit` "cost" (`gate_stats.load_results`: `limit_hit`, counted as a cap hit in PC5). A caller's
   `cost_limit=` overrides.
+- **Wall-clock guard** (main study and Study G only; brief §4.5). `working_guard(task)` gives a task Inspect's
+  per-sample `working_limit` (`ape.budget.sample_working_limit`, run_plan.yaml `budget.sample_working_limit`): 30
+  min for an agent sample at the default 12-turn cap, scaled with the task's turn cap, and 30 min + 10 min per case
+  for an F8 session. Working time excludes waits for connections and rate-limit retries, so contention never trips
+  it; Inspect's monitor checks it about once a second, a call still in flight included (a hung request is cut too).
+  A sample that hits it ends with `limit` "working", which the loaders count as a limit hit like the cost guard's.
+  `ape.run_study` applies it to every task it builds; the gate never does, because Inspect's task identity includes
+  the limit and the gate's identities stay as they are. The index records each task's `working_limit`.
 - **Task retries.** `retry_attempts=3` with `retry_immediate=False`, so the `retry_wait` back-off applies
   (30 s, then 60 s, ...). Inspect's retry loop finishes the whole set before each retry. A retry reuses
   the failed log's completed samples (same uuid, same usage) and re-runs only the rest. In this mode
@@ -113,6 +121,18 @@ def planned_samples(task: Task, epochs: int | None = None, limit: Any = None) ->
     return n * int(epochs or task.epochs or 1)
 
 
+def working_guard(task: Task, plan: Any = None) -> Task:
+    """The runaway wall-clock guard on `task` (module docstring): Inspect's per-sample `working_limit` from
+    `ape.budget.sample_working_limit` for the task's family, level and turn cap (its metadata), unless the task sets
+    its own. `plan` is the run plan to read (default config/run_plan.yaml). Returns the task."""
+    from .budget import sample_working_limit
+
+    if task.working_limit is None:
+        md = task.metadata or {}
+        task.working_limit = sample_working_limit(md.get("family"), md.get("level"), md.get("max_turns"), plan)
+    return task
+
+
 def _all_priced(models: Mapping[str, str], costs_path: Path) -> bool:
     """Whether the price table covers every model of the run (Inspect enforces `cost_limit` only then)."""
     table = load_costs(costs_path)
@@ -181,7 +201,7 @@ def run_evals(
             t.fail_on_error = task_fail_on_error(n)
         if limit is not None and t.cost_limit is None:
             t.cost_limit = limit
-        per_task.append({"task": t.name, "planned": n, "fail_on_error": t.fail_on_error, "cost_limit": t.cost_limit})
+        per_task.append({"task": t.name, "planned": n, "fail_on_error": t.fail_on_error, "cost_limit": t.cost_limit, "working_limit": t.working_limit})
 
     run = {"key": uuid.uuid4().hex, "started": _now(), "status": "running", "pid": os.getpid(), "profile": p.name, "live": live, "cost_limit_usd": limit, "tasks_planned": per_task}
     registry = spend.register_logs(log_dir, live=live, tasks=[x["task"] for x in per_task])

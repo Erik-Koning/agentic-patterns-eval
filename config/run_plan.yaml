@@ -31,6 +31,12 @@ budget:
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
   # ends with limit "cost" and counts as a cap hit (PC5). Only applied when every model of the run is priced.
   sample_cost_limit: {multiple: 20, floor_usd: 0.50, default_usd: 2.00}
+  # Per-sample runaway wall-clock guard of the main study and Study G (BUILD_PLAN B12, brief §4.5; Inspect
+  # `working_limit`, set by ape.run_study on every task it builds, never by the gate): agent_s seconds at the default
+  # agent_turns turn cap, scaled with a task's own turn cap; an F8 session of N cases gets session_base_s + N x
+  # session_per_case_s. Not an experimental cap: a sample that hits it ends with limit "working", a limit hit like
+  # the cost guard's. Part of the main and Study G freeze slices (ape.freeze_scope), not the gate's.
+  sample_working_limit: {agent_s: 1800, agent_turns: 12, session_base_s: 1800, session_per_case_s: 600}
 
 study_g:
   window: 32000      # nominal W, harness-enforced, identical across tiers (was 64K)

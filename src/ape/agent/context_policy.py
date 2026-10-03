@@ -83,6 +83,8 @@ from pydantic_core import to_jsonable_python
 from ..llm.tokens import count_tokens
 from ..worlds import gen_f8
 from ..worlds.spec import World
+from .cache_nonce import line as nonce_line
+from .cache_nonce import starts_with_nonce
 
 KNOB_ENV_PREFIX = "APE_CM_"
 KINDS = ("agent", "cm", "probe")  # call kinds: the arm's agent, its management calls, the forked probes
@@ -201,6 +203,7 @@ class SessionContext:
     stage: str = "start"
     session_tools: dict = field(default_factory=dict)
     max_turns_per_item: int = 8
+    nonce: str | None = None  # the sample's per-run cache nonce (`agent.cache_nonce`): it leads `system` already
 
     @staticmethod
     def tokens(messages: Sequence[ChatMessage]) -> int:
@@ -223,7 +226,10 @@ class SessionContext:
 
     async def cm_generate(self, input: Sequence[ChatMessage], *, purpose: str, tools: Sequence[Tool | ToolDef] = (), config: GenerateConfig | None = None) -> ModelOutput:
         """A management call on the `cm` role: W-checked like an agent call (an input over W is an overflow),
-        recorded with kind `cm`, its purpose and its usage."""
+        recorded with kind `cm`, its purpose and its usage. With a cache nonce, an input that does not open with the
+        session's system message gets the nonce line as a system message of its own (`agent.cache_nonce`)."""
+        if self.nonce and not (input and input[0].role == "system" and starts_with_nonce(input[0].text, self.nonce)):
+            input = [ChatMessageSystem(content=nonce_line(self.nonce)), *input]
         tokens = view_tokens(input)
         if tokens > self.window:
             raise SessionOverflow(self.overflow_position())

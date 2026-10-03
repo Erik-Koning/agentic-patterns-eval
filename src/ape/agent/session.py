@@ -2,7 +2,8 @@
 
 The loop keeps the **full history** (logged as the sample's messages) and asks the arm's **context policy**
 (`ape.agent.context_policy`) for what the model sees at each call. Every arm shares one system prompt (base
-prompt, the whole corpus, shift rules; a policy may append a short fixed addendum), one tool set (a policy may add
+prompt, the whole corpus, shift rules; a policy may append a short fixed addendum; a study run's per-run cache nonce,
+`ape.agent.cache_nonce`, leads it, one per arm), one tool set (a policy may add
 its own tools), one turn cap per case and one nominal window W; only the view differs. Built so far:
 
 - **CM0**: the full, append-only history.
@@ -62,6 +63,8 @@ from ..config import ROOT
 from ..scorers.session import item_success, probe_score
 from ..worlds import gen_f8
 from ..worlds.env_f8 import CM_EVENTS, EVENTS, ITEMS, OVERFLOW, PROBES, REPORT, RESUME, USAGE, VIEWS, SessionRecorder, build_session_tools
+from .cache_nonce import of as nonce_of
+from .cache_nonce import with_nonce
 from .cm_arms import CM_ARMS
 from .context_policy import (
     ContextPolicy,
@@ -140,6 +143,7 @@ def f8_session_agent(
         cm_model = get_model(role=CM_ROLE, default=model)
         probe_model = get_model(role=PROBE_ROLE, default=model)
         knobs = resolve_knobs(cls)
+        nonce = nonce_of(state.metadata)  # a study run's per-run cache nonce (`agent.cache_nonce`), or None
 
         ckpt = None
         if (root := checkpoint_root()) is not None:
@@ -159,7 +163,8 @@ def f8_session_agent(
                     "checkpoints": list(checkpoints),
                     "world": {"id": world.id, "hash": world.content_hash()},
                     "code": code_version([cls.__module__, *cls.CODE_MODULES]),
-                },
+                }
+                | ({"cache_nonce": nonce} if nonce else {}),  # a session resumes only under the nonce its history carries
             )
         payload = ckpt.load() if ckpt else None
         restored: list[ChatMessage] | None = None
@@ -174,7 +179,7 @@ def f8_session_agent(
         if payload is None:
             done, segments, failures = 0, [], []
         ctx = SessionContext(world=world, window=window, threshold=t_abs, agent_model=model, cm_model=cm_model, records=records,
-                             session_tools=session_tools, max_turns_per_item=max_turns_per_item)
+                             session_tools=session_tools, max_turns_per_item=max_turns_per_item, nonce=nonce)
         policy = cls(ctx, **knobs)
         extra = list(policy.tools())
         policy_tools = [tool_name(t) for t in extra]
@@ -291,7 +296,7 @@ def f8_session_agent(
             try:
                 if payload is None:
                     addendum = policy.system_addendum()
-                    system = ChatMessageSystem(content=gen_f8.system_prompt(world) + (f"\n\n{addendum}" if addendum else ""))
+                    system = ChatMessageSystem(content=with_nonce(gen_f8.system_prompt(world) + (f"\n\n{addendum}" if addendum else ""), nonce))
                     # The full history lives in state.messages itself, so Inspect's message limit applies to its appends
                     # and a session cut short logs exactly what ran.
                     state.messages = [system, ChatMessageUser(content=gen_f8.start_message(world))]
