@@ -1,8 +1,9 @@
 """Scripted stand-in for the agent in F8 session dry runs (`mockllm` `custom_outputs`).
 
 Per case it makes the lookup, then the answer call; at the end it submits a report from the decisions it
-made; probes get a JSON answer built from the tool results it can see. Answers are deliberately naive: dry
-runs check plumbing, not accuracy.
+made; probes get a JSON answer built from the tool results it can see; a context policy's management call (no
+tools, no probe schema: a summary, a handoff note, an extraction) gets a short text naming the cases it can see
+answered. Answers are deliberately naive: dry runs check plumbing, not accuracy.
 """
 
 import json
@@ -37,6 +38,8 @@ def mock_session_agent(messages, tools, tool_choice, config) -> ModelOutput:
         queue, done = re.findall(r"C-\d{6}", start), _done(messages)
         answer = {"completed": done, "pending": [c for c in queue if c not in done], "memos_in_force": [], "open_followups": [], "escalated": []}
         return ModelOutput.from_content(MODEL, json.dumps(answer))
+    if not tools:  # a management call on the cm role (agent calls always carry the session's tools)
+        return ModelOutput.from_content(MODEL, "Shift notes: cases answered so far: " + (", ".join(_done(messages)) or "none") + ".")
     i, text = _current(messages)
     since = {m.function for m in messages[i + 1 :] if isinstance(m, ChatMessageTool)}
     if "End of shift" in text:

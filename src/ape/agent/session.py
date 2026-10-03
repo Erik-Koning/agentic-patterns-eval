@@ -1,47 +1,88 @@
-"""The F8 session loop for Study G (CONTEXT_MANAGEMENT_AUDIT §6.1), with the two arms built so far.
+"""The F8 session loop for Study G (CONTEXT_MANAGEMENT_AUDIT §6.1).
 
-The loop keeps the **full history** (logged as the sample's messages) and asks a view policy for what the model
-sees at each call. Both arms share one system prompt (base prompt, the whole corpus, shift rules), one tool
-set and one turn cap per case; only the view differs:
+The loop keeps the **full history** (logged as the sample's messages) and asks the arm's **context policy**
+(`ape.agent.context_policy`) for what the model sees at each call. Every arm shares one system prompt (base
+prompt, the whole corpus, shift rules; a policy may append a short fixed addendum), one tool set (a policy may add
+its own tools), one turn cap per case and one nominal window W; only the view differs. Built so far:
 
-- **CM0**: the full, append-only history. The harness enforces the nominal window W: a call whose view would
-  exceed W is an **overflow**, and that case and every later one fail (the report too).
-- **O-state**: system prompt + the generator's true state after the previous case (`render_oracle_state`) +
-  the current case's messages. The upper bound that defines Gap_T and R_x.
+- **CM0**: the full, append-only history.
+- **O-state**: system prompt + the generator's true state after the previous case (`render_oracle_state`) + the
+  current case's messages. The upper bound that defines Gap_T and R_x.
+
+B8 registers the managed arms (`context_policy.register_policy`).
+
+**Window and threshold.** The harness enforces W for every policy: an agent call whose view, or a management call
+whose input, would exceed W is an **overflow**, and that case and every later one fail (the report too). Before a
+call whose view exceeds T_abs (run_plan.yaml `study_g.threshold`, the same token meter), the policy's
+`on_threshold` hook may return a smaller view; each such reaction is logged as a management event.
 
 Each case arrives as a user message; the loop moves on once the case's answer call is made (submit_decision or
-finish with its case ID), after one nudge, or at `max_turns_per_item`. After the last case it asks for the
-end-of-shift report, with one nudge if the model answers that request in text. The history is built in
-`state.messages` itself and the store is written in a `finally`, so a session cut short by a sample limit keeps
-its records.
+finish with its case ID), after one nudge, or at `max_turns_per_item`. At each item boundary the policy's
+`after_item` hook runs, then the probe (at a checkpoint), then the mid-session checkpoint is saved. After the last
+case the loop asks for the end-of-shift report, with one nudge if the model answers that request in text. The
+history is built in `state.messages` itself and the store is written in a `finally`, so a session cut short by a
+sample limit keeps its records.
 
-**Forked state probes** (§5.3): after each checkpoint case k <= N, the probe question goes to the policy's
-current view (what the model would see next) in a side call with role `probe` and a strict JSON schema. The
-answer is never appended to the history. Without a `probe` role the agent's model answers, as the budget
-assumes ("at the agent's model and effort"); probe tokens are recorded separately so cost analysis can
-exclude them.
+**Forked state probes** (§5.3): after each checkpoint case k <= N, the probe question goes to the policy's probe
+view (what the model would see next) in a side call with role `probe` and a strict JSON schema. The answer is never
+appended to the history, and the probe view must leave the policy's state unchanged (checked). Without a `probe`
+role the agent's model answers, as the budget assumes ("at the agent's model and effort").
 
-Recorded in the store: per-case records (position, view tokens at the first call and at the decision call,
-generations, answered, success, dependency), every call's view tokens, the probes, the tool events, the report
-and the overflow position. Other arms (prune, trim, summary, native, notes, todo, reset) plug in as further
-view policies later.
+**Calls and cost.** Every call is recorded with its kind: `agent` (the arm's agent), `cm` (a policy's management
+call, on the `cm` role, the agent's model when the run defines none) and `probe`, with its view tokens, model and
+Inspect usage, so management and probe cost separate from agent cost. Per case the record adds the management
+calls and the usage by kind (management calls at a boundary count toward the case that just ended; probes too).
+
+Recorded in the store (keys in `ape.worlds.env_f8`): per-case records (position, view tokens at the first call and
+at the decision call, generations, answered, success, dependency, cm_calls, usage by kind), every agent and
+management call, the probes, the management events, the tool events (a policy's tools flagged `policy`), the
+report, the overflow position, the session's usage by kind and by model, its resumes (`f8_resume`), and the arm
+(policy, knobs, window, threshold, turn cap, probe checkpoints, policy tools and their schema tokens).
+
+**Mid-session checkpoints** (`ape.agent.session_checkpoint`): when APE_SESSION_CHECKPOINTS names a directory, the
+session is saved when it starts and after every completed item, keyed by its whole configuration. A retried sample
+(Inspect's `retry_on_error`, or a task retry) resumes after the last completed item instead of from item 1; a
+finished session deletes its checkpoint. That module's docstring gives the semantics of a resumed session.
 """
 
 import json
-from typing import Protocol
+import logging
+from functools import lru_cache
+from typing import Any
 
-from inspect_ai.model import ChatMessage, ChatMessageAssistant, ChatMessageSystem, ChatMessageUser, GenerateConfig, ResponseSchema, execute_tools, get_model
+import yaml
+from inspect_ai.model import ChatMessage, ChatMessageSystem, ChatMessageTool, ChatMessageUser, GenerateConfig, ResponseSchema, execute_tools, get_model
 from inspect_ai.solver import Generate, Solver, TaskState, solver
-from inspect_ai.util import JSONSchema, store
+from inspect_ai.util import JSONSchema, LimitExceededError, store
 
-from ..llm.tokens import count_tokens
+from ..config import ROOT
 from ..scorers.session import item_success, probe_score
 from ..worlds import gen_f8
-from ..worlds.env_f8 import EVENTS, ITEMS, OVERFLOW, PROBES, REPORT, VIEWS, SessionRecorder, build_session_tools
-from ..worlds.spec import World
+from ..worlds.env_f8 import CM_EVENTS, EVENTS, ITEMS, OVERFLOW, PROBES, REPORT, RESUME, USAGE, VIEWS, SessionRecorder, build_session_tools
+from .context_policy import (
+    ContextPolicy,
+    SessionContext,
+    SessionOverflow,
+    SessionRecords,
+    dump_messages,
+    knob_env,
+    load_messages,
+    message_tokens,  # noqa: F401  (re-exported: the session's token meter)
+    policy_class,
+    resolve_knobs,
+    tool_name,
+    tool_schema_tokens,
+    usage_by,
+    usage_record,
+    view_tokens,
+)
+from .session_checkpoint import SessionCheckpoints, checkpoint_root, code_version, model_identity, resume_summary, usage_summary
 
-SESSION_ARMS = ("CM0", "O-state")
+log = logging.getLogger(__name__)
+
+SESSION_ARMS = ("CM0", "O-state")  # the arms built here; `context_policy.POLICIES` holds every registered one
 PROBE_ROLE = "probe"
+CM_ROLE = "cm"
 PROBE_PROMPT = (
     "Pause the shift for a quick state check. Without using tools, list as JSON: the case IDs you have completed "
     "(completed), the case IDs still pending (pending), the memo IDs in force now (memos_in_force), the case IDs "
@@ -58,76 +99,28 @@ PROBE_SCHEMA = JSONSchema.model_validate(
 )
 
 
-def message_tokens(m: ChatMessage) -> int:
-    n = count_tokens(m.text or "")
-    if isinstance(m, ChatMessageAssistant) and m.tool_calls:
-        n += sum(count_tokens(json.dumps({"function": c.function, "arguments": c.arguments})) for c in m.tool_calls)
-    return n
+@lru_cache(maxsize=1)
+def plan_threshold() -> int:
+    """T_abs: config/run_plan.yaml `study_g.threshold` (absolute tokens, identical across tiers; D-021)."""
+    return int(yaml.safe_load((ROOT / "config" / "run_plan.yaml").read_text())["study_g"]["threshold"])
 
 
-def view_tokens(messages: list[ChatMessage]) -> int:
-    """Tokens of a view (o200k_base over message texts and tool calls; tool schemas excluded, they are constant)."""
-    return sum(message_tokens(m) for m in messages)
-
-
-class ViewPolicy(Protocol):
-    name: str
-
-    def view(self, history: list[ChatMessage], item_start: int, done: int) -> list[ChatMessage]:
-        """The model's input for the next call. `item_start` indexes the current case's (or the report request's)
-        user message in `history`; `done` cases are complete."""
-        ...
-
-    def probe_view(self, history: list[ChatMessage], done: int) -> list[ChatMessage]: ...
-
-
-class FullHistory:
-    """CM0: the append-only history is the view."""
-
-    name = "CM0"
-
-    def view(self, history, item_start, done):
-        return list(history)
-
-    def probe_view(self, history, done):
-        return list(history)
-
-
-class OracleState:
-    """O-state: system + true state after `done` cases + the current case's messages."""
-
-    name = "O-state"
-
-    def __init__(self, world: World, system: ChatMessageSystem):
-        self.world, self.system = world, system
-
-    def _state(self, done: int, then: str = "") -> ChatMessageUser:
-        text = gen_f8.render_oracle_state(self.world, done)
-        return ChatMessageUser(content=f"{text}\n\n{then}".strip())
-
-    def view(self, history, item_start, done):
-        return [self.system, self._state(done, history[item_start].text), *history[item_start + 1 :]]
-
-    def probe_view(self, history, done):
-        return [self.system, self._state(done)]
-
-
-def view_policy(arm: str, world: World, system: ChatMessageSystem) -> ViewPolicy:
-    if arm == "CM0":
-        return FullHistory()
-    if arm == "O-state":
-        return OracleState(world, system)
-    raise ValueError(f"session arm {arm!r} is not built yet ({SESSION_ARMS} are; the others need the ContextPolicy layer, CONTEXT_MANAGEMENT_AUDIT §6)")
-
-
-class _Overflow(Exception):
-    pass
+def _state_json(policy: ContextPolicy) -> str:
+    return json.dumps(policy.state_dict(), sort_keys=True, default=str)
 
 
 @solver
-def f8_session_agent(arm: str = "CM0", window: int = gen_f8.WINDOW, max_turns_per_item: int = 8, checkpoints: tuple[int, ...] = gen_f8.CHECKPOINTS) -> Solver:
-    if arm not in SESSION_ARMS:
-        raise ValueError(f"session arm {arm!r} is not built yet; built: {SESSION_ARMS}")
+def f8_session_agent(
+    arm: str = "CM0",
+    window: int = gen_f8.WINDOW,
+    max_turns_per_item: int = 8,
+    checkpoints: tuple[int, ...] = gen_f8.CHECKPOINTS,
+    threshold: int | None = None,
+) -> Solver:
+    """One F8 session per sample under the arm's context policy. `threshold` (T_abs) defaults to run_plan.yaml's;
+    the policy's knobs are read from APE_CM_* when the session starts (`context_policy.resolve_knobs`)."""
+    cls = policy_class(arm)  # an unbuilt arm fails when the task is created, not per sample
+    t_abs = plan_threshold() if threshold is None else int(threshold)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         from .arms import load_world
@@ -135,55 +128,184 @@ def f8_session_agent(arm: str = "CM0", window: int = gen_f8.WINDOW, max_turns_pe
         world = load_world(state.metadata["world_id"])
         n = len(world.tasks)
         rec = SessionRecorder(world)
-        tools = list(build_session_tools(world, rec).values())
-        system = ChatMessageSystem(content=gen_f8.system_prompt(world))
-        # The full history lives in state.messages itself, so Inspect's message limit applies to its appends and a
-        # session cut short logs exactly what ran.
-        state.messages = [system, ChatMessageUser(content=gen_f8.start_message(world))]
-        history: list[ChatMessage] = state.messages
-        policy = view_policy(arm, world, system)
+        base_tools = list(build_session_tools(world, rec).values())
         model = get_model()
+        cm_model = get_model(role=CM_ROLE, default=model)
         probe_model = get_model(role=PROBE_ROLE, default=model)
-        items, views, probes = [], [], []
-        overflow_at = None
+        knobs = resolve_knobs(cls)
 
-        async def call(item_start: int, done: int, position: int) -> tuple[int, bool]:
-            """One generation on the policy's view; returns (view tokens, made tool calls)."""
-            v = policy.view(history, item_start, done)
+        ckpt = None
+        if (root := checkpoint_root()) is not None:
+            ckpt = SessionCheckpoints(
+                root,
+                state.sample_id,
+                state.epoch,
+                {
+                    "arm": arm,
+                    "policy": f"{cls.__module__}.{cls.__qualname__}",
+                    "knobs": knobs,
+                    "knob_env": knob_env(),
+                    "models": {"agent": model_identity(model), "cm": model_identity(cm_model), "probe": model_identity(probe_model)},
+                    "window": window,
+                    "threshold": t_abs,
+                    "max_turns_per_item": max_turns_per_item,
+                    "checkpoints": list(checkpoints),
+                    "world": {"id": world.id, "hash": world.content_hash()},
+                    "code": code_version([cls.__module__]),
+                },
+            )
+        payload = ckpt.load() if ckpt else None
+        restored: list[ChatMessage] | None = None
+        records = SessionRecords()
+        if payload is not None:
+            try:
+                restored, records = load_messages(payload["history"]), SessionRecords.from_state(payload["records"])
+                done, segments, failures = int(payload["done"]), list(payload["segments"]), list(payload["failures"])
+            except (KeyError, TypeError, ValueError) as e:  # a damaged file under a valid key: start afresh, never loop on it
+                log.warning("session checkpoint %s does not restore (%s: %s); starting the session afresh", ckpt.path, type(e).__name__, e)
+                payload, restored, records, ckpt.last = None, None, SessionRecords(), None
+        if payload is None:
+            done, segments, failures = 0, [], []
+        ctx = SessionContext(world=world, window=window, threshold=t_abs, agent_model=model, cm_model=cm_model, records=records)
+        policy = cls(ctx, **knobs)
+        extra = list(policy.tools())
+        policy_tools = [tool_name(t) for t in extra]
+        if clash := sorted(set(policy_tools) & {tool_name(t) for t in base_tools}):
+            raise ValueError(f"{cls.__name__} tools {clash} clash with the session's own tools")
+        tools = [*base_tools, *extra]
+        ctx.tools = tools
+        arm_record = {
+            "name": arm,
+            "window": window,
+            "max_turns_per_item": max_turns_per_item,
+            "checkpoints": list(checkpoints),
+            "threshold": t_abs,
+            "policy": cls.__name__,
+            "knobs": knobs,
+            "policy_tools": policy_tools,
+            "policy_tool_tokens": tool_schema_tokens(extra),
+        }
+        saved = [len(records.views), len(records.probes)]  # records already in the last checkpoint
+        segments.append({"attempt": len(segments) + 1, "sample_uuid": state.uuid, "after_item": done, "views_from": len(records.views), "probes_from": len(records.probes)})
+        overflow_at = None
+        finished = False
+        history: list[ChatMessage] = []
+
+        def save(done_now: int) -> None:
+            if ckpt is None:
+                return
+            ckpt.save({
+                "sample_id": state.sample_id,
+                "epoch": state.epoch,
+                "done": done_now,
+                "history": dump_messages(history),
+                "policy": policy.state_dict(),
+                "recorder": rec.state_dict(),
+                "records": records.state_dict(),
+                "segments": segments,
+                "failures": failures,
+            })
+            saved[:] = [len(records.views), len(records.probes)]
+
+        def fail(error: BaseException) -> None:
+            """An error ends this attempt: keep the last checkpoint for the retry, adding the failure (its error and the
+            usage of the calls made since the save, which the retry makes again), this attempt's segment and the
+            resumes so far."""
+            if ckpt is None or ckpt.last is None:
+                return
+            lost = records.views[saved[0] :] + records.probes[saved[1] :]
+            failures.append({"attempt": segments[-1]["attempt"], "sample_uuid": state.uuid, "after_item": ckpt.last["done"], "error": f"{type(error).__name__}: {error}"[:300], "usage": usage_summary(lost)})
+            last = ckpt.last
+            keep = ("sample_id", "epoch", "done", "history", "policy", "recorder")
+            ckpt.save({**{k: last[k] for k in keep}, "records": {**last["records"], "resumes": records.resumes}, "segments": segments, "failures": failures})
+
+        async def call(item_start: int, done_now: int, position: int) -> tuple[int, bool]:
+            """One agent generation on the policy's view; returns (view tokens, made tool calls)."""
+            v = await policy.view(history, item_start, done_now)
             vt = view_tokens(v)
+            if vt > t_abs and (smaller := await policy.on_threshold(history, v, vt)) is not None:
+                after = view_tokens(smaller)
+                ctx.log("threshold", view_tokens=vt, view_tokens_after=after)
+                v, vt = smaller, after
             if vt > window:
-                raise _Overflow(position)
+                raise SessionOverflow(position)
             output = await model.generate(v, tools=tools)
             history.append(output.message)
-            views.append({"item": position, "view_tokens": vt})
-            if output.message.tool_calls:
+            ctx.record_call("agent", model, vt, output)
+            appended: list[ChatMessage] = [output.message]
+            acted = bool(output.message.tool_calls)
+            if acted:
                 result = await execute_tools(history, tools)
                 history.extend(result.messages)
-                return vt, True
-            return vt, False
+                appended += result.messages
+                if policy_tools:
+                    results = {m.tool_call_id: m for m in result.messages if isinstance(m, ChatMessageTool)}
+                    for c in output.message.tool_calls:
+                        if c.function in policy_tools:
+                            r = results.get(c.id)
+                            rec.record(c.function, c.arguments, policy=True, **({"error": r.error.message} if r is not None and r.error else {}))
+            await policy.after_generate(history, v, output, appended)
+            return vt, acted
+
+        def tally(item: dict) -> None:
+            """The item's management calls and its usage by kind (agent, cm, probe)."""
+            mine = [c for c in records.calls() if c["item"] == item["position"]]
+            item["cm_calls"] = sum(c["kind"] == "cm" for c in mine)
+            item["usage"] = usage_by(mine, "kind")
 
         async def probe(k: int) -> None:
-            msgs = [*policy.probe_view(history, k), ChatMessageUser(content=PROBE_PROMPT)]
+            before = _state_json(policy)
+            view = await policy.probe_view(history, k)
+            if _state_json(policy) != before:
+                raise RuntimeError(f"{cls.__name__}.probe_view changed the policy's state: probes must not affect the session")
+            msgs = [*view, ChatMessageUser(content=PROBE_PROMPT)]
             out = await probe_model.generate(msgs, config=GenerateConfig(response_schema=ResponseSchema(name="state_probe", json_schema=PROBE_SCHEMA, strict=True)))
             try:
                 answer, error = json.loads(out.completion), None
             except (json.JSONDecodeError, TypeError) as e:
                 answer, error = None, f"{type(e).__name__}: {e}"
-            usage = out.usage
-            probes.append({
+            records.probes.append({
                 "k": k,
                 "answer": answer,
                 "error": error,
                 "view_tokens": view_tokens(msgs),
                 "scores": probe_score(answer if isinstance(answer, dict) else None, gen_f8.state_at(world, k)),
-                "usage": {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens} if usage else None,
+                "usage": usage_record(out.usage),
+                "item": k,
+                "kind": "probe",
+                "model": str(probe_model),
             })
 
         try:
             try:
-                for task in world.tasks:
+                if payload is None:
+                    addendum = policy.system_addendum()
+                    system = ChatMessageSystem(content=gen_f8.system_prompt(world) + (f"\n\n{addendum}" if addendum else ""))
+                    # The full history lives in state.messages itself, so Inspect's message limit applies to its appends
+                    # and a session cut short logs exactly what ran.
+                    state.messages = [system, ChatMessageUser(content=gen_f8.start_message(world))]
+                    history = state.messages
+                    ctx.system = system
+                    await policy.start(history)
+                    save(0)
+                else:
+                    state.messages = restored  # a restored history counts toward the message limit, as it did
+                    history = state.messages
+                    ctx.system = history[0]
+                    rec.load_state(payload["recorder"])
+                    policy.load_state(payload["policy"], history)
+                    records.resumes.append({
+                        "resume": len(records.resumes) + 1,
+                        "after_item": done,
+                        "sample_uuid": state.uuid,
+                        "checkpoint": ckpt.path.name,
+                        "saved_at": payload["saved_at"],
+                        "restored": usage_summary(records.calls()),
+                    })
+                for task in world.tasks[done:]:
                     pos, cid = task.tags["position"], task.tags["case_id"]
-                    rec.item = pos
+                    rec.item = ctx.position = pos
+                    ctx.stage = "item"
                     start = len(history)
                     history.append(ChatMessageUser(content=task.prompt))
                     first = decision = None
@@ -201,7 +323,7 @@ def f8_session_agent(arm: str = "CM0", window: int = gen_f8.WINDOW, max_turns_pe
                             tool = "finish" if task.tags["kind"] == "ticket" else "submit_decision"
                             history.append(ChatMessageUser(content=f"Complete case {cid} with the tools, then call {tool} with case_id {cid}."))
                             nudged = True
-                    items.append({
+                    item: dict[str, Any] = {
                         "position": pos,
                         "case_id": cid,
                         "kind": task.tags["kind"],
@@ -212,10 +334,17 @@ def f8_session_agent(arm: str = "CM0", window: int = gen_f8.WINDOW, max_turns_pe
                         "view_tokens_decision": decision,
                         "answered": decision is not None,
                         "success": item_success(world, task, rec.events),
-                    })
+                    }
+                    records.items.append(item)
+                    tally(item)
+                    ctx.stage = "boundary"
+                    await policy.after_item(history, pos)
                     if pos in checkpoints:
                         await probe(pos)
-                rec.item = n + 1
+                    tally(item)  # with the boundary's management calls and the probe
+                    save(pos)
+                rec.item = ctx.position = n + 1
+                ctx.stage = "report"
                 start = len(history)
                 history.append(ChatMessageUser(content=gen_f8.REPORT_REQUEST))
                 nudged = False
@@ -229,17 +358,30 @@ def f8_session_agent(arm: str = "CM0", window: int = gen_f8.WINDOW, max_turns_pe
                             break
                         history.append(ChatMessageUser(content=REPORT_NUDGE))
                         nudged = True
-            except _Overflow as e:
-                overflow_at = e.args[0]
+            except SessionOverflow as e:
+                overflow_at = e.position
+            finished = True
+        except LimitExceededError:
+            finished = True  # a sample limit ends the session for good: Inspect scores what ran
+            raise
+        except Exception as e:
+            fail(e)
+            raise
         finally:
             # Written even when a sample limit cuts the session short, so its items and events are scored.
-            store().set(ITEMS, items)
-            store().set(VIEWS, views)
-            store().set(PROBES, probes)
+            calls = records.calls()
+            store().set(ITEMS, records.items)
+            store().set(VIEWS, records.views)
+            store().set(PROBES, records.probes)
             store().set(EVENTS, rec.events)
             store().set(REPORT, rec.report)
             store().set(OVERFLOW, overflow_at)
-            store().set("arm", {"name": arm, "window": window, "max_turns_per_item": max_turns_per_item, "checkpoints": list(checkpoints)})
+            store().set(CM_EVENTS, records.cm_events)
+            store().set(USAGE, {"by_kind": usage_by(calls, "kind"), "by_model": usage_by(calls, "model")})
+            store().set(RESUME, resume_summary(records.views, records.probes, records.resumes, segments, failures))
+            store().set("arm", arm_record)
+            if finished and ckpt is not None:
+                ckpt.complete()
         return state
 
     return solve

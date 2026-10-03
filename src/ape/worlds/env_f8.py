@@ -2,7 +2,12 @@
 
 Every call is recorded as an event `{item, tool, args}`, where `item` is the queue position being worked on
 when the call was made (0 before the first case, N + 1 during the report). Scoring reads only these events, so
-it never depends on how a context-management arm shaped the view.
+it never depends on how a context-management arm shaped the view. Calls of a context policy's own tools (e.g.
+`todo_write`) are recorded by the session loop with `policy: True` (and `error` when the tool failed); scoring
+looks only at the tools below, so they never change an item's outcome.
+
+The recorder's state (`state_dict` / `load_state`) is part of a mid-session checkpoint. The tools have no side
+effects outside it, which is what makes re-running an interrupted item on resume valid.
 
 Real-model robustness:
 - Case IDs are normalized (case and surrounding space) before they are recorded; an ID that is not in the
@@ -25,6 +30,9 @@ from .spec import TaskItem, World
 
 # Sample store keys the session runner writes and the scorer reads.
 ITEMS, VIEWS, PROBES, EVENTS, REPORT, OVERFLOW = "f8_items", "f8_views", "f8_probes", "f8_events", "f8_report", "f8_overflow_at"
+# Management events (policy logs, threshold reactions), usage totals by kind and model, and resumes
+# (`ape.agent.session_checkpoint.resume_summary`; None for a session that ran in one attempt).
+CM_EVENTS, USAGE, RESUME = "f8_cm_events", "f8_usage", "f8_resume"
 
 
 class SessionRecorder:
@@ -37,8 +45,14 @@ class SessionRecorder:
         self.report: dict | None = None
         self.report_error: str | None = None
 
-    def record(self, tool: str, args: dict, rejected: bool = False) -> None:
-        self.events.append({"item": self.item, "tool": tool, "args": dict(args), **({"rejected": True} if rejected else {})})
+    def record(self, tool: str, args: dict, rejected: bool = False, **extra: Any) -> None:
+        self.events.append({"item": self.item, "tool": tool, "args": dict(args), **({"rejected": True} if rejected else {}), **extra})
+
+    def state_dict(self) -> dict:
+        return {"item": self.item, "events": self.events, "report": self.report, "report_error": self.report_error}
+
+    def load_state(self, state: dict) -> None:
+        self.item, self.events, self.report, self.report_error = state["item"], list(state["events"]), state["report"], state["report_error"]
 
     def answered(self, task: TaskItem) -> bool:
         """Whether the current case got its answer call in its own window."""

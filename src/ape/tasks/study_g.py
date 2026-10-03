@@ -3,9 +3,14 @@
     inspect eval src/ape/tasks/study_g.py@f8_session -T level=40 -T split=dev -T arm=CM0 \
         --model openai/gpt-6-luna --reasoning-effort high
 
-Worlds must already be built (`python -m ape.build --family F8 --levels 40 --worlds 10 --split dev`).
-Arms built so far: CM0 and O-state (`ape.agent.session`). Probes use the `probe` role when the run defines
-one, else the agent's model.
+Worlds must already be built (`python -m ape.build --family F8 --levels 40 --worlds 10 --split dev`). Arms are the
+registered context policies (`ape.agent.context_policy`; CM0 and O-state so far). Probes use the `probe` role and
+management calls the `cm` role when the run defines them, else the agent's model.
+
+`threshold` (T_abs) is a task arg only when passed, and reaches the solver only then (run_plan.yaml's
+`study_g.threshold` applies otherwise), so other callers' task identities are unchanged. The task metadata records
+the resolved threshold and every APE_CM_* variable (policy knobs: they are not task args, so a run that varies them
+needs its own log directory, as with the gate's APE_* knobs).
 """
 
 from pathlib import Path
@@ -13,7 +18,8 @@ from pathlib import Path
 from inspect_ai import Task, task
 from inspect_ai.dataset import MemoryDataset, Sample
 
-from ape.agent.session import f8_session_agent
+from ape.agent.context_policy import knob_env
+from ape.agent.session import f8_session_agent, plan_threshold
 from ape.config import Config
 from ape.scorers.session import f8_session_score
 from ape.worlds import gen_f8
@@ -52,11 +58,21 @@ def f8_session(
     max_turns_per_item: int = 8,
     checkpoints: str = ",".join(map(str, gen_f8.CHECKPOINTS)),
     variant: str = "",
+    threshold: int | None = None,
 ) -> Task:
     points = tuple(int(x) for x in str(checkpoints).split(",") if str(x).strip())
     return Task(
         dataset=MemoryDataset(session_samples(level, split, limit_worlds, variant), name=f"F8-{level}-{split}"),
-        solver=f8_session_agent(arm=arm, window=window, max_turns_per_item=max_turns_per_item, checkpoints=points),
+        solver=f8_session_agent(arm=arm, window=window, max_turns_per_item=max_turns_per_item, checkpoints=points, **({"threshold": threshold} if threshold is not None else {})),
         scorer=f8_session_score(),
-        metadata={"arm": arm, "family": "F8", "level": level, "split": split, "window": window, "checkpoints": list(points)},
+        metadata={
+            "arm": arm,
+            "family": "F8",
+            "level": level,
+            "split": split,
+            "window": window,
+            "checkpoints": list(points),
+            "threshold": plan_threshold() if threshold is None else int(threshold),
+            "policy_env": knob_env(),
+        },
     )
