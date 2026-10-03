@@ -548,7 +548,8 @@ def test_a_live_tune_refuses_a_placeholder_or_unsigned_grid(clean_env):
     signed = grid | {"owners": dict.fromkeys(grid["owners"], "Ada"), "signed_off": dict.fromkeys(grid["signed_off"], True)}
     assert run_study.tuning_signoff_problems(signed) == []
     assert run_study.tuning_signoff_problems(signed | {"owners": signed["owners"] | {"M1": "TODO"}}) == ["owners.M1 is not set"]
-    assert yaml.safe_load((ROOT / "config" / "tuning_grid_study_g.yaml").read_text())["placeholder"] is True
+    g_grid = yaml.safe_load((ROOT / "config" / "tuning_grid_study_g.yaml").read_text())
+    assert "placeholder" not in g_grid and "owners.S-CM* is not set" in run_study.tuning_signoff_problems(g_grid), "B11's grid, not signed off yet"
     run = StudyRun("study_g", "tune", runs_root=clean_env / "runs")
     assert "is not signed off for a live tune" in run_study._refuse_tune(run)
     assert run_study._refuse_tune(StudyRun("study_g", "tune", offline=True, runs_root=clean_env / "runs")) is None

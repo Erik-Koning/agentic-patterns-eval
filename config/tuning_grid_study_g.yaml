@@ -1,19 +1,108 @@
-# PLACEHOLDER (BUILD_PLAN B1). This is NOT Study G's tuning grid. Package B11 declares the real one: equal dev budgets
-# for CM-prune, CM-sum, CM-todo, CM-reset and S-CM* (CONTEXT_MANAGEMENT_AUDIT §6.3), with the owners' sign-off. Until
-# then this grid tunes only a session arm that exists today (CM0, one candidate at its defaults, on g.tune.luna's F8-40
-# dev sessions), so an offline `python -m ape.run_study all --study study_g --offline` runs end to end. A live tune
-# refuses it (`placeholder: true`, and no owner has signed off).
+# Study G's dev tuning grid (BUILD_PLAN B11; CONTEXT_MANAGEMENT_AUDIT §6.3: an equal, logged dev budget per strategy).
+# Declared BEFORE any dev run; `python -m ape.run_study tune --study study_g` runs it (`ape.tuning`) on run_plan.yaml's
+# g.tune.luna cell: Luna high, F8-40 dev sessions (3 sessions, 1 epoch), scored by mean item success
+# (f8_session_score). Selection, as the gate's: max mean dev success; candidates within tie_pp of the best go to the
+# lower cost.
 #
-# Format: as config/tuning_grid_main.yaml. A dev cell `F8-<N>` (or `F8-<N>-<knob tag>`, gen_f8.variant_tag) tunes on
-# that session variant's dev sessions; candidates are scored by mean item success (f8_session_score).
-placeholder: true
-owners: {CM0: TODO}
-signed_off: {CM0: false}
+# Format (ape.tuning, as config/tuning_grid_main.yaml): a system is named for the plan arm it tunes and its candidates
+# run as that arm; after the tune the arm runs everywhere as its selection (ape.run_study `run_groups`). A candidate is
+# an env set of the arm's own APE_CM_* knobs (ape.agent.cm_arms, D-037), parsed and validated by the arm when the task
+# is created (`context_policy.resolve_knobs`, `validate`); tests/test_tuning_grid_study_g.py validates each one.
+#
+# Each candidate is the arm's whole configuration. The arms share one knob namespace (D-037: APE_CM_PRUNE_KEEP is read
+# by CM-prune and by S-CM*'s prune component; APE_CM_TODO_EXTRACT by CM-todo, CM-reset and S-CM*), so every candidate
+# writes out every knob its arm's components read, defaults included, and nothing else. An arm then runs in the test
+# exactly as it ran on dev whichever candidates win: selections that agree on a shared knob share one environment, and
+# selections that disagree run apart, each tuned arm under its own selection (ape.run_study `env_group`, BUILD_PLAN
+# B1). This relies on that rule: a runner that applies every selection's knobs together (and refuses any shared
+# variable, as `tuning.study_grid_problems` does for the main study's per-arm APE_MAS_* knobs) would either refuse
+# these selections or run a composite arm (CM-reset, S-CM*) under another system's selection.
+#
+# T_abs is not tuned. The threshold is a task argument (D-030), but the runner passes the plan's T_abs to every
+# session task, in the tune and in the test, and a selection carries only `arm` and `env`; so T_abs stays at
+# run_plan.yaml `study_g.threshold` (20K) for every arm and candidate, which also keeps every arm on one trigger
+# point. W stays at 32K.
+#
+# Budgets. budget_per_system is 3, the count run_plan.yaml prices for every tuned system. Each system's candidates
+# span its real design choice at fixed T_abs. CM-sum and CM-todo each have one binary knob (summary prompt; todo
+# extraction), so their whole design space is 2 configurations and both are declared: no third distinct
+# configuration exists (`equal_budgets` is off for that reason; run_plan.yaml still prices a third, about $1.70
+# conservative each). The default configuration (D-037) comes first in every system, so the offline rehearsal's first
+# two candidates include it. Dev noise: 3 sessions x 40 items give a candidate's mean a standard error of at least
+# 4 pp (more with the sessions as clusters), so the tune catches broken or clearly worse configurations, not small
+# gains (as in the main study, D-041).
+#
+# Sign-off (as config/tuning_grid.yaml). Each system's owner reviews its candidates, names themselves in `owners` and
+# sets `signed_off` to true; a live tune refuses until every system has both. Proposed roles: the CM arms' owner (who
+# wrote the arms, B8) for CM-prune, CM-sum, CM-todo and CM-reset; the skeptic for S-CM*, the single-agent contender of
+# G-H3 (audit §6.2: "chosen on dev by the skeptic"). PC6-style completeness counts every configuration ever tried for
+# a system (archived tuning logs included) against budget_per_system. These keys are not candidates; the freeze
+# hashes this whole file.
+owners: {CM-prune: TODO, CM-sum: TODO, CM-todo: TODO, CM-reset: TODO, S-CM*: TODO}
+signed_off: {CM-prune: false, CM-sum: false, CM-todo: false, CM-reset: false, S-CM*: false}
 budget_per_system: 3
+equal_budgets: false
 tie_pp: 1.0
-dev_cells: [F8-40]
+dev_cells: [F8-40]   # g.tune.luna: N 40, default F8 knobs
+
+# Session arms of the plan that are not tuned, and why (source: fixed = they run at their defaults everywhere).
+inherited:
+  CM0: {source: fixed, why: "reference: the full history, no mechanism and no knobs"}
+  O-state: {source: fixed, why: "oracle reference that defines Gap_T and R_x; tuning it would move the yardstick"}
+  CM-trim: {source: fixed, why: "the naive control (audit §6.2); in no plan cell and in no S-CM* candidate; trim_preserve stays at Inspect's 0.8"}
+  CM-native: {source: fixed, why: "provider compaction has no knob we set (T_abs is fixed for all arms); native_max_failures is a failure guard, not a design choice; it runs only where the probe's support record confirms the model"}
+  S1: {source: fixed, why: "topology block: S1 = CM0 (D-040)"}
+  M1: {source: fixed, why: "topology block: orchestrator and workers under the CM0 rule, B9's session prompts (D-040)"}
+  M2: {source: fixed, why: "topology block: M1 with specialists (D-040)"}
 
 systems:
-  CM0:
+  # Pruning keeps the results of the last k tool uses among completed cases. An F8 case makes about 2.25 tool calls
+  # (one ~1K-token customer or order file plus short results; gen_f8 reference), so k = 3, 6 and 12 keep the raw
+  # results of roughly the last 1, 2-3 and 5 cases: the trade-off between recent detail and a view that stays far
+  # enough below T_abs not to re-prune at every call. 3 is Inspect's default.
+  CM-prune:
     candidates:
-      - {id: cm0-default, arm: CM0, env: {}}
+      - {id: prune-k3, arm: CM-prune, env: {APE_CM_PRUNE_KEEP: "3"}}
+      - {id: prune-k6, arm: CM-prune, env: {APE_CM_PRUNE_KEEP: "6"}}
+      - {id: prune-k12, arm: CM-prune, env: {APE_CM_PRUNE_KEEP: "12"}}
+
+  # The summary's instructions: `structured` lists what the shift rules make later cases depend on (memos, quotas,
+  # follow-ups; the same content the handoff and the todo extraction ask for), `plain` is a generic summary request.
+  # With T_abs fixed this is CM-sum's whole design space.
+  CM-sum:
+    candidates:
+      - {id: sum-structured, arm: CM-sum, env: {APE_CM_SUM_PROMPT: structured}}
+      - {id: sum-plain, arm: CM-sum, env: {APE_CM_SUM_PROMPT: plain}}
+
+  # External task state with or without the extraction calls (at shift start and on every case that announces or
+  # withdraws a memo: about 8 calls in a 40-case session). Off, the list is only what the agent writes with
+  # todo_write. With T_abs fixed this is CM-todo's whole design space.
+  CM-todo:
+    candidates:
+      - {id: todo-extract, arm: CM-todo, env: {APE_CM_TODO_EXTRACT: "true"}}
+      - {id: todo-noextract, arm: CM-todo, env: {APE_CM_TODO_EXTRACT: "false"}}
+
+  # Reset with rehydration: when (a proactive reset every 5 cases, or only at T_abs) and how (a handoff note plus the
+  # todo list, or the todo list alone), one factor at a time around the default. Every 10 cases was not taken: a
+  # reset view (system and start ~2.4K, notes and list ~2-3K, ~1.1-1.5K per case) reaches T_abs after about 10-14
+  # cases, so a 10-case schedule would mostly coincide with the threshold-only design and duplicate it. Extraction
+  # stays on (CM-todo's default; CM-todo tunes it).
+  CM-reset:
+    candidates:
+      - {id: reset-e5-handoff, arm: CM-reset, env: {APE_CM_TODO_EXTRACT: "true", APE_CM_RESET_EVERY: "5", APE_CM_RESET_SUMMARY: "true"}}
+      - {id: reset-tabs-handoff, arm: CM-reset, env: {APE_CM_TODO_EXTRACT: "true", APE_CM_RESET_EVERY: "0", APE_CM_RESET_SUMMARY: "true"}}
+      - {id: reset-e5-todo-only, arm: CM-reset, env: {APE_CM_TODO_EXTRACT: "true", APE_CM_RESET_EVERY: "5", APE_CM_RESET_SUMMARY: "false"}}
+
+  # The best single-agent stack (G-H3's contender, also run in the topology cells at N 20). All three keep prune (no
+  # model call; it keeps the case messages and the agent's own calls, which carry the cross-case state, and delays
+  # the mover) and vary what replaces dropped cases: the default prune+todo+reset (audit §6.2's example); the rolling
+  # summary instead of resets and handoffs (prune+todo+sum); and that summary without external task state, the most
+  # expensive component (prune+sum: 0.08 management calls per agent call against 0.25 with todo, D-035), which the
+  # cost tie-break and G-H3b's cost condition care about. Trim stacks are left out (the naive control); stacks
+  # without a compactor are what CM-sum, CM-todo and CM-reset already measure. Component knobs are at their D-037
+  # defaults, written out (see the header).
+  S-CM*:
+    candidates:
+      - {id: scm-prune-todo-reset, arm: S-CM*, env: {APE_CM_STACK: prune+todo+reset, APE_CM_PRUNE_KEEP: "3", APE_CM_TODO_EXTRACT: "true", APE_CM_RESET_EVERY: "5", APE_CM_RESET_SUMMARY: "true"}}
+      - {id: scm-prune-todo-sum, arm: S-CM*, env: {APE_CM_STACK: prune+todo+sum, APE_CM_PRUNE_KEEP: "3", APE_CM_TODO_EXTRACT: "true", APE_CM_SUM_PROMPT: structured}}
+      - {id: scm-prune-sum, arm: S-CM*, env: {APE_CM_STACK: prune+sum, APE_CM_PRUNE_KEEP: "3", APE_CM_SUM_PROMPT: structured}}

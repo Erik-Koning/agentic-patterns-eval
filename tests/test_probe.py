@@ -31,19 +31,41 @@ EFFORT_TOKENS = {"high": 900, "medium": 400, "low": 120, "minimal": 10, "none": 
 
 
 class FakeOpenAI:
-    """Per-endpoint fake: /v1/models, /v1/responses, /v1/chat/completions, /v1/embeddings."""
+    """Per-endpoint fake: /v1/models, /v1/responses, /v1/responses/compact, /v1/chat/completions, /v1/embeddings."""
 
     def __init__(self) -> None:
-        self.snapshots = {"gpt-6-luna": "gpt-6-luna-2026-08-14", "gpt-6-sol": "gpt-6-sol-2026-07-30", "gpt-4o-mini": "gpt-4o-mini-2024-07-18", "text-embedding-3-small": "text-embedding-3-small"}
+        self.snapshots = {
+            "gpt-6-luna": "gpt-6-luna-2026-08-14", "gpt-6-sol": "gpt-6-sol-2026-07-30", "gpt-6-astra": "gpt-6-astra-2026-09-10",
+            "gpt-4o-mini": "gpt-4o-mini-2024-07-18", "text-embedding-3-small": "text-embedding-3-small",
+        }  # fmt: skip
         self.effort_tokens = dict(EFFORT_TOKENS)  # tests flatten this to make effort "ignored"
         self.reject_effort: set[str] = set()  # aliases that 400 on any reasoning effort
         self.no_reasoning_field = False
+        self.compact_models = {"gpt-6-luna", "gpt-6-sol", "gpt-6-astra"}  # aliases with a /responses/compact route (else 404)
+        self.compact_error: dict[str, tuple[int, dict]] = {}  # alias -> the compaction call's error reply
+        self.reject_compaction_input: set[str] = set()  # aliases whose next call refuses a compaction item (400)
         self.requests: list[tuple[str, dict]] = []
+
+    def compact(self, model: str, body: dict) -> tuple[int, dict]:
+        if model in self.compact_error:
+            return self.compact_error[model]
+        if model not in self.compact_models:
+            return 404, {"error": {"message": "Not found", "type": "invalid_request_error"}}
+        return 200, {
+            "id": "cmp_1", "object": "response.compaction", "created_at": 1_790_000_000,
+            "output": [{"type": "compaction", "id": "cmpi_1", "encrypted_content": f"gAAAA-encrypted-{model}"}],
+            "usage": {"input_tokens": 90, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 40, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 130},
+        }  # fmt: skip
 
     def respond(self, path: str, body: dict) -> tuple[int, dict]:
         self.requests.append((path, body))
         model = body.get("model", "")
         served = self.snapshots.get(model, model)
+        if path.endswith("/responses/compact"):
+            return self.compact(model, body)
+        compaction = any(isinstance(i, dict) and i.get("type") == "compaction" for i in (body.get("input") if isinstance(body.get("input"), list) else []))
+        if compaction and model in self.reject_compaction_input:
+            return 400, {"error": {"message": "Invalid input: items of type 'compaction' are not supported.", "type": "invalid_request_error", "param": "input", "code": None}}
         if path.endswith("/responses"):
             effort = (body.get("reasoning") or {}).get("effort")
             schema = ((body.get("text") or {}).get("format") or {}).get("type") == "json_schema"
@@ -57,7 +79,7 @@ class FakeOpenAI:
         if effort and model in self.reject_effort:
             return 400, {"error": {"message": "Unsupported parameter: 'reasoning_effort' is not supported with this model.", "type": "invalid_request_error", "param": "reasoning_effort", "code": "unsupported_parameter"}}
         rt = self.effort_tokens.get(effort or "medium", 50)
-        text = '{"ok": true}' if schema else "466"
+        text = '{"ok": true}' if schema else probe_mod.NATIVE_CODE_WORD if compaction else "466"  # the block "remembers"
         if path.endswith("/responses"):
             details = {} if self.no_reasoning_field else {"reasoning_tokens": rt}
             return 200, {
@@ -115,6 +137,13 @@ def _probe(profile, tmp_path: Path, **kwargs) -> dict:
     return asyncio.run(probe_mod.run_probe(profile, client=OpenAI(), build_client=AsyncOpenAI(), ledger=Ledger(tmp_path / "ledger.jsonl"), **kwargs))
 
 
+def _no_dotenv(monkeypatch) -> None:
+    """The CLI loads the repository's .env; tests never read it (its keys would also leak into later tests)."""
+    import dotenv
+
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
+
+
 # ---------- the probe on the real paths ----------
 
 
@@ -147,12 +176,17 @@ def test_gate_profile_is_probed_on_the_responses_api_and_the_build_client(fake_o
     entries = Ledger(tmp_path / "ledger.jsonl").read()
     assert entries and all(e.context["source"] == "probe" for e in entries)
     assert sc.effort_from_probe(report)["status"] == sc.PASS
+    # Every Inspect model's API mode is recorded; without --study nothing else is added and no compaction is called.
+    assert report["api_modes"] == {"openai/gpt-6-luna": {"api": "responses", "roles": ["agent", "kg", "judge"]}}
+    assert not {"study", "native_compaction", "api_mode_problems"} & set(report)
+    assert not any(p.endswith("/compact") for p, _ in fake_openai.requests)
 
 
 def test_the_anchor_profile_uses_chat_completions_and_skips_effort_for_gpt_4o_mini(fake_openai, tmp_path):
     report = _probe(load_profile("anchor"), tmp_path)
     agent = report["roles"]["agent"]["paths"]["inspect"]
     assert agent["api"] == "chat.completions" and agent["effort"]["verdict"]["status"] == sc.SKIP
+    assert report["api_modes"]["openai/gpt-4o-mini"]["api"] == "chat.completions" and report["api_modes"]["openai/gpt-6-luna"]["api"] == "responses"
     assert report["roles"]["build"]["paths"]["build"]["effort"]["verdict"]["status"] == sc.SKIP
     # The judge's sampling settings reached the server as configured (temperature 0, seed 42).
     judge_calls = [b for p, b in fake_openai.requests if p.endswith("/chat/completions") and b.get("seed") == 42]
@@ -191,6 +225,7 @@ def test_cli_overrides_swap_a_roles_model_and_keep_its_effort():
 
 def test_cli_probe_writes_the_report_and_never_prints_the_key(fake_openai, tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("APE_CACHE", str(tmp_path / "cache"))  # the build ledger (Config().ledger_path) goes here
+    _no_dotenv(monkeypatch)
     out = tmp_path / "probe.json"
     probe_mod.main(["--profile", "gate", "--out", str(out)])
     report = json.loads(out.read_text())
@@ -198,6 +233,153 @@ def test_cli_probe_writes_the_report_and_never_prints_the_key(fake_openai, tmp_p
     assert report["version"] == sc.PROBE_VERSION and report["roles"]["agent"]["paths"]["inspect"]["api"] == "responses"
     printed = capsys.readouterr()
     assert "sk-fake-for-tests" not in printed.out + printed.err and '"check": "pass"' in printed.out
+
+
+# ---------- Study G (BUILD_PLAN B11): every model of the study, API modes, native compaction ----------
+
+G_MODELS = ("openai/gpt-6-luna", "openai/gpt-6-sol", "openai/gpt-6-astra")
+
+
+def _study_g(fake, tmp_path: Path, record: Path | None) -> dict:
+    base, *extra = [load_profile(n) for n in probe_mod.study_profiles("study_g")]
+    return _probe(base, tmp_path, extra_profiles=extra, study="study_g", native_compaction=True, native_record=record)
+
+
+def _compaction_followups(fake) -> list[str]:
+    """The models of the calls that sent a compaction block back (the call after each compaction)."""
+    return sorted(b["model"] for p, b in fake.requests if p.endswith("/responses") and isinstance(b.get("input"), list) and any(isinstance(i, dict) and i.get("type") == "compaction" for i in b["input"]))
+
+
+def test_study_profiles_are_the_ones_the_study_cells_use():
+    assert probe_mod.study_profiles("study_g") == ["study_g_luna", "study_g_sol", "study_g_astra"]
+    assert probe_mod.study_profiles("main") == ["main_luna", "main_sol"]
+    with pytest.raises(ValueError, match="unknown study 'nope'"):
+        probe_mod.study_profiles("nope")
+
+
+def test_the_study_g_probe_covers_every_model_records_api_modes_and_native_support(fake_openai, tmp_path, monkeypatch):
+    from inspect_ai.model import GenerateConfig
+
+    from ape.agent.cm_arms import NATIVE_RECORD_ENV, native_route
+
+    record = tmp_path / "native_compaction.json"
+    report = _study_g(fake_openai, tmp_path, record)
+    roles = report["roles"]
+    # Sol's and Astra's agents are probed like base roles; Luna's roles (the gate's settings) once.
+    assert set(roles) == {"agent", "kg", "judge", "build", "agent@study_g_sol", "agent@study_g_astra"}
+    shared = {"kg": "kg", "judge": "judge", "build": "build"}
+    assert report["study"] == {
+        "name": "study_g",
+        "profiles": {"study_g_luna": {"agent": "agent"} | shared, "study_g_sol": {"agent": "agent@study_g_sol"} | shared, "study_g_astra": {"agent": "agent@study_g_astra"} | shared},
+    }
+    for name, snap in (("agent@study_g_sol", "gpt-6-sol-2026-07-30"), ("agent@study_g_astra", "gpt-6-astra-2026-09-10")):
+        path = roles[name]["paths"]["inspect"]  # the honoured parameters: as configured, strict JSON, effort high > low
+        assert roles[name]["profile"] == name.split("@")[1] and roles[name]["configured_effort"] == "high"
+        assert path["api"] == "responses" and path["as_configured"]["accepted"] and path["structured_output"]["accepted"] and path["snapshot"] == snap
+        assert path["effort"]["verdict"]["status"] == sc.PASS
+    assert sc.effort_from_probe(report)["status"] == sc.PASS, "smoke's effort check covers the study's models"
+    # One API mode per model, so per tier (every arm at a tier runs on the tier's agent model).
+    assert {m: v["api"] for m, v in report["api_modes"].items()} == dict.fromkeys(G_MODELS, "responses") and "api_mode_problems" not in report
+    assert report["api_modes"]["openai/gpt-6-astra"]["roles"] == ["agent@study_g_astra"]
+    # Snapshots (for --pin and the live preflight) and rate limits for every alias.
+    assert {a: report["snapshots"][a]["snapshot"] for a in ("gpt-6-sol", "gpt-6-astra")} == {"gpt-6-sol": "gpt-6-sol-2026-07-30", "gpt-6-astra": "gpt-6-astra-2026-09-10"}
+    assert report["snapshots"]["gpt-6-astra"]["roles"] == ["agent@study_g_astra (inspect)"]
+    assert {"gpt-6-luna", "gpt-6-sol", "gpt-6-astra"} <= set(report["ratelimits"])
+    # Native compaction: one compaction and one call on its result per agent model, each confirmed.
+    nc = report["native_compaction"]
+    assert set(nc) == set(G_MODELS) and all(v["supported"] and v["outcome"] == "supported" and v["recalled"] and v["opaque_blocks"] == 1 for v in nc.values())
+    assert nc["openai/gpt-6-sol"]["profile"] == "study_g_sol" and nc["openai/gpt-6-sol"]["compaction_usage"]["input_tokens"] == 90
+    assert sorted(b["model"] for p, b in fake_openai.requests if p.endswith("/responses/compact")) == ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]
+    assert _compaction_followups(fake_openai) == ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]
+    # The support record, in cm_arms' format, read by CM-native's own gate under the names the runner and a session use.
+    data = json.loads(record.read_text())
+    assert data["format"] == 1 and set(data["models"]) == set(G_MODELS) and report["native_compaction_record"] == str(record)
+    sol = data["models"]["openai/gpt-6-sol"]
+    assert sol["supported"] is True and sol["outcome"] == "supported" and sol["api"] == "responses" and sol["snapshot"] == "gpt-6-sol-2026-07-30"
+    assert sol["profile"] == "study_g_sol" and sol["source"] == "readiness/probe_openai.py" and "opaque compaction block" in sol["evidence"] and sol["recorded_at"]
+    monkeypatch.setenv(NATIVE_RECORD_ENV, str(record))
+    assert [native_route(m) for m in G_MODELS] == ["provider"] * 3, "run_study's preflight passes the profile's model name"
+    assert native_route(probe_mod.inspect_factory("openai/gpt-6-astra", GenerateConfig())) == "provider", "a session passes its Model"
+
+
+def test_native_compaction_is_unsupported_without_the_endpoint_or_the_responses_api_and_when_its_block_is_refused(fake_openai, tmp_path, monkeypatch):
+    from inspect_ai.model import GenerateConfig
+
+    from ape.agent.cm_arms import NATIVE_RECORD_ENV, NativeCompactionUnsupported, native_route
+
+    record = tmp_path / "native_compaction.json"
+    fake_openai.compact_models = {"gpt-6-luna", "gpt-6-sol"}  # Astra: no compaction route
+    fake_openai.reject_compaction_input = {"gpt-6-sol"}  # Sol compacts, but its next call refuses the block
+    nc = _study_g(fake_openai, tmp_path, record)["native_compaction"]
+    assert nc["openai/gpt-6-luna"]["outcome"] == "supported"
+    assert nc["openai/gpt-6-sol"]["outcome"] == "rejected" and nc["openai/gpt-6-sol"]["supported"] is False and "rejected" in nc["openai/gpt-6-sol"]["evidence"]
+    assert nc["openai/gpt-6-astra"]["outcome"] == "unsupported" and "not available" in nc["openai/gpt-6-astra"]["evidence"]
+    assert _compaction_followups(fake_openai) == ["gpt-6-luna", "gpt-6-sol"], "no call after a compaction that failed"
+    monkeypatch.setenv(NATIVE_RECORD_ENV, str(record))
+    assert native_route("openai/gpt-6-luna") == "provider"
+    for m in ("openai/gpt-6-sol", "openai/gpt-6-astra"):
+        assert json.loads(record.read_text())["models"][m]["supported"] is False
+        with pytest.raises(NativeCompactionUnsupported, match=m):
+            native_route(m)
+    # A model Inspect runs on chat completions (the anchor's gpt-4o-mini) has none, and no request is made for it.
+    before = len(fake_openai.requests)
+    res = asyncio.run(probe_mod.probe_native_compaction(probe_mod.inspect_factory("openai/gpt-4o-mini", GenerateConfig())))
+    assert res["supported"] is False and res["outcome"] == "unsupported" and res["api"] == "chat.completions" and "Responses API" in res["evidence"]
+    assert len(fake_openai.requests) == before
+
+
+def test_errors_recorded_from_the_api_never_hold_the_key(fake_openai, tmp_path):
+    key = "sk-fake-for-tests"  # the fixture's key, as the client sends it
+    fake_openai.compact_error = {"gpt-6-luna": (401, {"error": {"message": f"Incorrect API key provided: {key}.", "type": "invalid_request_error", "code": "invalid_api_key"}})}
+    record = tmp_path / "native_compaction.json"
+    report = _study_g(fake_openai, tmp_path, record)
+    luna = report["native_compaction"]["openai/gpt-6-luna"]
+    assert luna["outcome"] == "error" and "Incorrect API key provided: sk-[redacted]" in luna["evidence"]
+    assert key not in json.dumps(report) and key not in record.read_text()
+    masked = probe_mod._error(RuntimeError("Incorrect API key provided: sk-proj-****abcd; also sk-live-123456789"))
+    assert "abcd" not in masked and "123456789" not in masked and masked.startswith("RuntimeError: Incorrect API key provided: sk-[redacted]")
+
+
+def test_the_dry_study_probe_runs_offline_and_writes_no_record(tmp_path, monkeypatch):
+    """smoke.py --dry's path: mock models, no network. A mock has no native compaction; with no record path nothing is
+    written, so a dry run can never confirm (or deny) a real model."""
+    from types import SimpleNamespace
+
+    from ape.agent.cm_arms import NATIVE_RECORD_ENV
+
+    monkeypatch.setenv(NATIVE_RECORD_ENV, str(tmp_path / "native.json"))
+    base, *extra = [load_profile(n) for n in probe_mod.study_profiles("study_g")]
+    report = asyncio.run(probe_mod.run_probe(base, factory=probe_mod.offline_factory, build_client=probe_mod.OfflineBuildClient(), ledger=SimpleNamespace(append=lambda entry: None), extra_profiles=extra, study="study_g", native_compaction=True))
+    assert set(report["roles"]) == {"agent", "kg", "judge", "build", "agent@study_g_sol", "agent@study_g_astra"} and sc.effort_from_probe(report)["status"] == sc.PASS
+    assert {v["outcome"] for v in report["native_compaction"].values()} == {"unsupported"} and set(report["native_compaction"]) == set(G_MODELS)
+    assert "native_compaction_record" not in report and not (tmp_path / "native.json").exists()
+
+
+def test_cli_study_g_probe_writes_the_probe_and_the_support_record_and_never_prints_the_key(fake_openai, tmp_path, capsys, monkeypatch):
+    from ape.agent.cm_arms import NATIVE_RECORD_ENV
+
+    monkeypatch.setenv("APE_CACHE", str(tmp_path / "cache"))  # the build ledger and the default support record go here
+    monkeypatch.delenv(NATIVE_RECORD_ENV, raising=False)
+    _no_dotenv(monkeypatch)
+    out = tmp_path / "probe.json"
+    probe_mod.main(["--study", "study_g", "--out", str(out)])
+    report = json.loads(out.read_text())
+    assert report["profile"] == "study_g_luna" and report["study"]["name"] == "study_g", "the study's own profile is the base"
+    record = tmp_path / "cache" / "native_compaction.json"
+    assert report["native_compaction_record"] == str(record) and set(json.loads(record.read_text())["models"]) == set(G_MODELS)
+    printed = capsys.readouterr()
+    assert "sk-fake-for-tests" not in printed.out + printed.err
+    shown = json.loads(printed.out)
+    assert shown["check"] == "pass" and shown["native_compaction"] == dict.fromkeys(G_MODELS, "supported") and shown["api_modes"] == dict.fromkeys(G_MODELS, "responses")
+    # --native-record puts it elsewhere; an unknown study stops before any call.
+    other = tmp_path / "elsewhere.json"
+    probe_mod.main(["--study", "study_g", "--out", str(out), "--native-record", str(other)])
+    assert set(json.loads(other.read_text())["models"]) == set(G_MODELS)
+    capsys.readouterr()
+    calls = len(fake_openai.requests)
+    with pytest.raises(SystemExit):
+        probe_mod.main(["--study", "nope", "--out", str(out)])
+    assert len(fake_openai.requests) == calls and "unknown study 'nope'" in capsys.readouterr().err
 
 
 # ---------- pins ----------

@@ -1,6 +1,7 @@
 """Readiness E2-E4: verify the OpenAI key, list models, and probe each role's model on the call path the run uses.
 
     uv run python readiness/probe_openai.py --list --profile gate   # probe; writes cache/openai_probe.json
+    uv run python readiness/probe_openai.py --list --study study_g  # + every model of the study's profiles, API modes, native compaction
     uv run python readiness/probe_openai.py --pin                   # after review: pin the snapshots in PROVENANCE.md
     uv run python readiness/probe_openai.py --profile gate --agent gpt-6-sol    # a flag swaps a role's model, keeps its effort
 
@@ -26,12 +27,33 @@ calls go:
   (E2), the embedding model's dimension, and the price table's checked date.
 - Build-path calls are metered in the build ledger (context `source: probe`).
 
-**Cost:** about 8,700 output tokens per model per path. That is ≈ $0.01 for the gate profile (Luna only),
-≈ $0.09 per Sol path and ≈ $0.45 per Astra path. It needs approval (checkpoint 3).
+**A study's models (`--study`, BUILD_PLAN B11).** With `--study study_g` the probe also covers every profile the
+study's enabled cells use (config/run_plan.yaml: study_g_luna, study_g_sol, study_g_astra), the base profile being the
+study's own unless `--profile` names another:
+- **Every model on its path.** Each (profile, role) whose model and settings no earlier role had is probed like a
+  base role, under `roles` as `<role>@<profile>` (e.g. `agent@study_g_sol`), so smoke's effort check, the snapshot
+  summary, `--pin` and the rate limits cover Sol and Astra too. `study.profiles` maps every (profile, role) to the
+  `roles` entry that covers it (Luna's roles are the gate's: probed once).
+- **API mode per model** (`api_modes`; CONTEXT_MANAGEMENT_AUDIT §9.2): whether Inspect sends the model's calls through
+  the Responses API or chat completions. Every arm at a tier runs on that tier's agent model, so one mode per model
+  is one mode per tier; a model seen on two modes is listed in `api_mode_problems`.
+- **Native compaction per agent model** (`native_compaction`): `Model.compact()` (OpenAI's `responses/compact`, as
+  CM-native calls it) on a tiny four-message conversation, then one generate on the compacted context.
+  Supported only when the compaction returned the provider's opaque block and the next call accepted it (the
+  outcome is `supported`, `unsupported` (no native compaction: chat completions, or no endpoint), `rejected` (the
+  next call refused the block) or `error`). Each verdict is written with `ape.agent.cm_arms.record_native_support`
+  to the support record CM-native and the study's preflight read (`--native-record`; default
+  $APE_NATIVE_COMPACTION_RECORD, else <APE_CACHE>/native_compaction.json), keyed by the profile's Inspect model name
+  (`openai/gpt-6-luna`, which is also `str(Model)` in a session).
 
-The key is read from the environment or `.env`; it is never printed. The probe writes `cache/openai_probe.json`
-(format version 2: `roles -> paths`), which `readiness/smoke.py` reads (`effort` and `burst`) and
-`ape.run_gate`'s preflight reads (`models_available`).
+**Cost:** about 8,700 output tokens per model per path. That is ≈ $0.01 for the gate profile (Luna only),
+≈ $0.09 per Sol path and ≈ $0.45 per Astra path. `--study study_g` adds Sol's and Astra's agent paths and three
+native-compaction pairs (a compaction of ~100 tokens and one short reply each): ≈ $0.6 in all. It needs approval
+(checkpoint 3).
+
+The key is read from the environment or `.env`; it is never printed, and error texts recorded from the API are
+redacted (`redact`). The probe writes `cache/openai_probe.json` (format version 2: `roles -> paths`), which
+`readiness/smoke.py` reads (`effort` and `burst`) and `ape.run_gate`'s preflight reads (`models_available`).
 
 **Pinning.** `--pin` makes no API calls. It writes the probe's snapshots into PROVENANCE.md (`ape.snapshots`).
 It refuses an alias with no served snapshot, or one served by several snapshots in the same probe. Run it only
@@ -45,12 +67,13 @@ import json
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from inspect_ai.model import GenerateConfig, Model, ResponseSchema, get_model
+import yaml
+from inspect_ai.model import ChatMessage, ChatMessageAssistant, ChatMessageSystem, ChatMessageUser, ContentData, GenerateConfig, Model, ResponseSchema, get_model
 from inspect_ai.util import JSONSchema
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +88,17 @@ STRICT_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["
 # A rejected parameter is a 400, which Inspect never retries; keep transient retries and hangs short.
 PROBE_CONFIG = GenerateConfig(max_retries=2, timeout=180)
 RATELIMIT_MAX_TOKENS = 16  # the Responses API's minimum max_output_tokens
+PLAN = ROOT / "config" / "run_plan.yaml"
+# Native compaction probe (--study): a tiny conversation to compact, then a question only its content answers.
+NATIVE_CODE_WORD = "HERON-42"
+NATIVE_CONVERSATION = (
+    ("user", f"Remember this code word for later: {NATIVE_CODE_WORD}. Reply with: noted"),
+    ("assistant", "noted"),
+    ("user", "Also remember that the shift ends at 17:00. Reply with: noted"),
+    ("assistant", "noted"),
+)
+NATIVE_RECALL_PROMPT = "What was the code word? Reply with the code word only."
+_SECRET = re.compile(r"\bsk-[A-Za-z0-9_\-*]{4,}")
 
 ModelFactory = Callable[[str, GenerateConfig], Model]
 
@@ -83,8 +117,16 @@ def _alias(model: str) -> str:
     return model.split("/", 1)[-1]
 
 
+def redact(text: str) -> str:
+    """`text` without the API key (as set in the environment) or anything shaped like an OpenAI key."""
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if key:
+        text = text.replace(key, "sk-[redacted]")
+    return _SECRET.sub("sk-[redacted]", text)
+
+
 def _error(e: BaseException) -> str:
-    return f"{type(e).__name__}: {str(e)[:300]}"
+    return f"{type(e).__name__}: {redact(str(e))[:300]}"
 
 
 def inspect_api(model: Model) -> str:
@@ -93,7 +135,7 @@ def inspect_api(model: Model) -> str:
     return "responses" if flag is True else "chat.completions" if flag is False else type(model.api).__name__
 
 
-async def _inspect_call(model: Model, prompt: str, config: GenerateConfig) -> dict:
+async def _inspect_call(model: Model, prompt: str | list[ChatMessage], config: GenerateConfig) -> dict:
     try:
         out = await model.generate(prompt, config=PROBE_CONFIG.merge(config))
     except Exception as e:  # the point is to record what the API rejects
@@ -106,7 +148,7 @@ async def _inspect_call(model: Model, prompt: str, config: GenerateConfig) -> di
         "text": out.completion[:200],
     }
     if out.error:
-        rec["error"] = str(out.error)[:300]
+        rec["error"] = redact(str(out.error))[:300]
     return rec
 
 
@@ -199,6 +241,70 @@ def ratelimit(client: Any, model: str, api: str) -> dict:
         return {"api": api, "error": _error(e)}
 
 
+def _opaque(m: ChatMessage) -> bool:
+    """A message carrying a provider's opaque content (a native compaction block is ContentData)."""
+    return isinstance(m.content, list) and any(isinstance(c, ContentData) for c in m.content)
+
+
+async def probe_native_compaction(model: Model) -> dict:
+    """Native compaction on `model` as CM-native calls it (`Model.compact(input, tools)`; system message first), on a
+    tiny conversation, then one generate on the compacted context. `supported` only when the compaction returned an
+    opaque block and that next call accepted it; `outcome` and `evidence` say what happened (module docstring)."""
+    rec: dict = {"inspect_model": str(model), "api": inspect_api(model)}
+    system = ChatMessageSystem(content="You are a readiness probe.")
+    conversation = [ChatMessageUser(content=t) if r == "user" else ChatMessageAssistant(content=t) for r, t in NATIVE_CONVERSATION]
+    try:
+        compacted, usage = await model.compact([system, *conversation], [])
+    except NotImplementedError as e:
+        return rec | {"supported": False, "outcome": "unsupported", "evidence": f"no native compaction for this model on Inspect's {rec['api']} path: {_error(e)}"}
+    except Exception as e:  # the point is to record what the provider does
+        return rec | {"supported": False, "outcome": "error", "evidence": f"the compaction call failed: {_error(e)}"}
+    kept = [m for m in compacted if m.role != "system"]  # as CM-native keeps them
+    rec |= {"compaction_usage": usage.model_dump(exclude_none=True) if usage else {}, "compacted_messages": len(kept), "opaque_blocks": sum(map(_opaque, kept))}
+    if not rec["opaque_blocks"]:
+        return rec | {"supported": False, "outcome": "error", "evidence": f"the compaction returned {len(kept)} message(s) and no opaque compaction block"}
+    follow = await _inspect_call(model, [system, *kept, ChatMessageUser(content=NATIVE_RECALL_PROMPT)], GenerateConfig())
+    rec["follow_up"] = follow
+    if not follow["accepted"]:
+        return rec | {"supported": False, "outcome": "rejected", "evidence": f"the call after the compaction was rejected: {follow.get('error')}"}
+    rec["snapshot"] = follow.get("served_model")
+    rec["recalled"] = NATIVE_CODE_WORD.lower() in (follow.get("text") or "").lower()
+    did = "recalled" if rec["recalled"] else "did not recall"
+    evidence = f"Model.compact returned {len(kept)} message(s) with {rec['opaque_blocks']} opaque compaction block(s); the next call accepted them (served by {rec['snapshot']}) and {did} the code word"
+    return rec | {"supported": True, "outcome": "supported", "evidence": evidence}
+
+
+def study_profiles(study: str, plan_path: Path = PLAN) -> list[str]:
+    """The model profiles a study's enabled run_plan.yaml cells use, the study's own first (as `ape.run_study`'s
+    `profiles_used`, which its live preflight checks)."""
+    studies = (yaml.safe_load(plan_path.read_text()) or {}).get("studies") or {}
+    if study not in studies:
+        raise ValueError(f"unknown study {study!r} in {plan_path}; known: {sorted(studies)}")
+    sdef = studies[study]
+    own = str(sdef.get("profile") or "gate")
+    names = [own] + [str(c.get("profile") or own) for cells in (sdef.get("phases") or {}).values() for c in cells or [] if c.get("enabled", True)]
+    return list(dict.fromkeys(names))
+
+
+def api_modes(roles: Mapping[str, dict]) -> tuple[dict, list[str]]:
+    """Per Inspect model: the API Inspect sends its calls through and the probed roles that use it; and a problem for
+    a model seen on more than one (every arm at a tier must use one API mode, CONTEXT_MANAGEMENT_AUDIT §9.2)."""
+    seen: dict[str, dict] = {}
+    for name, entry in roles.items():
+        if (path := entry["paths"].get("inspect")) is not None:
+            m = seen.setdefault(entry["model"], {"apis": set(), "roles": []})
+            m["apis"].add(path["api"])
+            m["roles"].append(name)
+    out, problems = {}, []
+    for model, m in seen.items():
+        apis = sorted(m["apis"])
+        out[model] = {"api": apis[0] if len(apis) == 1 else None, "roles": m["roles"]}
+        if len(apis) > 1:
+            out[model]["apis_seen"] = apis
+            problems.append(f"{model}: Inspect sends its calls through {apis}; every arm at a tier must use one API mode")
+    return out, problems
+
+
 def snapshot_summary(roles: Mapping[str, dict]) -> dict:
     """Per alias: the snapshots that served it across every role and path, and which roles use it."""
     out: dict[str, dict] = {}
@@ -224,12 +330,20 @@ async def run_probe(
     with_fallback: bool = False,
     costs_path: Path = ROOT / "config" / "model_costs.yaml",
     embed: bool = True,
+    extra_profiles: Sequence[Any] = (),
+    study: str | None = None,
+    native_compaction: bool = False,
+    native_record: Path | None = None,
 ) -> dict:
     """Probe every role of `profile` (an `ape.models.Profile`) on its call path; returns the report (version 2).
 
     `client` is a sync OpenAI client for models.list, rate-limit headers and embeddings (None skips those);
     `build_client` an AsyncOpenAI-compatible client for `BuildLlm` (None: BuildLlm's own); `ledger` meters the
-    build-path calls (None: the build ledger, `Config().ledger_path`)."""
+    build-path calls (None: the build ledger, `Config().ledger_path`).
+
+    `extra_profiles` (a study's other profiles, `study` naming it): each role whose model and settings no earlier role
+    had is probed too, as `<role>@<profile>`. `native_compaction`: the native compaction probe on every distinct agent
+    model of `profile` and `extra_profiles`, each verdict written to `native_record` (None: not written)."""
     from ape.config import Config
     from ape.llm.ledger import Ledger
 
@@ -248,17 +362,49 @@ async def run_probe(
             report["models_available"] = []
     roles: dict[str, dict] = {}
     cache: dict = {}
-    for role in INSPECT_PATH_ROLES:
-        if role in profile.roles:
-            spec = profile.roles[role]
-            roles[role] = {"model": spec.model, "configured_effort": spec.reasoning_effort, "paths": {"inspect": await probe_inspect_role(spec, factory, cache)}}
-    for role in ("build", "build_fallback") if with_fallback else ("build",):
-        if role in profile.roles:
-            spec = profile.roles[role]
-            path = await probe_build_role(spec.model, spec.reasoning_effort, ledger, build_client, cache, role)
-            roles[role] = {"model": spec.model, "configured_effort": spec.reasoning_effort, "paths": {"build": path}}
+    probed: dict[tuple[str, str], list[str]] = {}  # (path, a role's full settings) -> the roles entries that probed them
+    coverage: dict[str, dict[str, str]] = {}  # profile -> role -> the roles entry that covers it
+    for p in (profile, *extra_profiles):
+        extra = p is not profile
+        for role in (*INSPECT_PATH_ROLES, *(("build", "build_fallback") if with_fallback else ("build",))):
+            if role not in p.roles:
+                continue
+            spec = p.roles[role]
+            path_name = "inspect" if role in INSPECT_PATH_ROLES else "build"
+            key = (path_name, json.dumps(asdict(spec), sort_keys=True))
+            if extra and key in probed:  # the same model and settings: already probed (the base roles always are)
+                coverage.setdefault(p.name, {})[role] = role if role in probed[key] else probed[key][0]
+                continue
+            name = f"{role}@{p.name}" if extra else role
+            if path_name == "inspect":
+                path = await probe_inspect_role(spec, factory, cache)
+            else:
+                path = await probe_build_role(spec.model, spec.reasoning_effort, ledger, build_client, cache, role)
+            roles[name] = {"model": spec.model, "configured_effort": spec.reasoning_effort, "paths": {path_name: path}} | ({"profile": p.name} if extra else {})
+            probed.setdefault(key, []).append(name)
+            coverage.setdefault(p.name, {})[role] = name
     report["roles"] = roles
     report["snapshots"] = snapshot_summary(roles)
+    report["api_modes"], problems = api_modes(roles)
+    if problems:
+        report["api_mode_problems"] = problems
+    if extra_profiles or study:
+        report["study"] = {"name": study, "profiles": coverage}
+    if native_compaction:
+        from ape.agent.cm_arms import record_native_support
+
+        report["native_compaction"] = {}
+        for p in (profile, *extra_profiles):
+            spec = p.roles.get("agent")
+            if spec is None or spec.model in report["native_compaction"]:
+                continue
+            res = await probe_native_compaction(factory(spec.model, spec.generate_config().merge(PROBE_CONFIG)))
+            report["native_compaction"][spec.model] = res | {"profile": p.name}
+            if native_record is not None:
+                details = {k: res[k] for k in ("outcome", "api", "inspect_model", "snapshot", "recalled") if k in res}
+                record_native_support(spec.model, res["supported"], evidence=res["evidence"], path=native_record, **details, profile=p.name, source="readiness/probe_openai.py")
+        if native_record is not None:
+            report["native_compaction_record"] = str(native_record)
     if client is not None:
         apis: dict[str, str] = {}
         for entry in roles.values():
@@ -331,13 +477,20 @@ def summary(report: Mapping) -> dict:
     from smoke_checks import effort_from_probe
 
     check = effort_from_probe(report)
-    return {
+    out = {
         "check": check["status"],
         "reason": check.get("reason"),
         "paths": {k: {"api": v["api"], "effort": v["status"], "snapshot": v["snapshot"]} for k, v in check["measured"].get("paths", {}).items()},
         "snapshots": {a: v.get("snapshot") for a, v in (report.get("snapshots") or {}).items()},
         "embeddings": report.get("embeddings"),
+        "api_modes": {m: v["api"] for m, v in (report.get("api_modes") or {}).items()},
     }
+    if report.get("api_mode_problems"):
+        out["api_mode_problems"] = report["api_mode_problems"]
+    if "native_compaction" in report:
+        out["native_compaction"] = {m: v["outcome"] for m, v in report["native_compaction"].items()}
+        out["native_compaction_record"] = report.get("native_compaction_record")
+    return out
 
 
 def pin(probe_path: Path, provenance_path: Path) -> dict:
@@ -356,11 +509,13 @@ def pin(probe_path: Path, provenance_path: Path) -> dict:
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--list", action="store_true", help="print models.list()")
-    ap.add_argument("--profile", help="config/models.yaml profile (default: $APE_MODEL_PROFILE or gate)")
+    ap.add_argument("--profile", help="config/models.yaml profile (default: the --study's own, else $APE_MODEL_PROFILE or gate)")
     for role in ("agent", "kg", "judge", "build"):
         ap.add_argument(f"--{role}", help=f"override the profile's {role} model (keeps its effort)")
     ap.add_argument("--embed", help="override the embedding model")
     ap.add_argument("--with-fallback", action="store_true", help="also probe the D-017 fallback builder (build path)")
+    ap.add_argument("--study", help="also probe every profile this run_plan.yaml study uses, each model's API mode, and native compaction per agent model")
+    ap.add_argument("--native-record", type=Path, help="with --study: the native compaction support record to write (default: $APE_NATIVE_COMPACTION_RECORD, else <APE_CACHE>/native_compaction.json)")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--pin", action="store_true", help="pin the probe's snapshots in PROVENANCE.md (no API calls)")
     ap.add_argument("--provenance", type=Path, default=ROOT / "PROVENANCE.md")
@@ -370,6 +525,10 @@ def main(argv: list[str] | None = None) -> None:
         res = pin(args.out, args.provenance)
         print(json.dumps({"provenance": str(args.provenance)} | res, indent=1))
         return
+    try:
+        names = study_profiles(args.study) if args.study else []
+    except ValueError as e:
+        ap.error(str(e))
 
     from dotenv import load_dotenv
 
@@ -380,12 +539,18 @@ def main(argv: list[str] | None = None) -> None:
 
     from ape.models import load_profile
 
-    profile = load_profile(args.profile)
+    profile = load_profile(args.profile or (names[0] if names else None))
     overrides = {r: (f"openai/{getattr(args, r)}" if getattr(args, r) and r != "build" and "/" not in getattr(args, r) else getattr(args, r)) for r in ("agent", "kg", "judge", "build")}
     overrides["embeddings"] = args.embed
     profile = apply_overrides(profile, overrides)
+    study: dict[str, Any] = {}
+    if args.study:
+        from ape.agent.cm_arms import native_record_path
+
+        extra = [load_profile(n) for n in names if n != profile.name]
+        study = {"extra_profiles": extra, "study": args.study, "native_compaction": True, "native_record": args.native_record or native_record_path()}
     client = OpenAI()
-    report = asyncio.run(run_probe(profile, client=client, with_fallback=args.with_fallback))
+    report = asyncio.run(run_probe(profile, client=client, with_fallback=args.with_fallback, **study))
     if args.list:
         print("\n".join(report.get("models_available") or []))
     args.out.parent.mkdir(parents=True, exist_ok=True)
