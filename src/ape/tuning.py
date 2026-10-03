@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,81 @@ def candidates(grid: dict, system: str) -> list[dict]:
     if len(cands) > grid["budget_per_system"]:
         raise ValueError(f"{system}: {len(cands)} candidates exceed the equal budget of {grid['budget_per_system']}")
     return cands
+
+
+def planned_tuning(cells: Iterable[tuple[str, dict]]) -> dict[str, dict]:
+    """What a study's run_plan.yaml tuning cells price, per arm: {arm: {"candidates": {cell id: count}, "cells": [its
+    task cells, in plan order]}}. `cells` are (cell id, spec) pairs; a spec's `arms` is {arm: candidates} or a list."""
+    out: dict[str, dict] = {}
+    for cell_id, spec in cells:
+        arms = spec["arms"] if isinstance(spec["arms"], dict) else dict.fromkeys(spec["arms"], 1)
+        for arm, n in arms.items():
+            p = out.setdefault(arm, {"candidates": {}, "cells": []})
+            p["candidates"][cell_id] = int(n)
+            p["cells"] += [c for c in spec["cells"] if c not in p["cells"]]
+    return out
+
+
+def study_grid_problems(grid: dict, planned: dict[str, dict] | None = None, env_problems: Callable[[str, dict[str, str]], list[str]] | None = None) -> list[str]:
+    """What a study grid (`config/tuning_grid_<study>.yaml`) breaks of the tuning rules, found before any dev run: the
+    PC6 rules that can be checked up front, so a broken candidate is found before it is paid for. A study system is
+    keyed by the plan arm it tunes (`run_study`: that arm runs as its selection, under every selection's knobs at once):
+    - every system declares 1 to `budget_per_system` candidates with distinct ids, and exactly that many when the grid
+      sets `equal_budgets`;
+    - every candidate runs as the system's own arm;
+    - no two systems' candidates set the same variable (`run_study.selection_env` would refuse the selections at the
+      pilot, after the tune is paid for);
+    - each candidate's env passes `env_problems(system, env)`, the arm's own check (`agent.multi.knobs.candidate_problems`:
+      a multi-agent arm's candidates set only its own knobs, with values they take);
+    - an arm the grid lists under `inherited` (configured elsewhere, e.g. by the gate) is not also a system;
+    - with `planned` (`planned_tuning` over the study's run_plan tuning cells): each system is priced there, with its
+      candidate count in every cell that names it and its dev cells exactly those cells', and every arm the plan prices
+      is a system; an inherited arm the plan still prices is a redundant spend."""
+    problems: list[str] = []
+    budget = int(grid.get("budget_per_system") or 0)
+    systems, inherited = grid.get("systems") or {}, grid.get("inherited") or {}
+    setters: dict[str, set[str]] = {}
+    for name, sdef in systems.items():
+        cands = sdef.get("candidates") or []
+        ids = [c.get("id") for c in cands]
+        if not 1 <= len(cands) <= budget:
+            problems.append(f"{name}: {len(cands)} candidates; a system declares 1 to budget_per_system ({budget})")
+        elif grid.get("equal_budgets") and len(cands) != budget:
+            problems.append(f"{name}: {len(cands)} candidates; equal budgets give every system budget_per_system ({budget})")
+        if dup := sorted({str(i) for i in ids if ids.count(i) > 1}):
+            problems.append(f"{name}: candidate ids {dup} are declared more than once")
+        for c in cands:
+            if c.get("arm") != name:
+                problems.append(f"{name}: candidate {c.get('id')} runs {c.get('arm')}, not {name} (a system's candidates run as the plan arm it is named for)")
+            env = {str(k): str(v) for k, v in (c.get("env") or {}).items()}
+            for k in env:
+                setters.setdefault(k, set()).add(name)
+            if env_problems is not None:
+                problems += [f"{name}: candidate {c.get('id')}: {p}" for p in env_problems(name, env)]
+        if name in inherited:
+            problems.append(f"{name} is both tuned here and inherited ({inherited[name]})")
+    for k, names in sorted(setters.items()):
+        if len(names) > 1:
+            problems.append(f"{k} is set by the candidates of {', '.join(sorted(names))}: every selection's knobs apply together, so each system sets only its own")
+    if planned is not None:
+        for arm, p in planned.items():
+            where = ", ".join(p["candidates"])
+            if arm in inherited:
+                source = (inherited[arm] or {}).get("source") if isinstance(inherited[arm], dict) else inherited[arm]
+                problems.append(f"{arm} is inherited ({source}), yet {where} prices tuning it: a redundant spend; drop it from the plan")
+            elif arm not in systems:
+                problems.append(f"{where} prices tuning {arm}, which the grid does not declare")
+        for name, sdef in systems.items():
+            if (p := planned.get(name)) is None:
+                problems.append(f"{name}: no run_plan.yaml tuning cell prices it")
+                continue
+            n = len(sdef.get("candidates") or [])
+            if bad := {c: k for c, k in p["candidates"].items() if k != n}:
+                problems.append(f"{name}: {n} candidates, but run_plan.yaml prices {bad}")
+            cells = list(sdef.get("dev_cells") or grid.get("dev_cells") or [])
+            if set(cells) != set(p["cells"]):
+                problems.append(f"{name}: dev cells {cells}, but run_plan.yaml prices it on {p['cells']}")
+    return problems
 
 
 def _priced_cost(log, label: str) -> float:

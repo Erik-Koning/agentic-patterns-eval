@@ -30,7 +30,7 @@ from ape.worlds.spec import World
 PULLABLE = {"S3s", "APG-q", "APG-s", "APGo-q", "S5o", "LGR-q", "LGR-s", "LGRo-q", "LGRo-s"}
 # Environment knobs that change what an arm delivers; the task records them (metadata `knobs`) as they are when
 # it is created, since they are not task args. Callers create the task under the knobs it runs with.
-ARM_KNOB_PREFIXES = ("APE_APG_", "APE_LGR_", "APE_S3S_", "APE_S7_", "APE_CONTEXT_BUDGET", "APE_MAX_TURNS")
+ARM_KNOB_PREFIXES = ("APE_APG_", "APE_LGR_", "APE_S3S_", "APE_S7_", "APE_CONTEXT_BUDGET", "APE_MAX_TURNS", "APE_MAS_")
 
 
 def _variant(family: str, relational: bool, exception_style: str) -> str:

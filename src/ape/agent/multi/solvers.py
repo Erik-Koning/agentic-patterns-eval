@@ -17,11 +17,16 @@ arm's delivery, so DEL stays one switch: M1 to M1k changes it for all agents at 
 (The alternative, an orchestrator without knowledge, would make S9 to M1s change two things: where subtasks execute
 and whether the planner holds the knowledge.)
 
+**Tuning knobs** (`knobs.py`, BUILD_PLAN B3): each factory reads its arm's `APE_MAS_<ARM>_*` variables when it is built
+(the prompt variant of the role notes, and the clip on a worker's result or a member's rationale); M1s reads M1's.
+
 **Records** (sample store): `mas_switches` (the brief's full switch vector, §4.1), `mas_params` (fixed structure:
-workers, rounds, k, turn caps, and how parallel units are scheduled), `mas_agents` (per agent: id, role, parent,
-turns, nudges, how it stopped, its tool calls in order, its result or error), `mas_accounting` (per agent and role:
-calls, input / output / reasoning / cache-read / cache-write / total tokens, model seconds, wall-clock; `core`), and
-per arm `mas_plan` and `mas_rounds` (planner and orchestrator arms), `mas_council` (M7) or `mas_ensemble` (S8k3).
+workers, rounds, k, turn caps, and how parallel units are scheduled; and the arm's knobs: `prompt_variant`, the hash
+of its texts `prompt_sha`, and `result_clip_tokens` where one agent reads another's text), `mas_agents` (per agent:
+id, role, parent, turns, nudges, how it stopped, its tool calls in order, its result or error), `mas_accounting` (per
+agent and role: calls, input / output / reasoning / cache-read / cache-write / total tokens, model seconds, wall-clock;
+`core`), and per arm `mas_plan` and `mas_rounds` (planner and orchestrator arms), `mas_council` (M7) or
+`mas_ensemble` (S8k3).
 The single-agent keys are written too (`compile_log` over every agent, so `delivered_evidence` scores the union of
 what any agent was delivered; `step_log`; `turns_used` and `nudges` of the top agent: the planner, the orchestrator,
 the chair or the winning attempt).
@@ -38,6 +43,7 @@ from ...kb.context import DeliveryArm
 from ...worlds.env_tools import always_on, build_tools
 from ..arms import arm_provider, kg_arm_name, load_world
 from ..kb_react import kb_agent
+from . import knobs as K
 from . import prompts as P
 from .core import Delivery, Team, react_loop
 from .primitives import COUNCIL_K, CRITIQUE_ROUNDS, ENSEMBLE_K, TeamConfig, plan_tool, run_council, run_ensemble, run_orchestrator, worker_tools
@@ -64,8 +70,12 @@ def switch_vector(arm: str, delivery: DeliveryArm) -> dict:
     return sw | {"delivery_arm": delivery.name}
 
 
-def _params(arm: str, max_turns: int) -> dict:
+def _params(arm: str, max_turns: int, knobs: K.Knobs) -> dict:
     p: dict = {"max_turns": max_turns}
+    if arm in K.KNOB_ARM:
+        p |= {"prompt_variant": knobs.prompt, "prompt_sha": knobs.notes.sha()}
+        if K.KNOB_ARM[arm] in K.CLIP_ARMS:
+            p["result_clip_tokens"] = knobs.clip
     if REGISTRY[arm].get("ISO"):
         p |= {"n_workers": N_WORKERS, "worker_turns": max_turns, "workers_scheduled": "concurrent" if REGISTRY[arm]["CONC"] else "serial"}
     if arm == "M7":
@@ -77,11 +87,13 @@ def _params(arm: str, max_turns: int) -> dict:
     return p
 
 
-def _check(arm: str, delivery: str) -> None:
+def _check(arm: str, delivery: str) -> K.Knobs:
+    """The arm and delivery, checked when the solver is built, and the arm's knobs as the environment sets them then."""
     if arm not in REGISTRY:
         raise ValueError(f"no multi-agent arm {arm!r}; arms: {sorted(REGISTRY)}")
     if delivery != "push":
         raise ValueError(f"{arm} runs push delivery only (got {delivery!r})")
+    return K.resolve(arm)
 
 
 async def _start(team: Team) -> Delivery:
@@ -96,10 +108,10 @@ async def _start(team: Team) -> Delivery:
 @solver
 def plan_execute(arm: str = "S9", exposure: str = "retrieved", max_turns: int = 12, delivery: str = "push") -> Solver:
     """S9: plan, then execute in the same context, replanning allowed."""
-    _check(arm, delivery)
+    knobs = _check(arm, delivery)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        team = Team(state, arm, {}, _params(arm, max_turns))
+        team = Team(state, arm, {}, _params(arm, max_turns, knobs))
         dlv = None
         try:
             dlv = await _start(team)
@@ -109,7 +121,7 @@ def plan_execute(arm: str = "S9", exposure: str = "retrieved", max_turns: int = 
             tools["plan"] = plan_tool(agent, team.records.setdefault("mas_plan", []))
             async with team.running(agent):
                 ctx = await dlv.compile(agent, task.prompt, 0)
-                note = P.S9_NOTE.format(tools=", ".join(worker_tools(team)[0]), answer_tool=task.answer_tool)
+                note = knobs.notes.s9.format(tools=", ".join(worker_tools(team)[0]), answer_tool=task.answer_tool)
                 state.messages = [dlv.system(ctx), ChatMessageUser(content=f"{task.prompt}\n\n{note}")]
                 await react_loop(team, agent, state.messages, delivery=dlv, ctx=ctx, query=task.prompt, tools=tools, always=[*always_on(team.world), "plan"],
                                  exposure=exposure, max_turns=max_turns, done=team.answered, nudge=P.NUDGE_TASK.format(answer_tool=task.answer_tool),
@@ -124,17 +136,18 @@ def plan_execute(arm: str = "S9", exposure: str = "retrieved", max_turns: int = 
 @solver
 def orchestrated(arm: str = "M1", exposure: str = "retrieved", max_turns: int = 12, delivery: str = "push") -> Solver:
     """M1, M1s, M1k, M2: an orchestrator delegating to three workers in fresh contexts."""
-    _check(arm, delivery)
+    knobs = _check(arm, delivery)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        team = Team(state, arm, {}, _params(arm, max_turns))
+        team = Team(state, arm, {}, _params(arm, max_turns, knobs))
         dlv = None
         try:
             dlv = await _start(team)
             specs = specialists(team.world) if REGISTRY[arm].get("SPEC") else None
             if specs is not None:
                 team.records["mas_specialists"] = [{"name": s.name, "covers": list(s.covers), "tools": list(s.tools) if s.tools else None} for s in specs]
-            cfg = TeamConfig(dlv, exposure, max_turns, worker_turns=max_turns, concurrent=bool(REGISTRY[arm]["CONC"]), specialists=specs)
+            cfg = TeamConfig(dlv, exposure, max_turns, worker_turns=max_turns, concurrent=bool(REGISTRY[arm]["CONC"]), specialists=specs,
+                             notes=knobs.notes, clip_tokens=knobs.clip)
             await run_orchestrator(team, cfg)
         finally:
             team.finish(dlv, exposure)
@@ -146,14 +159,14 @@ def orchestrated(arm: str = "M1", exposure: str = "retrieved", max_turns: int = 
 @solver
 def council(arm: str = "M7", exposure: str = "retrieved", max_turns: int = 12, delivery: str = "push") -> Solver:
     """M7: k members, critique rounds, a chair."""
-    _check(arm, delivery)
+    knobs = _check(arm, delivery)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        team = Team(state, arm, {}, _params(arm, max_turns))
+        team = Team(state, arm, {}, _params(arm, max_turns, knobs))
         dlv = None
         try:
             dlv = await _start(team)
-            await run_council(team, TeamConfig(dlv, exposure, max_turns, worker_turns=max_turns))
+            await run_council(team, TeamConfig(dlv, exposure, max_turns, worker_turns=max_turns, notes=knobs.notes, clip_tokens=knobs.clip))
         finally:
             team.finish(dlv, exposure)
         return state
@@ -164,11 +177,11 @@ def council(arm: str = "M7", exposure: str = "retrieved", max_turns: int = 12, d
 @solver
 def self_consistency(arm: str = "S8k3", exposure: str = "retrieved", max_turns: int = 12, delivery: str = "push") -> Solver:
     """S8k3: k independent S1 attempts (the gate's own loop), majority vote, an LLM aggregator on ties."""
-    _check(arm, delivery)
+    knobs = _check(arm, delivery)
     attempt = kb_agent(arm_provider("S1"), load_world, exposure=exposure, max_turns=max_turns, delivery="push")
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        team = Team(state, arm, {}, _params(arm, max_turns))
+        team = Team(state, arm, {}, _params(arm, max_turns, knobs))
         dlv = None
         try:
             dlv = await _start(team)

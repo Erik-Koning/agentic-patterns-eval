@@ -13,7 +13,26 @@ Rules these drafts follow, which a replacement must keep:
 - The role-detection in the gold mock (`llm/mock_multi.py`) keys on tool names, never on this prose.
 
 Templates use `str.format` fields; every field a template uses is passed by the caller in `agent/multi`.
+
+**Tuning variants (BUILD_PLAN B3).** The main study's dev tuning gives each arm the same budget of prompt candidates
+(brief §7.3). A candidate picks one variant of the role notes (`VARIANTS`, `RoleNotes`) per arm with
+`APE_MAS_<ARM>_PROMPT` (`knobs.py`); `default` is the notes above, unchanged, so an arm without the knob runs as B2
+built it. Variants follow the rules above, and two more:
+- **Protocol only.** A variant changes how the arm's own mechanism is used (how a plan or a subtask is written, what a
+  report or a rationale holds, how a critique or the chair's decision proceeds), never generic advice on solving the
+  task ("check the policy carefully"), which would help S1 as much and would make an M-arm contrast partly a contrast
+  of instructions. S1 has no role text, so it has nothing to tune.
+- **The data formats stay fixed:** `WORKER_SUBTASK`, `RESULT_LINE`, `PROPOSAL_LINE` and the tool descriptions are the
+  same in every variant, and a variant keeps each note's fields (S9's and the orchestrator's name the tools that follow
+  the planning turn).
+The variants below are drafts; the M-arm prompt author (an independent team member, brief §7.3) reviews or replaces
+them, and the candidates in `config/tuning_grid_main.yaml`, before signing off. A text edited after a live tune changes
+what that tune measured: `mas_params.prompt_sha` records the text each sample ran.
 """
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass
 
 # S9: plan-then-execute in one context (DEC=1, ISO=0, CTRL=dynamic).
 S9_NOTE = (
@@ -111,3 +130,152 @@ NUDGE_TASK = "Use the tools to complete the task, then call {answer_tool}."
 NUDGE_WORKER = "Use the tools to complete the subtask, then call report with your result."
 NUDGE_PROPOSE = "Call {answer_tool} with your proposed answer and its rationale."
 NUDGE_SUBMIT = "Call {tool} now."
+
+
+# --- Tuning variants (BUILD_PLAN B3) ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoleNotes:
+    """The role notes a tuning variant sets: S9's note; the orchestrator's and the worker's (M1, M1s, M1k, M2); the
+    council member's first note, each critique round's and the chair's (M7). Fields as in the default templates."""
+
+    s9: str
+    orchestrator: str
+    worker: str
+    member: str
+    critique: str
+    chair: str
+
+    def sha(self) -> str:
+        """A short hash of the texts, recorded per sample (`mas_params.prompt_sha`)."""
+        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()[:12]
+
+
+VARIANTS: dict[str, RoleNotes] = {
+    # B2's notes, unchanged.
+    "default": RoleNotes(S9_NOTE, ORCHESTRATOR_NOTE, WORKER_NOTE, COUNCIL_MEMBER_NOTE, CRITIQUE_ROUND, CHAIR_NOTE),
+    # The same protocol in as few words as it takes.
+    "concise": RoleNotes(
+        s9=(
+            "First call plan with the subtasks you will carry out. Then carry them out yourself with your tools "
+            "({tools}), calling plan again if the plan changes, and finish with {answer_tool}."
+        ),
+        orchestrator=(
+            "You coordinate {n_workers} workers; of the task's tools you can use only {answer_tool}.\n"
+            "{team}\n"
+            "First call plan with the subtasks. Then call delegate with up to {n_workers} subtasks per call; a worker "
+            "sees only its subtask's text, so make each one self-contained. Call plan again if the plan changes. "
+            "Finish with {answer_tool}."
+        ),
+        worker=(
+            "Carry out the subtask below, then call report with your result, including every value the subtask asks "
+            "for. Only the result is passed on."
+        ),
+        member=(
+            "You are one of {k} council members. Work on the task on your own, then propose an answer: call "
+            "{answer_tool} with it and a short rationale. The members then review each other's proposals."
+        ),
+        critique=(
+            "Critique round {round} of {rounds}. The other members' proposals:\n\n{proposals}\n\n"
+            "Review them (you may use the tools again), then call {answer_tool} with your proposal for this round and "
+            "its rationale."
+        ),
+        chair=(
+            "You chair a council of {k} members. Their final proposals, after {rounds} rounds of critique:\n\n"
+            "{proposals}\n\nSubmit the final answer with {answer_tool}."
+        ),
+    ),
+    # Explicit formats (and the planning instruction's detail): a plan and subtasks that name their IDs and the values
+    # they produce, reports and rationales that pair each value or fact with its ID.
+    "structured": RoleNotes(
+        s9=(
+            "Work in two phases. First call plan with the list of subtasks you will carry out; write each subtask as "
+            "what to find or do, the IDs it concerns and the value it should produce. Then carry them out yourself, "
+            "one after another, with your tools ({tools}); call plan again whenever the plan needs to change. When "
+            "every subtask has its value, call {answer_tool}."
+        ),
+        orchestrator=(
+            "You coordinate a team of {n_workers} workers. You cannot use the task's tools yourself, apart from "
+            "{answer_tool}.\n"
+            "{team}\n"
+            "How to work:\n"
+            "1. First call plan with the list of subtasks you intend to have carried out; write each subtask as what to "
+            "find or do, the IDs it concerns and the value it should produce.\n"
+            "2. Call delegate with up to {n_workers} subtasks at a time. Each subtask runs in a fresh worker context: "
+            "the worker sees only the text of its subtask (not this conversation, the plan or the other subtasks). "
+            "Write each subtask in three parts: what to do; every ID and detail it needs; and what to report back, "
+            "value by value, in the format you need. delegate returns each worker's result. Call delegate as often as "
+            "you need, and call plan again whenever the plan needs to change.\n"
+            "3. When every subtask has its value, call {answer_tool} with the final answer."
+        ),
+        worker=(
+            "You are a worker on a team. Carry out the subtask below and then call report with your result. The "
+            "result is all the requester will see of your work: give each value the subtask asks for together with "
+            "the ID it belongs to, in the format the subtask asks for. You do not submit the team's final answer."
+        ),
+        member=(
+            "You are one of {k} council members working on this task independently. Instead of submitting a final "
+            "answer, propose one: call {answer_tool} with your proposed answer and a rationale that lists the facts it "
+            "rests on, each with the ID of the record, policy or procedure it comes from. The other members will "
+            "review your proposal, and you will review theirs."
+        ),
+        critique=(
+            "Critique round {round} of {rounds}. The other members' current proposals:\n\n{proposals}\n\n"
+            "For each point where a proposal differs from yours, check which answer the cited facts support (you may "
+            "use the tools again). Then call {answer_tool} with your proposal for this round, kept or revised, and a "
+            "rationale that lists the facts it rests on with their IDs."
+        ),
+        chair=(
+            "You chair a council of {k} members who each worked on this task. Their final proposals, after {rounds} "
+            "rounds of critique:\n\n{proposals}\n\nWhere the proposals differ, decide each point on the facts their "
+            "rationales cite, checked against the company knowledge you have. Submit the final answer with "
+            "{answer_tool}."
+        ),
+    ),
+    # A check at each hand-off: the plan before answering; each worker result against its subtask, re-delegating what
+    # is missing; a report that says what it could not find; a critique that revises only on evidence; a chair that
+    # keeps a unanimous answer. The member's first note is the default's.
+    "verify": RoleNotes(
+        s9=(
+            "Work in two phases. First call plan with the list of subtasks you will carry out. Then carry them out "
+            "yourself, one after another, with your tools ({tools}); call plan again whenever the plan needs to "
+            "change. Before calling {answer_tool}, go through the plan and make sure each subtask is done."
+        ),
+        orchestrator=(
+            "You coordinate a team of {n_workers} workers. You cannot use the task's tools yourself, apart from "
+            "{answer_tool}.\n"
+            "{team}\n"
+            "How to work:\n"
+            "1. First call plan with the list of subtasks you intend to have carried out.\n"
+            "2. Call delegate with up to {n_workers} subtasks at a time. Each subtask runs in a fresh worker context: "
+            "the worker sees only the text of its subtask (not this conversation, the plan or the other subtasks), so "
+            "write each subtask so that it stands on its own, with every ID and detail it needs. delegate returns each "
+            "worker's result. Call delegate as often as you need, and call plan again whenever the plan needs to "
+            "change.\n"
+            "3. Check each result against its subtask. If a result is missing, incomplete or reports a problem, "
+            "delegate that subtask again, with what was missing spelled out.\n"
+            "4. When every subtask has a complete result, call {answer_tool} with the final answer."
+        ),
+        worker=(
+            "You are a worker on a team. Carry out the subtask below and then call report with your result. The "
+            "result is all the requester will see of your work, so include every value the subtask asks for. If "
+            "something the subtask needs cannot be found or done, say so in the result instead of filling the gap. "
+            "You do not submit the team's final answer."
+        ),
+        member=COUNCIL_MEMBER_NOTE,
+        critique=(
+            "Critique round {round} of {rounds}. The other members' current proposals:\n\n{proposals}\n\n"
+            "Check them against the evidence and your own work (you may use the tools again). Change your proposal "
+            "only where the evidence shows it is wrong, then call {answer_tool} with your proposal for this round and "
+            "its rationale."
+        ),
+        chair=(
+            "You chair a council of {k} members who each worked on this task. Their final proposals, after {rounds} "
+            "rounds of critique:\n\n{proposals}\n\nIf every member proposes the same answer, submit that answer. If "
+            "they differ, compare their rationales point by point against the company knowledge you have and submit "
+            "the answer it supports. Submit with {answer_tool}."
+        ),
+    ),
+}
+DEFAULT_VARIANT = "default"

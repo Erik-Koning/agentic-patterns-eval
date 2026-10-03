@@ -1,6 +1,7 @@
 """Multi-agent and ensemble arms for the main study (BUILD_PLAN B2): S9, M1, M1s, M1k, M2, M7 and S8k3.
 
-- `prompts.py`: every prompt these arms add, in one place.
+- `prompts.py`: every prompt these arms add, in one place, with the tuning variants of the role notes (B3).
+- `knobs.py`: the arms' tuning knobs (`APE_MAS_<ARM>_*`: prompt variant, result clip), read when a solver is built.
 - `core.py`: the team (agent registry, spans, per-agent accounting from the transcript), per-agent knowledge delivery,
   the shared turn loop (kb_agent's per-turn rules over any history), and environment isolation.
 - `primitives.py`: a worker run, the orchestrator loop, a council, an ensemble and its vote; reusable outside the
@@ -32,7 +33,7 @@
 - A sample `turn_limit` would count every generation of every agent (and of the `kg` role); the arms set none. Their
   turn caps are the loops' own counters: each agent gets the task's `max_turns` per loop.
 - `max_tool_output` (16 KiB) truncates tool results: `delegate` sets its own limit, and each worker result is clipped
-  to `core.TEXT_MAX_TOKENS` with a visible marker.
+  to the arm's clip (`knobs.py`; default `core.TEXT_MAX_TOKENS`) with a visible marker.
 - The model's connection limit (`max_connections`) is shared by every sample and agent, so concurrent workers can
   queue: M1's wall-clock gain over M1s depends on it (record it with the run).
 """
