@@ -72,3 +72,4 @@ FX-6 calls `projected_cost()` and `remaining()` before each phase. It refuses th
 - **D-041 (2026-10-03):** −$0.8. S3s is no longer re-tuned in the main study (`main.tune.b`): S3s and S5 inherit the gate's selections.
 - **D-043 (2026-10-03):** +$2. CM-native replaces CM-prune at Sol (+$6); the Study G tune prices CM-sum and CM-todo at their 2 real candidates (−$4).
 - **D-044 (2026-10-03):** +$13. The live S8k3 gets all 5 Study C runs in its own cell (`main.C.s8`), as the brief's Study C specifies; it had 2. Contingency target lowered to 270.
+- **Contingent (D-039/D-045):** if the pilot's token-cap gate escalates, up to two pilot-sized re-run rounds (about $36 conservative) come out of contingency; the runner projects them before running.
