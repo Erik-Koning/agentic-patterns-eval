@@ -1,0 +1,19 @@
+# PLACEHOLDER (BUILD_PLAN B1). This is NOT Study G's tuning grid. Package B11 declares the real one: equal dev budgets
+# for CM-prune, CM-sum, CM-todo, CM-reset and S-CM* (CONTEXT_MANAGEMENT_AUDIT §6.3), with the owners' sign-off. Until
+# then this grid tunes only a session arm that exists today (CM0, one candidate at its defaults, on g.tune.luna's F8-40
+# dev sessions), so an offline `python -m ape.run_study all --study study_g --offline` runs end to end. A live tune
+# refuses it (`placeholder: true`, and no owner has signed off).
+#
+# Format: as config/tuning_grid_main.yaml. A dev cell `F8-<N>` (or `F8-<N>-<knob tag>`, gen_f8.variant_tag) tunes on
+# that session variant's dev sessions; candidates are scored by mean item success (f8_session_score).
+placeholder: true
+owners: {CM0: TODO}
+signed_off: {CM0: false}
+budget_per_system: 3
+tie_pp: 1.0
+dev_cells: [F8-40]
+
+systems:
+  CM0:
+    candidates:
+      - {id: cm0-default, arm: CM0, env: {}}
