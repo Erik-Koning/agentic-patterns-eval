@@ -15,6 +15,8 @@ from ..worlds.render import chunk_world
 from ..worlds.spec import World
 
 BASELINE_ARMS = ("S1", "S3s", "S6", "S7")
+KG_ARM_ENV = "APE_KG_ARM"
+DEFAULT_KG_ARM = "APG-s"
 _cache: dict[tuple, DeliveryArm] = {}
 _locks: dict[tuple, asyncio.Lock] = {}
 
@@ -68,7 +70,21 @@ def s7_per_step() -> bool:
     return os.environ.get("APE_S7_PER_STEP", "").strip() in ("1", "true", "yes")
 
 
+def kg_arm_name() -> str:
+    """The arm the main study's KG arm S5 (and the KG workers of M1k/M2) runs as: APE_KG_ARM, which the study runner
+    sets from the gate's verdict (APG's selected arm if GO, LightRAG's otherwise; BUILD_PLAN B5), else APG-s. Its
+    knobs come from the environment like any APG/LightRAG arm's."""
+    import os
+
+    name = os.environ.get(KG_ARM_ENV, "").strip() or DEFAULT_KG_ARM
+    if not name.startswith(("APG", "LGR")):
+        raise ValueError(f"{KG_ARM_ENV}={name!r}: the KG arm must be an APG or LightRAG arm")
+    return name
+
+
 async def _build(arm: str, world: World, cfg: Config) -> DeliveryArm:
+    if arm == "S5":
+        return await _build(kg_arm_name(), world, cfg)
     chunks = chunk_world(world)
     if arm == "S1":
         return Monolith(world, chunks)

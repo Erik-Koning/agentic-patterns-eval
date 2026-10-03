@@ -276,7 +276,36 @@ def test_faults_are_enabled_per_task_only_on_request(offline_env):
     with pytest.raises(ValueError, match="F2 only"):
         main_study(family="F1", level="2", faults=True)
     with pytest.raises(ValueError, match="main_study covers"):
-        main_study(family="F7", level="10")
+        main_study(family="F5", level="1hop")
+    with pytest.raises(ValueError, match="main_study covers"):
+        main_study(family="F7", level="5")
+
+
+def test_main_study_covers_the_gate_families_and_resolves_s5_to_the_kg_arm(offline_env, monkeypatch):
+    """F3 and F7 run through the same task; S5 is the gate-selected KG arm (APE_KG_ARM); multi-agent arms are refused
+    until their solver is registered (BUILD_PLAN B2)."""
+    from ape.agent import arms
+    from ape.agent.solvers import MULTI_AGENT_ARMS
+
+    asyncio.run(build("dev", "F7", ["10"], n_worlds=1, n_tasks=2, relational=True, embed=True))
+    log = inspect_eval(
+        main_study(family="F7", level="10", split="dev", arm="S1"),
+        model=get_model("mockllm/model", custom_outputs=mock_agent),
+        log_dir=str(offline_env / "logs"),
+        display="none",
+    )[0]
+    assert log.status == "success", log.error
+    assert log.eval.metadata["max_turns"] == 12 and log.eval.metadata["multi_agent"] is False
+    assert arms.kg_arm_name() == "APG-s"
+    monkeypatch.setenv("APE_KG_ARM", "LGR-s")
+    assert arms.kg_arm_name() == "LGR-s"
+    assert main_study(family="F7", level="10", split="dev", arm="S5").metadata["knobs"]["APE_KG_ARM"] == "LGR-s"
+    monkeypatch.setenv("APE_KG_ARM", "S5")
+    with pytest.raises(ValueError, match="APG or LightRAG"):
+        arms.kg_arm_name()
+    if "M1" not in MULTI_AGENT_ARMS:
+        with pytest.raises(NotImplementedError, match="B2"):
+            main_study(family="F7", level="10", split="dev", arm="M1")
 
 
 @pytest.mark.parametrize("arm", ["S5o", "LGRo-s"])
