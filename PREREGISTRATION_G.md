@@ -66,7 +66,7 @@ The rows of `ape.analysis.g_hypotheses.HYPOTHESES`, the single source of this se
 | G-H3-spec | descriptive | G-H3 | M1, M2, S1 | Ratio of pooled mean differences. | intervals only | – |
 | G-D1 | descriptive | descriptive | all session arms | Mean probe F1 (a missed checkpoint scores 0) with session-clustered intervals. | intervals only | – |
 | G-D2 | descriptive | descriptive | all session arms | Label counts and rates per item. | counts only | – |
-| G-D3 | descriptive | descriptive | all session arms | Posterior means and SDs (statsmodels BinomialBayesMixedGLM, variational Bayes). | none | – |
+| G-D3 | descriptive | descriptive | all session arms | Posterior means and SDs (statsmodels BinomialBayesMixedGLM, variational Bayes); long sessions only (the N = 10 control is left out). | none | – |
 <!-- END GENERATED: g_hypotheses.markdown() -->
 
 Plan cells (`config/run_plan.yaml`), level, and planned power or precision. Power comes from `ape.analysis.g_power` at the D-033 design with D-038's df rule, through the real analysis path:
@@ -76,16 +76,16 @@ Plan cells (`config/run_plan.yaml`), level, and planned power or precision. Powe
 |---|---|---|---|
 | G-H1 | g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive. g_power at the D-033 design: its 95% interval covers the true 0 in 95.6% of null studies (S1-pre 94.8%); the change over the span has SD 0.29 logit (0.37 before D-033; S1-pre 0.36), so the interval excludes 0 in 26% of studies when M2's advantage falls 0.9 → 0 across the points (S1-pre 39%). Under a constant mechanism the S-CM* estimate drifts +0.24 and S1's +0.67 (CM0's overflow rule); S1-pre's does not. |
 | G-H1-M1 | g.topo.luna-low, g.topo.luna, g.topo.sol | – (descriptive) | – |
-| G-H2a | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | 0.025 | Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test there (D-032). g_power: type I 0.020–0.024 per point (10,000 studies); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies. |
+| G-H2a | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | 0.025 | Decided over the plan's points: a planned point without paired sessions makes it INCOMPLETE, never SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test there (D-032). g_power: type I 0.020–0.024 per point (10,000 studies); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies. |
 | G-H2b | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive (the TOST at ±0.20 R had power 0.01; 80% would need ±0.46). The gain on the logit scale drifts +0.16 to +0.22 over the span under a constant R_x, because of CM0's overflow rule. g_power: θ has SD 0.14 R; its 95% interval covers 0 in 95% of studies at a constant R_x and excludes 0 in 20% when R_x falls by 0.2 over the span. |
 | G-H2c | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | – (descriptive) | – |
 | G-H2d | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10 | – (descriptive) | CM0 fails every item after its overflow, so 'gains grow with length' holds for CM0 by construction; the slopes of the managed arms and O-state carry the information. |
-| G-H3-pre | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp). |
+| G-H3-pre | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | Pools the plan's points; a planned point without ≥ 2 sessions of all four arms makes G-H3-pre, G-H3a and G-H3b INCOMPLETE, never SUPPORTED. g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp). |
 | G-H3a | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | g_power (D-033 design): type I 0.026 at a share of 0.5 (10,000 studies); power 0.997 at 0.75, 0.996 at 0.80, 0.90 at 0.70, 0.66 at 0.65 (0.95 / 0.68 at 0.80 / 0.70 with σ_arm 0.6). Before D-033: 0.84 at 0.75. |
 | G-H3b | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7). g_power (D-033 design): type I 0.027 (recovery at 0.8) and 0.026 (cost at 0.6) over 16,000 studies, 0.006 with both clauses at their margins; power 0.69 at recovery 0.95 and cost ratio 0.45, 0.37 at 0.90 / 0.50, 0.11 at 0.85 / 0.55 (the cost clause alone ≥ 0.99 at ≤ 0.5). With 24 Luna sessions per point 0.76; with 12 Sol sessions 0.74. Before D-033: 0.38. |
 | G-H3-spec | g.topo.luna-low, g.topo.luna, g.topo.sol | – (descriptive) | – |
-| G-D1 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
-| G-D2 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
+| G-D1 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
+| G-D2 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
 | G-D3 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
 <!-- END GENERATED: g_hypotheses.design_markdown() -->
 

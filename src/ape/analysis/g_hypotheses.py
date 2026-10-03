@@ -122,7 +122,8 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "pp",
         "G-H2-gap",
         "confirmatory",
-        notes="Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test "
+        notes="Decided over the plan's points: a planned point without paired sessions makes it INCOMPLETE, never "
+        "SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test "
         "there (D-032). g_power: type I 0.020–0.024 per point (10,000 studies); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies.",
     ),
     GHypothesis(
@@ -184,7 +185,8 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "G-H3",
         "confirmatory",
         step=1,
-        notes="g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp).",
+        notes="Pools the plan's points; a planned point without ≥ 2 sessions of all four arms makes G-H3-pre, G-H3a and "
+        "G-H3b INCOMPLETE, never SUPPORTED. g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp).",
     ),
     GHypothesis(
         "G-H3a",
@@ -234,9 +236,10 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
     ),
     GHypothesis(
         "G-D1",
-        "Forked state probes: F1 per checkpoint per arm × point, and the probe-to-behaviour correlation (audit §5.3).",
+        "Forked state probes: F1 per checkpoint per arm × point × session length, and the probe-to-behaviour correlation "
+        "(audit §5.3).",
         ("all session arms",),
-        (*CM_CELLS, *TOPO_CELLS),
+        (*CM_CELLS, SHORT_CELL, *TOPO_CELLS),
         "Mean probe F1 (a missed checkpoint scores 0) with session-clustered intervals.",
         "intervals only",
         "estimate",
@@ -247,9 +250,9 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
     ),
     GHypothesis(
         "G-D2",
-        "Failure taxonomy per arm × point (audit §5.4).",
+        "Failure taxonomy per arm × point × session length (audit §5.4).",
         ("all session arms",),
-        (*CM_CELLS, *TOPO_CELLS),
+        (*CM_CELLS, SHORT_CELL, *TOPO_CELLS),
         "Label counts and rates per item.",
         "counts only",
         "estimate",
@@ -264,7 +267,8 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "and item random intercepts (D-029: descriptive only).",
         ("all session arms",),
         (*CM_CELLS, *TOPO_CELLS),
-        "Posterior means and SDs (statsmodels BinomialBayesMixedGLM, variational Bayes).",
+        "Posterior means and SDs (statsmodels BinomialBayesMixedGLM, variational Bayes); long sessions only (the N = 10 "
+        "control is left out).",
         "none",
         "estimate",
         None,
@@ -281,8 +285,6 @@ OPEN_CHOICES = (
     "The power priors (σ_world 0.5, σ_item 1.0, σ_arm 0.3, σ_epoch 0.2, σ_mix 0.5, crossing 0.70, base success per "
     "point) are assumptions until the micro-pilot (g.pilot.luna) calibrates them; G-H3a and G-H3b lose power if σ_arm "
     "is larger (see g_power's σ_arm 0.6 sensitivity).",
-    "S-CM* is not run at Astra, so the descriptive G-H1 with its reference covers Luna-low to Sol-high only; adding it "
-    "to g.topo.astra (+$284 conservative) would extend it.",
 )
 
 

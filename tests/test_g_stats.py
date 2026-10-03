@@ -306,7 +306,9 @@ def test_report_on_simulated_data_is_json_and_renders():
     assert g1["reference"] == "S-CM*" and g1["ci_span"][0] < g1["estimate_span"] < g1["ci_span"][1] and g1["sensitivity_S1_pre"]["ci_span"][0] is not None
     assert "p" not in g1 and "p" not in next(r for r in d["decisions"] if r["id"] == "G-H2b[CM-sum]")
     # D-033's design: G-H1 with S-CM* spans the three points where it ran; G-H3 pools them.
-    assert d["gh1"]["primary"]["points_used"] == ["luna-low", "luna-high", "sol-high"] and d["gh3"]["points"] == ["luna-high", "luna-low", "sol-high"]
+    assert d["gh1"]["primary"]["points_used"] == ["luna-low", "luna-high", "sol-high"] and d["gh3"]["points"] == ["luna-low", "luna-high", "sol-high"]
+    assert d["planned_points"] == {"G-H2a": ["luna-low", "luna-high", "sol-high", "astra-high"], "G-H3": ["luna-low", "luna-high", "sol-high"]}
+    assert not d["gh2"]["gap"]["incomplete"] and not d["gh3"]["incomplete"]
     assert set(d["gh1"]["references"]) == set(gh.REFERENCES)
     lo, hi = d["gh1"]["primary"]["boot_ci_span"]
     assert lo < hi and d["gh1"]["primary"]["ci_span"][0] < d["gh1"]["primary"]["est_span"] < d["gh1"]["primary"]["ci_span"][1]
@@ -315,6 +317,32 @@ def test_report_on_simulated_data_is_json_and_renders():
     assert any("astra-high" in c and "sign-flip" in c for c in d["caveats"])
     md = gr.render(d)
     assert "## Decisions" in md and "G-H3b" in md and "Descriptive estimates (D-033" in md and "G-H1 (M2 − S-CM*)" in md
+
+
+def test_a_missing_planned_point_makes_the_confirmatory_rows_incomplete():
+    """PREREGISTRATION_G.md restricts each claim to the planned points: a planned point without data labels G-H2a and the
+    G-H3 sequence INCOMPLETE (the missing points named), never SUPPORTED, and keeps the estimates."""
+    rng = np.random.default_rng(14)
+    sc = gp.scenarios()
+    var = gp.Variance()
+    topo = gp.simulate_block(sc["topo-h3"], gp.PLANNED_TOPO, var, rng)
+    cm = gp.simulate_block(sc["cm-equiv"], gp.PLANNED_CM, var, rng)
+    sessions = pd.concat([topo[topo["point"] != "sol-high"], cm[~((cm["point"] == "astra-high") & (cm["arm"] == "CM0"))]], ignore_index=True)
+    d = gr.g_report(None, sessions, gp.measured_capability(sc["cm-equiv"], var, rng, noise=False), reps=300, boot=0, glmm=False)
+    dec = {r["id"]: r for r in d["decisions"]}
+    assert dec["G-H2a"]["decision"] == "INCOMPLETE" and dec["G-H2a"]["missing_points"] == ["astra-high"] and dec["G-H2a"]["present_positive"]
+    assert set(d["gh2"]["gap"]["points"]) == {"luna-low", "luna-high", "sol-high"}  # the per-point results present are kept
+    for hid in ("G-H3-pre", "G-H3a", "G-H3b"):
+        assert dec[hid]["decision"] == "INCOMPLETE" and dec[hid]["missing_points"] == ["sol-high"], hid
+    assert dec["G-H3-pre"]["decision_on_present_points"] == "SUPPORTED" and dec["G-H3-pre"]["estimate"] > 0 and d["gh3"]["points"] == ["luna-low", "luna-high"]
+    assert sum("INCOMPLETE" in c for c in d["caveats"]) == 2
+    md = gr.render(d)
+    assert "**INCOMPLETE**" in md and "planned point(s) without data: sol-high" in md and "planned point(s) without data: astra-high" in md
+    # Explicit planned points also override the plan; without any, the old behaviour (the points present) remains.
+    g = gs.gap_iut(sessions, planned_points=["luna-high", "mars"], reps=200)
+    assert g["incomplete"] and g["missing_points"] == ["mars"] and not g["all_positive"] and g["unplanned_points"] == ["luna-low", "sol-high"]
+    assert gs.gap_iut(sessions, reps=200)["all_positive"] and not gs.gap_iut(sessions, reps=200)["incomplete"]
+    assert not gs.gh3(sessions, boot=0, reps=200)["incomplete"]
 
 
 def test_report_on_partial_data_never_raises():

@@ -201,10 +201,11 @@ def decisions(d: dict, hypotheses: Sequence[GHypothesis]) -> list[dict]:
         if h.id == "G-H2a":
             gap = g2["gap"]
             failed = [c for c, r in gap["points"].items() if not r.get("reject")]
-            row |= {"decision": "NOT_TESTABLE" if not gap["testable"] else ("SUPPORTED" if gap["all_positive"] else "NOT_SUPPORTED"), "points_not_shown": failed, "flip_unreachable": gap["flip_unreachable"], "reason": gap.get("reason")}
+            label = "NOT_TESTABLE" if not gap["testable"] else ("INCOMPLETE" if gap.get("incomplete") else ("SUPPORTED" if gap["all_positive"] else "NOT_SUPPORTED"))
+            row |= {"decision": label, "points_not_shown": failed, "missing_points": gap.get("missing_points") or [], "present_positive": gap.get("present_positive"), "flip_unreachable": gap["flip_unreachable"], "reason": gap.get("reason")}
         elif h.id.startswith("G-H3"):
             if not g3.get("testable"):
-                row |= {"decision": "NOT_TESTABLE", "reason": g3.get("reason")}
+                row |= {"decision": "NOT_TESTABLE", "reason": g3.get("reason"), "missing_points": g3.get("missing_points") or []}
             elif h.id == "G-H3-pre":
                 row |= {"decision": _label(g3["pre"]), "estimate": g3["pre"]["est"], "ci": g3["pre"]["ci"], "p": g3["pre"]["p_t"]}
             elif h.id == "G-H3a":
@@ -213,12 +214,47 @@ def decisions(d: dict, hypotheses: Sequence[GHypothesis]) -> list[dict]:
             elif h.id == "G-H3b":
                 b = g3["h3b"]
                 row |= {"decision": "NOT_TESTED" if not b["tested"] else ("SUPPORTED" if b["claim"] else "NOT_SUPPORTED"), "recovery": g3["recovery_share"].get("est"), "recovery_p": b["recovery"].get("p_t"), "cost_ratio": b["cost"].get("ratio"), "cost_ratio_ci": b["cost"].get("ratio_ci"), "cost_p": b["cost"].get("p_t"), "reason": b["cost"].get("reason")}
+            if g3.get("testable") and g3.get("incomplete"):
+                # A planned point without data: the decision is INCOMPLETE whatever the pooled tests show (the
+                # estimates above, over the planned points present, are kept; PREREGISTRATION_G.md calls it a deviation).
+                row |= {"decision": "INCOMPLETE", "decision_on_present_points": row["decision"], "missing_points": g3["missing_points"], "points": g3.get("points")}
         out.append(row)
     return out
 
 
+def planned_points(hypotheses: Sequence[GHypothesis] = HYPOTHESES, plan=None) -> tuple[dict[str, list[str]], str | None]:
+    """The capability points each confirmatory family must cover (PREREGISTRATION_G.md restricts each claim to them):
+    G-H2a's context-management cells and G-H3's topology cells, the enabled long-session ones, as `g_load.cell_info`
+    resolves them (profile + effort). Also a problem when the plan cannot be read (the families then decide over the
+    points present)."""
+    from .g_load import cell_info
+
+    if plan is None:
+        from ..budget import load_plan
+
+        try:
+            plan = load_plan()
+        except Exception as e:  # noqa: BLE001 - reported; the decisions fall back to the points present
+            return {}, f"planned points unknown (run plan unreadable: {type(e).__name__}: {e}); G-H2a and G-H3 decide over the points present"
+    out: dict[str, list[str]] = {}
+    for key, hid in (("G-H2a", "G-H2a"), ("G-H3", "G-H3-pre")):
+        h = next((x for x in hypotheses if x.id == hid), None)
+        if h is None:
+            continue
+        pts = []
+        for c in h.cells:
+            ci = cell_info(c, plan)
+            if ci.get("known") and ci.get("enabled", True) and ci.get("block") in ("cm", "topo") and ci.get("point") and int(ci.get("N") or 0) > gs.SHORT_N:
+                pts.append(ci["point"])
+        out[key] = list(dict.fromkeys(pts))
+    return out, None
+
+
 def caveats(d: dict) -> list[str]:
     out = []
+    for name, x in (("G-H2a", d["gh2"]["gap"]), ("G-H3", d["gh3"])):
+        if x.get("missing_points"):
+            out.append(f"{name} is INCOMPLETE: planned point(s) {', '.join(x['missing_points'])} have no usable sessions (a deviation from PREREGISTRATION_G.md); the estimates over the planned points present are kept, but nothing is SUPPORTED.")
     cap = d["capability"]
     if cap["missing"]:
         out.append(f"No measured capability for {cap['missing']}: those points are left out of every slope.")
@@ -256,13 +292,22 @@ def g_report(
     glmm: bool = True,
     cells: Mapping | None = None,
     problems: Sequence[str] = (),
+    plan=None,
+    planned: Mapping[str, Sequence[str]] | None = None,
 ) -> dict:
     """The Study G report as a JSON-serialisable dict (see the module docstring). `primary` decides every confirmatory
-    test by the session-clustered t ("t", default) or the sign-flip ("flip"); both p-values are always reported."""
+    test by the session-clustered t ("t", default) or the sign-flip ("flip"); both p-values are always reported.
+    `planned` ({"G-H2a": points, "G-H3": points}) are the points each confirmatory family must cover; default: from
+    `plan` (default the repository's run plan) via `planned_points`."""
     sessions = sessions if sessions is not None else pd.DataFrame()
     items = items if items is not None else pd.DataFrame()
     kw = {"alpha": alpha, "reps": reps, "seed": seed, "primary": primary}
     d: dict = {"header": header_section(items, sessions, cells, problems), "alpha": alpha}
+    if planned is None:
+        planned, plan_problem = planned_points(hypotheses, plan)
+        if plan_problem:
+            d["header"]["problems"] = [*d["header"]["problems"], plan_problem]
+    d["planned_points"] = dict(planned or {})
     d["capability"] = capability_section(capability, sessions)
     d["outcomes"] = gs.outcome_table(sessions)
     d["gh1"] = {
@@ -272,13 +317,13 @@ def g_report(
         "M1": gs.gh1(sessions, capability, topology="M1", reference=reference, **kw),
     }
     margin = tost_margin if tost_margin is not None else TOST_MARGIN[tost_estimand]
-    d["gh2"] = gs.gh2(sessions, capability, estimand=tost_estimand, margin=margin, boot=boot, **kw)
+    d["gh2"] = gs.gh2(sessions, capability, estimand=tost_estimand, margin=margin, boot=boot, planned_points=(planned or {}).get("G-H2a"), **kw)
     other = "gain" if tost_estimand == "R" else "R"
     d["gh2"]["tost_sensitivity"] = {s: gs.tost(sessions, capability, s, estimand=other, **kw) for s in d["gh2"]["tost"]}
     d["gh2"]["short_control"] = gs.short_control(sessions, alpha=alpha, reps=reps, seed=seed)
     d["gh2"]["crossing_split"] = gs.crossing_split(sessions, alpha=alpha, seed=seed)
     d["gh2"]["degradation"] = gs.degradation(items) if len(items) and "block" in items else []
-    d["gh3"] = gs.gh3(sessions, boot=boot, **kw)
+    d["gh3"] = gs.gh3(sessions, boot=boot, planned_points=(planned or {}).get("G-H3"), **kw)
     d["costs"] = gs.cost_table(sessions)
     d["probes"] = {"by_checkpoint": gs.probe_table(sessions), "behaviour": gs.probe_behaviour(sessions, items)}
     d["taxonomy"] = gs.taxonomy_table(sessions)
@@ -323,6 +368,8 @@ def render(d: dict) -> str:
             extra = f"recovery {_f(r.get('recovery'))}, cost ratio {_f(r.get('cost_ratio'))} {_ci(r.get('cost_ratio_ci'))}"
         elif r["id"] == "G-H2a":
             extra = f"not shown at {r.get('points_not_shown')}" if r.get("points_not_shown") else ""
+        if r.get("missing_points"):
+            extra = f"planned point(s) without data: {', '.join(r['missing_points'])}" + (f"; on the points present: {r['decision_on_present_points']}" if r.get("decision_on_present_points") else (f"; positive at every point present: {_f(r.get('present_positive'))}" if r.get("present_positive") is not None else "")) + (f"; {extra}" if extra else "")
         rows.append([r["id"], f"**{r['decision']}**", _f(est), _ci(r.get("ci")), _p(r.get("p")), extra or (r.get("reason") or "")])
     L += [_table(["Hypothesis", "Decision", "Estimate", "Interval", "p (t)", "Notes"], rows)]
     rows = []
@@ -408,14 +455,14 @@ def render(d: dict) -> str:
         L += [f"Not testable: {g3.get('reason')}", ""]
 
     L += ["## Cost per solved item (probes excluded)", ""]
-    L += [_table(["Block", "Point", "Arm", "Solved", "$ / solved", "tokens / solved", "calls / solved", "s / solved", "probe tokens", "cm tokens"], [[c["block"], c["point"], c["arm"], _f(c["solved"], 0), _f(c.get("cost_usd_per_solved"), 4), _f(c.get("tokens_per_solved"), 0), _f(c.get("calls_per_solved"), 2), _f(c.get("wall_clock_per_solved"), 2), _f(c.get("tokens_probe"), 0), _f(c.get("tokens_cm"), 0)] for c in d["costs"]])]
+    L += [_table(["Block", "Point", "Arm", "N", "Solved", "$ / solved", "tokens / solved", "calls / solved", "s / solved", "probe tokens", "cm tokens"], [[c["block"], c["point"], c["arm"], c.get("N", "–"), _f(c["solved"], 0), _f(c.get("cost_usd_per_solved"), 4), _f(c.get("tokens_per_solved"), 0), _f(c.get("calls_per_solved"), 2), _f(c.get("wall_clock_per_solved"), 2), _f(c.get("tokens_probe"), 0), _f(c.get("tokens_cm"), 0)] for c in d["costs"]])]
     L += ["## Probes (F1 per checkpoint; a missed checkpoint scores 0)", ""]
-    L += [_table(["Block", "Point", "Arm", "k", "Sessions", "F1", "95% CI", "Coverage"], [[p["block"], p["point"], p["arm"], p["k"], p["sessions"], _f(p["f1"]), _ci(p["f1_ci"]), _f(p["coverage"])] for p in d["probes"]["by_checkpoint"]])]
+    L += [_table(["Block", "Point", "Arm", "N", "k", "Sessions", "F1", "95% CI", "Coverage"], [[p["block"], p["point"], p["arm"], p.get("N", "–"), p["k"], p["sessions"], _f(p["f1"]), _ci(p["f1_ci"]), _f(p["coverage"])] for p in d["probes"]["by_checkpoint"]])]
     if d["probes"]["behaviour"]:
-        L += ["Probe F1 vs next dependency-item success:", "", _table(["Block", "Point", "Arm", "Pairs", "r"], [[p["block"], p["point"], p["arm"], p["pairs"], _f(p["r"])] for p in d["probes"]["behaviour"]])]
+        L += ["Probe F1 vs next dependency-item success:", "", _table(["Block", "Point", "Arm", "N", "Pairs", "r"], [[p["block"], p["point"], p["arm"], p.get("N", "–"), p["pairs"], _f(p["r"])] for p in d["probes"]["behaviour"]])]
     L += ["## Failure taxonomy (labels per item)", ""]
     labs = gs.TAX_LABELS
-    L += [_table(["Block", "Point", "Arm", "Items", "Failed", *labs], [[t["block"], t["point"], t["arm"], _f(t["items"], 0), _f(t["failed"], 0), *[_f(t.get(f"{lab}_per_item")) for lab in labs]] for t in d["taxonomy"]])]
+    L += [_table(["Block", "Point", "Arm", "N", "Items", "Failed", *labs], [[t["block"], t["point"], t["arm"], t.get("N", "–"), _f(t["items"], 0), _f(t["failed"], 0), *[_f(t.get(f"{lab}_per_item")) for lab in labs]] for t in d["taxonomy"]])]
     L += ["## Mixed models (descriptive, D-029)", ""]
     for name, m in (d.get("glmm") or {}).items():
         if m.get("status") == "ok":
