@@ -219,7 +219,7 @@ def analyze(run, reps: int | None = None, glmm: bool = True) -> dict:
         "test_seeds": (freeze or {}).get("test_seeds"), "role": role,
         "kg": {k: kg.get(k) for k in ("needed", "source", "gate_run", "verdict", "key", "declared", "arm", "system", "notes") if k in kg},
         "test_status": (test or {}).get("status"), "primary_complete": (test or {}).get("primary_complete"),
-        "skipped_arms": (test or {}).get("skipped_arms") or [], "tiers": tiers,
+        "skipped_arms": (test or {}).get("skipped_arms") or [], "tiers": tiers, "cap_multiple": (freeze or {}).get("cap_multiple"),
     }  # fmt: skip
     decision = _clean({
         "header": header, "problems": problems, "coverage": coverage,
@@ -258,7 +258,9 @@ def render(d: dict) -> str:
     ]  # fmt: skip
     L += ["## Coverage", "", "Every plan cell and group of the test phase: the arms that ran, the arms skipped (not built) and the rows read.", ""]
     L += [_table(["Plan cell", "Group", "Status", "Arms", "Skipped", "Cells", "Samples", "Missing"], [[c["plan_cell"], c["group"], c["status"] or "–", ", ".join(c["arms"]) or "–", ", ".join(f"{s['arm']} ({s['reason']})" for s in c["skipped"]) or "–", ", ".join(c.get("cells") or []) or "–", c["samples"], c["reason"] or ""] for c in d.get("coverage") or []])]
-    L += ["## Token caps and cap hits", "", "The frozen cap per task cell (8 × S1's micro-pilot median, brief §4.5), the caps the test groups applied, and the share of samples cut short (turn cap without an answer, token cap or another Inspect limit).", ""]
+    m = d["header"].get("cap_multiple")
+    multiple = f"{m} × S1's B0, the pilot cap-hit gate's multiple (D-039)" if m is not None else "the frozen multiple × S1's B0 (not in this freeze)"
+    L += ["## Token caps and cap hits", "", f"The frozen cap per task cell ({multiple}; brief §4.5), the caps the test groups applied, and the share of samples cut short (turn cap without an answer, token cap or another Inspect limit).", ""]
     L += [_table(["Task cell", "Frozen cap", "Applied", "Samples", "Cap hits", "Rate", "Token-cap hits", "Errors", "Highest arm rate"], [[c["cell"], _f(c.get("frozen_cap")), ", ".join(f"{x:,}" for x in c.get("applied_caps") or []) or "–", c["samples"], _f(c.get("cap_hits")), _f(c.get("cap_hit_rate")), _f(c.get("token_limit_hits")), _f(c.get("errors")), (lambda a: f"{a[0]} {a[1]['cap_hit_rate']:.3f}" if a else "–")(max((c.get("arms") or {}).items(), key=lambda kv: kv[1]["cap_hit_rate"], default=None))] for c in d.get("caps") or []])]
     t = d.get("tuning") or {}
     L += ["## Tuning", ""]

@@ -534,8 +534,9 @@ def test_caps_borrow_the_nearest_measured_level_and_leave_unmeasured_families_un
 
 
 def test_the_pilot_cap_hit_gate_measures_every_arm_and_the_freeze_records_its_multiple(offline):
-    """D-039 on the offline rehearsal: every pilot arm's cap-hit rate per task cell, no re-run (the gold mock stays far
-    below 8 x B0), and the freeze records the multiple, every rate and the gate file (frozen like the caps)."""
+    """D-039/D-045 on the offline rehearsal: every pilot arm's cap-hit rates per task cell, a projection for every test
+    (arm, cell) the pilot does not run, no re-run (the gold mock stays far below 8 x B0), and the freeze records the
+    multiple, every rate (projections labelled) and the gate file (frozen like the caps)."""
     from ape.analysis.gate_stats import MAX_CAP_HIT_RATE
 
     run = _run(offline, "main")
@@ -544,17 +545,24 @@ def test_the_pilot_cap_hit_gate_measures_every_arm_and_the_freeze_records_its_mu
     assert gate["multiple"] == 8 and gate["rule"] == "token_rate" and gate["passed"] and gate["over"] == {} and [r["multiple"] for r in gate["rounds"]] == [8]
     piloted = {(a, tc) for c in run_study.phase_cells(run, "pilot") for a in rg_arm_names(c) for tc in c.spec["cells"]}
     assert {(a, tc) for a, cells in gate["rates"].items() for tc in cells} == piloted, "every pilot arm, per task cell"
-    assert all(r["samples"] > 0 and r["cap_hits"] == r["token_hits"] == 0 for cells in gate["rates"].values() for r in cells.values())
+    assert all(r["samples"] > 0 and r["token_rate"] == r["turn_rate"] == r["rate"] == 0 for cells in gate["rates"].values() for r in cells.values())
+    assert all(r["cap"] for cells in gate["rates"].values() for r in cells.values()), "at the test's caps, F2 and F3 (piloted uncapped) included"
+    # Projected: M1s (M1's), S8k3 (S1 over cap / 3) in all its cells, F7-100 (nearest level), the Sol cells (Luna's), S5 on F1-32 (the micro-pilot's).
+    proj = gate["projected"]
+    assert proj["M1s"]["F1-32"]["source"].startswith("M1's") and set(proj["S8k3"]) == {"F1-2", "F1-32", "F2-2", "F2-10", "F3-5", "F3-60", "F7-10", "F7-1000"}
+    assert {"F7-100", "F7-100 (main_sol)"} <= set(proj["S1"]) and "F1-32 (main_sol)" in proj["M1"] and "F7-100 (main_sol)" in proj["M2"]
+    assert proj["S5"]["F1-32"]["source"].startswith("the micro-pilot's") and gate["unprojectable"] == []
+    assert all(r["projected"] is True for cells in proj.values() for r in cells.values()) and gate["turn_over"] == {} and gate["over_projected"] == {}
     pilot = _manifest(run, "pilot")
-    assert pilot["cap_gate"]["multiple"] == 8 and pilot["params"]["cap_gate"] == {"base": 8, "doublings": 2, "threshold": 0.1, "rule": "token_rate"}
+    assert pilot["cap_gate"]["multiple"] == 8 and pilot["params"]["cap_gate"] == {"base": 8, "doublings": 2, "threshold": 0.1, "rule": "token_rate", "turn_caps": "refuse"}
     assert json.loads((run.phase_dir("pilot") / "pilot.json").read_text())["cap_gate"]["rates"] == gate["rates"]
     freeze = read_freeze(run)
-    assert freeze["cap_multiple"] == 8 and freeze["cap_gate"]["rates"] == gate["rates"] and freeze["cap_gate"]["passed"] is True
+    assert freeze["cap_multiple"] == 8 and freeze["cap_gate"]["rates"] == gate["rates"] and freeze["cap_gate"]["projected"] == proj and freeze["cap_gate"]["passed"] is True
     assert "config/cap_gate.json" in freeze["files"] and run_study.read_cap_gate(run) == (gate, [])
     # The pre-registration's pilot items, the cap multiple and the power re-simulation (no gate run offline: priors).
     items = json.loads((run.phase_dir("pilot") / "pilot.json").read_text())["prereg_items"]
     assert {"token caps", "cap multiple", "S7 targets per cell", "KG arm", "pilot σ and power"} == set(items)
-    assert items["cap multiple"].startswith("8 (D-039; no arm over 10% cap hits on the pilot")
+    assert items["cap multiple"].startswith("8 (D-039, D-045; no arm over 10% token-cap hits on the pilot, measured or projected")
     assert items["pilot σ and power"].startswith("σ_w 0.500, σ_g 0.300 from the gate's priors (no gate run)") and "Full table:" in items["pilot σ and power"]
     power = json.loads((run.phase_dir("pilot") / "power.json").read_text())
     assert power["key"]["reps"] == run_study.OFFLINE_POWER["reps"] and set(power["power"]["families"]) and pilot["outputs"]["power"]
@@ -599,11 +607,24 @@ def test_the_power_resimulation_takes_the_gate_pilots_sigma_and_is_reused(clean_
     assert len(calls) == 2 and calls[-1][1] == 0.6
 
 
-def _cap_gate_pilot(clean_env, monkeypatch, *, offline: bool, hits, remaining: float = 1e6):
-    """A pilot of S1 and M7 on F1-2 (B0 1,000) whose logs are fakes: `hits(arm, multiple)` -> (cap hits, token hits)
-    of 20 samples. Returns the run, its groups and every re-run's groups."""
+def _fake_samples(name: str, token: int = 0, turn: int = 0, other: int = 0, tokens: int = 100, n: int = 20):
+    """The rows `pilot_samples` gives for one fake log `x<multiple>-<arm>.eval` on F1-2 (capped at multiple x 1,000)."""
+    m, arm = name.removesuffix(".eval").split("-")
+    rows = []
+    for i in range(n):
+        tok, tr, ot = i < token, token <= i < token + turn, token + turn <= i < token + turn + other
+        rows.append({"arm": arm, "cell": "F1-2", "log_file": name, "error": False, "cap_hit": tok or tr or ot, "token_hit": tok, "turn_hit": tr, "other_hit": ot, "total_tokens": tokens, "token_limit": 1000 * int(m[1:])})
+    return rows
+
+
+def _cap_gate_pilot(clean_env, monkeypatch, *, offline: bool = False, hits, remaining: float = 1e6):
+    """A pilot of S1 and M7 on F1-2 (B0 1,000) whose logs are fakes: `hits(arm, multiple)` -> `_fake_samples` keywords
+    for its 20 samples. Returns the run, its groups and every re-run's groups."""
+    import pandas as pd
+
     run = StudyRun("main", "cg", offline=offline, runs_root=clean_env / "runs")
     run_study.write_caps(run.token_caps_path, {"F1-2": {"b0": 1000.0, "samples": 20}}, "micro-pilot")
+    run_study.write_caps(run.pilot_caps_path, {}, "pilot")
     groups = [
         {"cell": "main.pilot.a", "plan_phase": "pilot", "name": "selected", "kind": "agent", "primary": False, "arms": [{"declared": "S1", "run": "S1"}, {"declared": "M7", "run": "M7"}],
          "skipped": [], "env": {}, "cells": ["F1-2"], "deliveries": ["push"], "caps": {"F1-2": 8000}, "log_files": ["x8-S1.eval", "x8-M7.eval"], "dir": "main.pilot.a/selected-0"},
@@ -616,35 +637,35 @@ def _cap_gate_pilot(clean_env, monkeypatch, *, offline: bool, hits, remaining: f
             g["log_files"] = [f"x{g['cap_multiple']}-{a['run']}.eval" for a in g["arms"]]
         return [f for g in gs for f in g["log_files"]]
 
-    def fake_rates(logs):
-        out = {}
-        for f in logs:
-            m, arm = f.removesuffix(".eval").split("-")
-            cap, tok = hits(arm, int(m[1:]))
-            out[arm] = {"F1-2": {"samples": 20, "cap_hits": cap, "token_hits": tok, "rate": cap / 20, "token_rate": tok / 20}}
-        return out
+    def fake_samples(logs):
+        rows = [r for f in logs for r in _fake_samples(f, **hits(f.removesuffix(".eval").split("-")[1], int(f.split("-")[0][1:])))]
+        return pd.DataFrame(rows, columns=list(run_study.SAMPLE_COLUMNS))
 
     monkeypatch.setattr(run_study, "run_phase_groups", fake_run)
-    monkeypatch.setattr(run_study, "cap_hit_rates", fake_rates)
-    monkeypatch.setattr(run_study, "_log_arm", lambda f: f.removesuffix(".eval").split("-")[1])
+    monkeypatch.setattr(run_study, "pilot_samples", fake_samples)
     monkeypatch.setattr(run_study, "group_projected", lambda r, g: 1.0)
     monkeypatch.setattr(run_study, "guard_remaining", lambda r: remaining)
     return run, groups, reruns
 
 
-def test_the_cap_hit_gate_doubles_the_multiple_for_every_arm_and_reruns_only_the_arms_over(clean_env, monkeypatch):
-    """D-039 (live rule): M7 hits the cap on 25% of its F1-2 samples at 8 x B0 and 15% at 16; at 32 it is under 10%."""
-    m7 = {8: (5, 5), 16: (3, 3), 32: (1, 1)}
-    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=False, hits=lambda arm, m: m7[m] if arm == "M7" else (0, 0))
+def _gate(run, groups):
     record: dict = {"outputs": {}, "warnings": [], "log_dirs": []}
     gate, latest = run_study._cap_gate(run, record, groups)
-    assert gate["rule"] == "rate" and gate["multiple"] == 32 and gate["passed"] and gate["over"] == {}
+    return gate, latest, record
+
+
+def test_the_cap_hit_gate_doubles_the_multiple_for_every_arm_and_reruns_only_the_arms_over(clean_env, monkeypatch):
+    """D-039/D-045: M7's token-cap hits are 25% of its F1-2 samples at 8 x B0, 15% at 16 and 5% at 32."""
+    m7 = {8: 5, 16: 3, 32: 1}
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"token": m7[m]} if arm == "M7" else {})
+    gate, latest, record = _gate(run, groups)
+    assert gate["rule"] == "token_rate" and gate["multiple"] == 32 and gate["passed"] and gate["over"] == {} and gate["turn_over"] == {}
     assert [(r["multiple"], r["rerun"], r["over"]) for r in gate["rounds"]] == [(8, [], {"M7": ["F1-2"]}), (16, ["M7"], {"M7": ["F1-2"]}), (32, ["M7"], {})]
-    # Each re-run: M7 alone, the pilot's cells, under the new multiple's caps, in a log dir of its own.
+    # Each re-run: M7 alone, the pilot's cells, under the test's caps at the new multiple, in a log dir of its own.
     assert [[(a["run"], g["caps"], g["cap_multiple"]) for g in gs for a in g["arms"]] for gs in reruns] == [[("M7", {"F1-2": 16000}, 16)], [("M7", {"F1-2": 32000}, 32)]]
     assert len({g["dir"] for gs in reruns for g in gs} | {groups[0]["dir"]}) == 3 and "-x16-" in reruns[0][0]["dir"]
     assert sorted(latest) == ["x32-M7.eval", "x8-S1.eval"], "the calibration reads every arm's latest logs"
-    assert gate["rates"]["M7"]["F1-2"]["rate"] == 0.05 and gate["rates"]["S1"]["F1-2"]["rate"] == 0.0
+    assert gate["rates"]["M7"]["F1-2"]["token_rate"] == 0.05 and gate["rates"]["S1"]["F1-2"]["token_rate"] == 0.0 and gate["rates"]["M7"]["F1-2"]["cap"] == 32000
     # One cap for every arm: the test applies 32 x B0; the phases before it ran at 8.
     assert run_study.cap_multiple(run) == 32 and run_study.cap_multiple(run, "pilot") == run_study.cap_multiple(run, "tune") == 8
     assert run_study.token_caps(run)["F1-2"]["cap"] == 32000 and run_study.token_caps(run, "pilot")["F1-2"]["cap"] == 8000
@@ -655,57 +676,80 @@ def test_the_cap_hit_gate_doubles_the_multiple_for_every_arm_and_reruns_only_the
     assert run_study._pilot_projected(proj) == pytest.approx(3 * once) and once > 0
 
 
+def test_turn_cap_hits_never_raise_the_multiple_and_the_freeze_refuses_them(clean_env, monkeypatch):
+    """D-045: a bigger token cap cannot change a turn-cap hit: reported per arm and cell, never re-run, and the freeze
+    refuses while an arm's turn-cap-hit rate is over 10% (offline and live alike). Other limits are reported."""
+    for offline in (False, True):
+        run, groups, reruns = _cap_gate_pilot(clean_env / str(offline), monkeypatch, offline=offline, hits=lambda arm, m: {"turn": 4, "other": 3} if arm == "M7" else {})
+        gate, _, record = _gate(run, groups)
+        assert gate["multiple"] == 8 and reruns == [] and gate["over"] == {} and not gate["passed"]
+        assert gate["turn_over"] == {"M7": ["F1-2"]} and gate["other_over"] == {"M7": ["F1-2"]} and gate["rates"]["M7"]["F1-2"]["turn_rate"] == 0.2
+        assert run_study.read_cap_gate(run)[1] == ["D-045: {'M7': ['F1-2']} over 10% turn-cap hits on the pilot: the turn caps need a decision, not a bigger token cap"]
+        assert any("turn caps are decided" in w for w in record["warnings"]) and any("other limits" in w for w in record["warnings"])
+
+
 def test_the_cap_hit_gate_stops_at_32_and_the_freeze_refuses_an_arm_still_over(clean_env, monkeypatch):
-    """Live, every cap hit counts (B4's rule), a turn-cap one too: M7 stays over at 32 x B0 and the freeze refuses."""
-    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=False, hits=lambda arm, m: (4, 0) if arm == "M7" else (0, 0))
-    record: dict = {"outputs": {}, "warnings": [], "log_dirs": []}
-    gate, _ = run_study._cap_gate(run, record, groups)
-    assert gate["multiple"] == 32 and not gate["passed"] and gate["over"] == {"M7": ["F1-2"]} and len(reruns) == 2
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"token": 4} if arm == "M7" else {})
+    gate, _, record = _gate(run, groups)
+    assert gate["multiple"] == 32 and not gate["passed"] and len(reruns) == 2
+    assert gate["over"] == {"M7": ["F1-2", "F1-32"]} and gate["over_projected"] == {"M7": ["F1-32"]}, "M7's F1-32 (unpiloted here) projected from F1-2"
     gate_, problems = run_study.read_cap_gate(run)
-    assert gate_ == gate and problems == ["D-039: {'M7': ['F1-2']} still over 10% cap hits at 32 x B0 (the largest multiple): the caps cannot be frozen"]
+    assert gate_ == gate and problems == ["D-039: {'M7': ['F1-2', 'F1-32']} still over 10% token-cap hits at 32 x B0 (the largest multiple): the caps cannot be frozen"]
     assert any("the freeze refuses" in w for w in record["warnings"])
     run.cap_gate_path.unlink()
     assert "has not run" in run_study.read_cap_gate(run)[1][0]
     assert run_study.read_cap_gate(StudyRun("study_g", "cg", runs_root=clean_env / "runs")) == (None, []), "Study G has no caps"
     # A re-run the budget cannot afford stops before it runs.
-    run2, groups2, reruns2 = _cap_gate_pilot(clean_env, monkeypatch, offline=False, hits=lambda arm, m: (4, 4) if arm == "M7" else (0, 0), remaining=0.5)
+    run2, groups2, reruns2 = _cap_gate_pilot(clean_env / "b", monkeypatch, hits=lambda arm, m: {"token": 4} if arm == "M7" else {}, remaining=0.5)
     with pytest.raises(BudgetError, match="pilot cap re-run at 16 x B0"):
-        run_study._cap_gate(run2, {"outputs": {}, "warnings": [], "log_dirs": []}, groups2)
+        _gate(run2, groups2)
     assert reruns2 == []
 
 
-def test_offline_the_cap_hit_gate_loops_only_on_token_cap_hits(clean_env, monkeypatch):
-    """The mocks' unanswered turn-cap runs are artefacts a larger token cap cannot change: reported, never looped on."""
-    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=True, hits=lambda arm, m: (10, 0) if arm == "M7" else (0, 0))
-    record: dict = {"outputs": {}, "warnings": [], "log_dirs": []}
-    gate, _ = run_study._cap_gate(run, record, groups)
-    assert gate["rule"] == "token_rate" and gate["multiple"] == 8 and gate["passed"] and reruns == []
-    assert gate["reported"] == {"M7": ["F1-2"]} and any("not the token cap's" in w for w in record["warnings"])
-    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, offline=True, hits=lambda arm, m: (10, 10) if (arm, m) == ("M7", 8) else (0, 0))
-    gate, _ = run_study._cap_gate(run, {"outputs": {}, "warnings": [], "log_dirs": []}, groups)
-    assert gate["multiple"] == 16 and gate["passed"] and [r["rerun"] for r in gate["rounds"]] == [[], ["M7"]], "real token-cap hits loop offline too"
+def test_a_projected_rate_raises_the_multiple_without_a_rerun(clean_env, monkeypatch):
+    """D-045: S8k3 is not in the pilot. Its projection is the share of S1's samples over cap / 3 (three S1 attempts):
+    S1 at 3,000 tokens exceeds 8,000 / 3, so the multiple doubles; at 16 (cap / 3 = 5,333) it does not. Nothing re-runs."""
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"tokens": 3000} if arm == "S1" else {})
+    gate, _, _ = _gate(run, groups)
+    assert reruns == [] and gate["multiple"] == 16 and gate["passed"]
+    assert [(r["multiple"], r["rerun"], r["over_projected"].get("S8k3")) for r in gate["rounds"]] == [(8, [], ["F1-2"]), (16, [], None)]
+    assert gate["projected"]["S8k3"]["F1-2"] == {"samples": 20, "cap": 16000, "token_rate": 0.0, "turn_rate": None, "source": "S1's pilot samples over cap / 3 (three S1 attempts)", "projected": True}
+    assert gate["rounds"][1]["raised_by"] == {"measured": {}, "projected": {"S8k3": ["F1-2"]}}
 
 
-def test_cap_hit_rates_tell_token_cap_hits_from_other_cap_hits(monkeypatch):
+def test_cap_hit_rates_split_token_turn_and_other_hits_and_project_uncapped_samples():
     import pandas as pd
 
-    from ape.analysis import main_load
+    rows = [
+        {"arm": "M7", "cell": "F1-2", "error": False, "cap_hit": True, "token_hit": True, "turn_hit": False, "other_hit": False, "total_tokens": 8000, "token_limit": 8000},
+        {"arm": "M7", "cell": "F1-2", "error": False, "cap_hit": True, "token_hit": False, "turn_hit": True, "other_hit": False, "total_tokens": 500, "token_limit": 8000},
+        {"arm": "M7", "cell": "F1-2", "error": False, "cap_hit": True, "token_hit": False, "turn_hit": False, "other_hit": True, "total_tokens": 500, "token_limit": 8000},
+        {"arm": "M7", "cell": "F1-2", "error": False, "cap_hit": False, "token_hit": False, "turn_hit": False, "other_hit": False, "total_tokens": 500, "token_limit": 8000},
+        # F3-5 ran uncapped (the pilot runs a family the micro-pilot did not measure): over the test's cap is a token hit.
+        {"arm": "S1", "cell": "F3-5", "error": False, "cap_hit": False, "token_hit": False, "turn_hit": False, "other_hit": False, "total_tokens": 9000, "token_limit": None},
+        {"arm": "S1", "cell": "F3-5", "error": True, "cap_hit": False, "token_hit": False, "turn_hit": False, "other_hit": False, "total_tokens": 9000, "token_limit": None},
+        {"arm": "S1", "cell": "F3-5", "error": False, "cap_hit": False, "token_hit": False, "turn_hit": False, "other_hit": False, "total_tokens": 10, "token_limit": None},
+    ]
+    df = pd.DataFrame([r | {"log_file": "x.eval"} for r in rows], columns=list(run_study.SAMPLE_COLUMNS))
+    rates = run_study.cap_hit_rates(df, {"F1-2": 8000, "F3-5": 5000})
+    assert rates["M7"]["F1-2"] == {"samples": 4, "cap": 8000, "token_hits": 1, "token_hits_projected": 0, "turn_hits": 1, "other_hits": 1, "token_rate": 0.25, "turn_rate": 0.25, "other_rate": 0.25, "rate": 0.75}
+    assert rates["S1"]["F3-5"]["token_hits_projected"] == 1 and rates["S1"]["F3-5"]["token_rate"] == round(1 / 3, 4), "an errored sample is never a cap hit"
+    assert run_study.arms_over(rates) == {"M7": ["F1-2"], "S1": ["F3-5"]} and run_study.arms_over({"S1": {"F1-2": {"token_rate": 0.1}}}) == {}, "over is > 10%"
+    assert run_study.arms_over(rates, "turn_rate") == {"M7": ["F1-2"]}
+    assert run_study.pilot_samples([]).empty
 
-    frame = pd.DataFrame(
-        [
-            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": "token", "agent_stops": None},
-            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": None, "agent_stops": {"limit": 1, "done": 2}},  # an agent stopped on the limit
-            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": None, "agent_stops": {"turn_cap": 1}},  # a turn cap
-            {"arm": "M7", "cell": "F1-2", "cap_hit": True, "limit_hit": "cost", "agent_stops": {"limit": 1}},  # the cost limit
-            {"arm": "M7", "cell": "F1-2", "cap_hit": False, "limit_hit": None, "agent_stops": {"done": 3}},
-            {"arm": "S1", "cell": "F7-10", "cap_hit": False, "limit_hit": None, "agent_stops": None},
-        ]
-    )
-    monkeypatch.setattr(main_load, "load_main", lambda files, require_cost=True: frame)
-    rates = run_study.cap_hit_rates(["x.eval"])
-    assert rates["M7"]["F1-2"] == {"samples": 5, "cap_hits": 4, "token_hits": 2, "rate": 0.8, "token_rate": 0.4}
-    assert rates["S1"]["F7-10"]["rate"] == 0.0 and run_study.cap_hit_rates([]) == {}
-    assert run_study.arms_over_cap(rates, "rate") == {"M7": ["F1-2"]} and run_study.arms_over_cap({"S1": {"F1-2": {"rate": 0.1}}}, "rate") == {}, "over is > 10%"
+
+def test_projections_for_m1s_unpiloted_levels_and_sol_cells(clean_env):
+    import pandas as pd
+
+    run = StudyRun("main", "pj", offline=True, runs_root=clean_env / "runs")
+    r = lambda rate, cap=1000: {"samples": 20, "cap": cap, "token_rate": rate, "turn_rate": 0.0}  # noqa: E731
+    rates = {"M1": {"F1-32": r(0.2)}, "S1": {"F7-10": r(0.0, 100), "F7-1000": r(0.15, 900)}}
+    proj, missing = run_study.projected_rates(run, pd.DataFrame(columns=list(run_study.SAMPLE_COLUMNS)), rates, {})
+    assert proj["M1s"]["F1-32"]["token_rate"] == 0.2 and proj["M1s"]["F1-32"]["source"].startswith("M1's (measured)")
+    assert proj["S1"]["F7-100"]["token_rate"] == 0.15 and "F7-1000" in proj["S1"]["F7-100"]["source"], "equidistant levels: the higher rate"
+    assert proj["M1"]["F1-32 (main_sol)"]["token_rate"] == 0.2 and proj["S1"]["F7-100 (main_sol)"]["source"].startswith("main_luna's S1 F7-100")
+    assert "S8k3 F1-2" in missing and "S5 F1-32" in missing and all(x["projected"] for c in proj.values() for x in c.values())
 
 
 def test_b0_counts_every_model_of_a_sample_and_skips_errored_ones(monkeypatch):
