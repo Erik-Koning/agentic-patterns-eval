@@ -317,6 +317,12 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 
 **Still open for the Study G pre-registration** (BUILD_PLAN §4): G-H1's single-agent reference, CM-native at one tier, S1+KG and S-subiso, and the capability anchor near the ceiling.
 
+**D-029 (2026-10-03, BUILD_PLAN B4 tooling question).** Confirmatory inference in the main study and Study G is design-based; the mixed-effects logistic model is descriptive.
+- **Why:** R is not installed, so lme4 would add a toolchain; bambi/PyMC is Bayesian and far too slow for the power simulations every confirmatory test needs (thousands of refits); statsmodels has no frequentist crossed-effects logistic GLMM. The brief already names design-based tests for every claim (§7.4: paired sign-flip permutation on task-level means, Holm within each hypothesis family, TOST or one-sided tests with pre-registered margins, clustered bootstrap CIs), and the gate validated this approach end to end.
+- **Main study:** each contrast is paired on tasks (task-level epoch means), resampled or sign-flipped at the **world** level, since tasks within a world share their KB (the gate's finding). Interactions (H2's 2×2, arm × tier) are paired difference-in-differences per task. The S8 frontier is interpolated per cost meter from exhaustive subsampling of the S1 pool.
+- **Study G:** sessions are the clusters. G-H1's slope is a session-clustered regression of per-session paired differences on measured capability; G-H2's equivalence and slopes and G-H3's shares likewise.
+- **GLMM:** `statsmodels` `BinomialBayesMixedGLM` (variational Bayes; no new dependency) fits the brief's `success ~ arm * log_knob + (1 | task) + (1 | task:arm)` and Study G's `success ~ topology * capability + (1 | session) + (1 | item)` as descriptive models only. No claim rests on them.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

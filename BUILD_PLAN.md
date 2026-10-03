@@ -85,7 +85,7 @@ The gate can run live at any time during this build. The main study needs the ga
 
 ## 4. Open questions for later (not blocking the build)
 
-- **GLMM tooling (B4):** R via lme4 adds an R dependency; bambi is Bayesian, so frequentist claims would need re-wording. Decide in B4.
+- ~~**GLMM tooling (B4)**~~ **Decided (D-029):** confirmatory tests are design-based (brief §7.4), clustered by world (main) or session (Study G); the GLMM is descriptive, via statsmodels' variational-Bayes mixed GLM. No R.
 - **G-H1's single-agent reference (B11):** today S1's overflow counts as failure for the rest of the session, so the harness sets the S1-vs-multi-agent gap. Choose before the Study G pre-registration.
 - **CM-native at one tier only,** **S1+KG and S-subiso** (in the hypotheses, not the plan), and the **capability anchor near the ceiling**: decide in B11.
 - **Contingency** ($238, 4.8%, against the brief's 20%): recalibrate after the gate pilot and Study G's micro-pilot.
