@@ -7,12 +7,12 @@
 | Study | Phases (conservative $) | Conservative | Expected | FX-5 target |
 |---|---|---|---|---|
 | Gate | smoke 3 · anchor 11 · builds 57 · tuning 8 · pilot 13 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **214** | 188 | ≤ 700 |
-| Main study | builds 5 · micro-pilot 10 · tuning 31 · pilot 14 · A 118 · B 142 · C 25 · F 820 | **1,164** | 916 | ≤ 1,000 |
+| Main study | builds 5 · micro-pilot 10 · tuning 31 · pilot 13 · A 118 · B 136 · C 25 · F 832 | **1,170** | 920 | ≤ 1,000 |
 | Study G | micro-pilot 11 · tuning 24 · capability anchor 51 · context management 1,737 · topology 1,556 | **3,378** | 2,130 | ≤ 2,700 |
-| **Total** | | **4,756** | **3,235** | ≤ 5,000 |
-| Contingency | $5,000 − conservative total | 244 | | ~600 |
+| **Total** | | **4,762** | **3,239** | ≤ 5,000 |
+| Contingency | $5,000 − conservative total | 238 | | ~600 |
 
-- **By tier** (conservative / expected): Sol-high 2,006 / 1,427 · Astra-high 1,955 / 1,222 · Luna-high 737 / 551 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
+- **By tier** (conservative / expected): Sol-high 2,006 / 1,427 · Astra-high 1,955 / 1,222 · Luna-high 744 / 555 · Luna-low 44 / 21 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
 - **Pilot σ cell (D-026, 2026-10-02):** +$8 conservative. The pilot builds 8 worlds per cell (was 4; +$6.19) and runs APG* and LGR* on the 4 new ones (`gate.pilot.sigma`, +$2.17), so σ is estimated from 8 worlds per cell.
 - **PC1 fidelity (D-025, 2026-10-02):** the anchor grew about $5: answer contexts mapped to LightRAG 1.2.5's caps (26.5K tokens) and a second scorer's judge calls; its bge embeddings run locally ($0).
 - **The total fits.** Main study and Study G are over their FX-5 targets by $164 and $678. The gate's underspend covers part of that. The conservative scenario prices every cached token at the full input price, so expected spend is ≈ $3.2K. The orchestrator's budget check (FX-6) stops any phase whose projected cost exceeds what remains.
@@ -66,3 +66,4 @@ After the gate pilot (and Study G's micro-pilot), run `calibrate` on its logs. T
 If the total drops, revert cuts in reverse order (C3 first). To revert one, edit its cells and its `applied:` flag; `load_plan` checks that the two agree.
 
 FX-6 calls `projected_cost()` and `remaining()` before each phase. It refuses the phase if the projection is larger than what is left.
+- **D-028 (2026-10-03):** +$6 net. Dropping S5-P0 (no persona content) saves $6.5; the Luna F7-100 tier cell (+$12.25) and the F7-100 and F1-2 KG builds (+$0.6) make the tier contrast and the micro-pilot's S5 runnable. Study G's larger tool files for short sessions don't change the projection (session views are priced at 0.6 W).

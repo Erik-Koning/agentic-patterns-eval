@@ -160,7 +160,7 @@ WS8 sharpens these drafts into pre-registered form: exact contrast, margin, test
 - **H1b Ensembling.** On F2, S8 at M1's realized cost ≥ M1. On F1-high, S8 < M1.
 - **H1c Communication.** M7 − S8 at matched cost lies within ±3 pp (equivalence, TOST).
   - Tier B tests which part of communication matters: content (M7 vs M9a) and interactivity (M7 vs M9b).
-- **H1d Concurrency is latency-only.** |M1 − M1s| accuracy < 2 pp (TOST), and the wall-clock ratio M1/M1s < 0.6 on F1-high.
+- **H1d Concurrency is latency-only.** |M1 − M1s| accuracy < 2 pp (TOST), and the wall-clock ratio M1/M1s < 0.6 on F1-high. **Descriptive only (D-028):** at n = 50 the equivalence test cannot reach ±2 pp, so the difference and the latency ratio are reported with intervals.
 - **H1e Specialization.** M2 − M1k lies within ±3 pp (TOST).
 
 ### H2: KG-compiled context
@@ -170,8 +170,8 @@ WS8 sharpens these drafts into pre-registered form: exact contrast, margin, test
   - Multi-agent keeps its advantage on F1-high and F4-high.
 - **H2-struct (the product claim).** With the **extracted** KG, S5 > S3s on F7-high-relational and F3-high.
   - Secondary: the gap S5o − S5 (oracle KG minus extracted KG) is reported as the cost of extraction error.
-- **H2b Persona.** S5 − S5-P0 lies within ±2 pp (TOST).
-- **H2c KB scaling.** Over log(KB size) on F7:
+- **H2b Persona.** S5 − S5-P0 lies within ±2 pp (TOST). **Dropped (D-028):** the worlds carry no persona content, so S5-P0 would equal S5.
+- **H2c KB scaling.** Over log(KB size) on F7 (**descriptive only, D-028:** slopes reported with intervals; the relational-vs-independent clause is not tested, since the plan has no independent cells):
   - S1's slope is negative.
   - S5's slope is within ±2 pp per decade (TOST).
   - S5 is flatter than S3s **only** under relational policies (precedence/exceptions), not under independent policies.
@@ -342,6 +342,8 @@ Any claim about a mechanism must cite a single-switch row. Otherwise it is label
 - **Validation:** the generator's own solver reaches 100% on gold evidence (S6 sanity), plus a human spot-check of 20 tasks per family.
 
 ### 5.4 F0 anchors (real benchmarks; programmatic scoring where available)
+
+**Deferred to Tier B (D-028).** None of the anchors below is in the run plan or the budget. The only wired real benchmark is GraphRAG-Bench Medical, used by the gate's PC1 to validate the LightRAG setup. Results are claims about the synthetic families; generalising to real benchmarks is future work.
 
 These were verified in the prior review on 2026-09-29; re-verify.
 

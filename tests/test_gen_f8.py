@@ -329,3 +329,33 @@ def test_unbuilt_arms_are_refused():
 
     with pytest.raises(ValueError, match="not built yet"):
         f8_session_agent(arm="CM-sum")
+
+
+def test_plan_knobs_make_short_sessions_cross_the_window_like_long_ones():
+    """D-028: the run plan's F8 knobs put the reference session's W crossing near 0.70 of the session for the
+    20- and 24-case cells, as the default does for 40 cases; knobs reach the generator through make_world."""
+    import statistics
+
+    import pytest
+
+    from ape.budget import load_plan
+    from ape.worlds import gen_f8
+    from ape.worlds.generate import make_world
+
+    plan = load_plan()
+    cells = [c for c in plan.cells if c.study == "study_g" and c.spec.get("kind") == "session" and c.spec.get("knobs")]
+    assert {c.id for c in cells} >= {"g.topo.luna", "g.topo.sol", "g.topo.astra", "g.cm.astra-high"}
+    for cell in cells:
+        n = int(cell.spec["N"])
+        fractions = []
+        for i in range(5):
+            w = make_world("F8", str(n), "dev", i, 0, knobs=cell.spec["knobs"])
+            assert w.entities["session"]["knobs"]["output_tokens"] == cell.spec["knobs"]["output_tokens"]
+            crossing = gen_f8.reference_stats(w)["w_crossing_item"]
+            assert crossing is not None, f"{cell.id}: session {i} never crosses W"
+            fractions.append(crossing / n)
+        assert 0.55 <= statistics.median(fractions) <= 0.85, (cell.id, fractions)
+    with pytest.raises(ValueError, match="F8 only"):
+        make_world("F7", "10", "dev", 0, 2, knobs={"output_tokens": 2000})
+    with pytest.raises(ValueError, match="unknown F8 knobs"):
+        make_world("F8", "10", "dev", 0, 0, knobs={"tokens": 2000})

@@ -12,7 +12,7 @@
 **Offline state:**
 - 513 tests pass. Two opt-in tests also pass when enabled with `APE_TEST_BGE=1`; they use the real bge model.
 - `run_gate all --offline` runs all nine phases, and `readiness/smoke.py --dry` passes.
-- The cost model prints **$4,756 conservative / $3,235 expected**.
+- The cost model prints **$4,762 conservative / $3,239 expected** (D-028 added $6).
 - **Nothing has run live.**
 
 ## 1. Bottom line
@@ -27,7 +27,7 @@
 1. **PC1 (the LightRAG anchor).**
    - A faithful setup passes about 40% of the time with gpt-4o-mini, after the D-025 fidelity work (it was 10–15%). The remaining gap comes from LightRAG 1.5.7 vs 1.2.5.
    - If PC1 fails: diagnose it (judge parse rates are now recorded), then either accept it with a written diagnosis, which puts a caveat in the report, or stop.
-2. **Budget headroom:** $244, or 4.9%. The live smoke re-projects the program from its real calls, and warns if the total passes $5,000 or the gate passes $700.
+2. **Budget headroom:** $238, or 4.8%. The live smoke re-projects the program from its real calls, and warns if the total passes $5,000 or the gate passes $700.
 3. **Power:**
    - P(unqualified GO) at no true difference is 0.84 at 16 worlds per cell, 0.885 with the extension.
    - At 12 worlds it is only 0.68. That is the D-017 Sol-builder path, which costs +$1,074 and needs approval.
@@ -98,10 +98,8 @@ uv run --locked python -m ape.run_gate all --run-id gate-1        # build-dev, t
 | Build cells for F7-100 worlds and F1-2 KG builds | S | Planned cells run on them, but nothing builds them. |
 
 **Design issues to decide** (§6):
-- **H6 is confounded:** Sol runs F7-100 while Luna runs F7-1000.
-- **H1d is underpowered:** n = 50 gives ±6–10 pp against a 2 pp claim.
-- **K3 is untestable:** the worlds have no persona content.
-- **K4's relational-vs-independent clause** is untestable as planned.
+- ~~H6 is confounded~~: fixed by D-028 (Luna F7-100 cell).
+- ~~H1d underpowered, K3 untestable, K4's clause untestable~~: H1d and K4 are descriptive and K3 is dropped (D-028).
 - **F1's context pressure is moderate:** about 13K tokens of records at N = 32 against W = 128K. The micro-pilot should confirm that it stresses a single context.
 
 ## 5. Study G
@@ -128,7 +126,7 @@ uv run --locked python -m ape.run_gate all --run-id gate-1        # build-dev, t
 
 **Measured, and design issues** (§6):
 - The reference solver needs 2.3 generations per item against a prior of 6, so Study G is probably over-priced.
-- Only N = 40 sessions overflow W = 32K. The N = 20 and N = 24 cells may not overflow at all.
+- ~~Short sessions don't overflow~~: fixed by D-028 (larger tool files; median crossing at 0.70 of the session).
 - The G-H1 single-agent reference is still open.
 - CM-native runs at one tier only.
 - S1+KG and S-subiso are in the hypotheses but not in the plan.
@@ -140,18 +138,18 @@ uv run --locked python -m ape.run_gate all --run-id gate-1        # build-dev, t
 |---|---|---|
 | 1 | Key (O-1) and backup destination | A dedicated project key with about a $300 limit now, raised per study. `APE_BACKUP_DIR` on an external or synced disk. |
 | 2 | Names (O-3) and the skeptic's sign-off | Needed before `tune`. |
-| 3 | Contingency at 4.9% against the brief's 20% | Accept for now with staged spending. Recalibrate after the smoke and the pilot, and apply cuts C4/C5 then if needed. |
+| 3 | Contingency at 4.8% against the brief's 20% | Accept for now with staged spending. Recalibrate after the smoke and the pilot, and apply cuts C4/C5 then if needed. |
 | 4 | D-017 Sol builder (+$1,074) | Decide only if Luna fails. First try revising the authoring prompt on dev; Sol would also leave the gate underpowered at 12 worlds. |
 | 5 | If PC1 fails | Diagnose first. Accept only with a written diagnosis (the report carries a caveat); a high judge parse-failure rate makes PC1 "not evaluable", which can't be accepted. |
-| 6 | H6 tier confound | Add a Luna F7-100 cell (about $15) plus builds. |
-| 7 | Main-study scope | Drop K3, report H1d and the H2c TOST as descriptive, and reduce H5 to D1, D2 and D6. |
-| 8 | Study G overflow and G-H1 | Raise tool-output size for the N = 20 and N = 24 cells, and choose the single-agent reference. |
-| 9 | Anchors other than GraphRAG-Bench | Formally defer them to Tier B. |
+| 6 | H6 tier confound | ✅ Done (D-028): Luna F7-100 cell and the F7-100/F1-2 builds. |
+| 7 | Main-study scope | ✅ K3 dropped; H1d and H2c descriptive (D-028). Still open: reduce H5 to D1, D2 and D6. |
+| 8 | Study G overflow and G-H1 | ✅ Overflow fixed (D-028: 2,250- and 1,750-token tool files). Still open: G-H1's single-agent reference (BUILD_PLAN §4). |
+| 9 | Anchors other than GraphRAG-Bench | ✅ Deferred to Tier B (D-028). |
 
 ## 7. Engineering plan
 
 1. ~~Gate hardening, the reliability fixes and the second review~~: done. Next is the live sequence in §3.
-2. **The main-study runner and its own seed range,** generalizing `run_gate` (M).
+2. **The build plan in `BUILD_PLAN.md`** (B1–B12), starting with the study runner (B1), the multi-agent arms (B2) and the session runner (B7).
 3. **The multi-agent arms and their tuning grids** (L). Study G's topology block reuses them.
 4. **The Study G harness:** the CM arms, S-CM*, the `cm` role and session checkpointing (M–L).
 5. **Analysis and power for the main study and Study G, then the two pre-registrations** (L).

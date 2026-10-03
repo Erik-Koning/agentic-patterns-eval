@@ -24,8 +24,8 @@ Last updated 2026-09-30.
 |---|---|---|---|---|---|---|---|
 | K1 | Graph structure beats equally engineered flat retrieval on relational policies and tool scoping | brief H2-struct | APG*, LGR*, S3s | F7 (descriptive, id_only, messy), F3 | Success; error labels (missed_exception, wrong_tool); evidence recall | Paired contrasts per rendering and delivery mode | 🟡 data from the gate and its id_only/messy runs; the report shows the contrasts, but no multiplicity-corrected test across renderings and modes is implemented |
 | K2 | KG delivery substitutes for multi-agent specialization (negative delivery × architecture interaction) | brief H2 | S1, S5, M1, M1k | F3, F7 | Success | 2×2 interaction | ❌ needs M1, M1k |
-| K3 | Persona content adds ≈ 0 on objective tasks | brief H2b | S5 vs S5-P0 | F3, F7 | Success | TOST ±2 pp | ❌ needs persona content in worlds |
-| K4 | Monolith degrades with KB size; KG stays flat (only when policies are relational) | brief H2c | S1, S5, S3s | F7 levels 10/100/1000 × relational/independent | Success vs log(KB size) | Slope interaction; TOST on the S5 slope | 🟡 generators and arms exist; add level 100 and the independent variant to the run plan |
+| K3 | Persona content adds ≈ 0 on objective tasks | brief H2b | S5 vs S5-P0 | F3, F7 | Success | TOST ±2 pp | ⏸ **dropped (D-028):** the worlds carry no persona content, so S5-P0 would equal S5; S5-P0 is removed from the run plan |
+| K4 | Monolith degrades with KB size; KG stays flat (only when policies are relational) | brief H2c | S1, S5, S3s | F7 levels 10/100/1000 × relational/independent | Success vs log(KB size) | **Descriptive (D-028):** slopes and their CIs are reported; no confirmatory TOST (two levels give a slope CI of about ±4.7 pp per decade against ±2 pp). The relational-vs-independent clause is not tested: the plan has no independent cells | 🟡 generators and arms exist (F7-10/100/1000) |
 | K5 | Authored-graph quality survives realistic documents | EXPERIMENT_AUDIT §3 | APG*, LGR* (authored vs oracle) | F7 messy vs descriptive | Success gap and extraction coverage | Paired contrast messy vs clean | ✅ generator; ⏳ dev diagnostic |
 
 ## M: mechanism attribution (single-switch contrasts)
@@ -35,7 +35,7 @@ Last updated 2026-09-30.
 | M1 | Context isolation drives multi-agent gains on breadth tasks | brief H1a | M1s vs S9 | F1, F2 | Success | Paired contrast | ❌ |
 | M2 | Ensembling beats coordination at matched cost on dependency chains | brief H1b | S8 vs M1 | F1, F2 | Success at matched realized cost | Frontier interpolation | ❌ |
 | M3 | Communication adds ≈ 0 at matched cost | brief H1c | M7 vs S8, M9a/b | F1, F2 | Success | TOST ±3 pp | ❌ |
-| M4 | Concurrency affects latency only | brief H1d | M1 vs M1s | F1 | Success, wall-clock | TOST; latency ratio | ❌ |
+| M4 | Concurrency affects latency only | brief H1d | M1 vs M1s | F1 | Success, wall-clock | **Descriptive (D-028):** the accuracy difference and the latency ratio are reported with CIs; no equivalence claim (n = 50 gives a 90% CI of ±6–10 pp against ±2 pp) | ❌ needs M1, M1s |
 | M5 | Role specialization adds ≈ 0 | brief H1e | M2 vs M1k | F3, F7 | Success | TOST ±3 pp | ❌ |
 
 ## C, F, A, P: cost meters, faults, auditability, predictability

@@ -287,6 +287,36 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
   - The freeze refuses unless the named run is a frozen, analysed primary run with verdict INCONCLUSIVE (extension) or NO_GO (fix cycle). It also refuses a second extension or fix cycle of the same run, found by scanning runs/*/freeze.json.
 - **Smaller.** Rows with NaN success now raise a counted `NaNOutcomeWarning` instead of being dropped silently. `load_results` never produces them.
 
+**D-028 (2026-10-03, user: "do/fix #1–#5 before we enable the main and G to be runnable").** Five design decisions for the main study and Study G, applied to the plan, config and documents before the build (BUILD_PLAN.md §0).
+1. **The persona test is dropped (K3 / brief H2b).** The worlds carry no persona content, so S5-P0 would equal S5. S5-P0 is removed from `main.pilot.b`, `main.B.arms` and the budget arms (−$6.5).
+2. **The tier confound is fixed (H6).**
+   - The problem: `main.F.sol` runs F7-100 while Luna ran only F7-1000.
+   - New cell `main.F.luna-f7-100`: S1, S5, M1, M2 × 100 tasks × 3 epochs (+$12.25).
+   - `main.build.kg` gains F7-100 (both tiers' S5) and F1-2 (the micro-pilot's S5) builds, 11 worlds each (+$0.6).
+3. **Underpowered tests are descriptive.** H1d / M4 (concurrency: n = 50 gives ±6–10 pp against a 2 pp margin) and H2c / K4 (KB scaling: two levels, slope CI about ±4.7 pp per decade against ±2 pp) are reported with intervals, not as confirmatory equivalence tests. K4's relational-vs-independent clause is not tested; the plan has no independent cells.
+4. **Study G's short sessions now cross the window.**
+   - At the default ~1,000-token tool files, 20- and 24-case sessions never cross W = 32K.
+   - 20 reference sessions per setting were measured with the default 40-case cells as the reference:
+
+     | Cell | Tool-file tokens | Median crossing (fraction of the session) |
+     |---|---|---|
+     | 40-case (default) | 1,000 | 0.70 |
+     | 20-case | 2,000 | 0.80 |
+     | 20-case | **2,250** | **0.70** |
+     | 24-case | 1,500 | 0.83 |
+     | 24-case | **1,750** | **0.71** |
+     | 24-case | 2,000 | 0.62 |
+
+   - The run plan sets `knobs: {output_tokens: 2250}` on `g.topo.*` and `{output_tokens: 1750}` on `g.cm.astra-high`. `make_world` passes F8 knobs to the generator, and a test checks the plan's crossings.
+   - The 10-case cell stays a no-overflow control.
+   - Session views are priced at 0.6 W, so the projection is unchanged.
+   - Real agents add text and reasoning to the view, so they cross earlier than the reference.
+5. **External benchmarks are deferred to Tier B:** τ³-bench, AppWorld, BrowseComp-Plus and CoDA (brief §5.4, EVAL_DESIGN). GraphRAG-Bench Medical remains the gate's PC1 anchor only.
+
+**Budget:** $4,762 conservative / $3,239 expected (main $1,170), contingency $238.
+
+**Still open for the Study G pre-registration** (BUILD_PLAN §4): G-H1's single-agent reference, CM-native at one tier, S1+KG and S-subiso, and the capability anchor near the ceiling.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

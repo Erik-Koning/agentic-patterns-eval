@@ -47,10 +47,23 @@ def require_test_split_unlocked(split: str) -> None:
 
 
 def make_world(
-    family: str, level: str, split: str, index: int, n_tasks: int, relational: bool = True, exception_style: str = "descriptive", seed_base: int | None = None
+    family: str,
+    level: str,
+    split: str,
+    index: int,
+    n_tasks: int,
+    relational: bool = True,
+    exception_style: str = "descriptive",
+    seed_base: int | None = None,
+    knobs: dict | None = None,
 ) -> World:
-    """World `index` of `split`: seed `seed_base + index` (default `split_seed_base(split)`)."""
+    """World `index` of `split`: seed `seed_base + index` (default `split_seed_base(split)`).
+
+    `knobs` are F8 generator settings from a run_plan session cell (`output_tokens`, `memo_density`,
+    `dependency_density`; D-028); other families take none."""
     seed = (split_seed_base(split) if seed_base is None else int(seed_base)) + index
+    if knobs and family != "F8":
+        raise ValueError(f"generator knobs {sorted(knobs)} apply to F8 only, not {family}")
     if family == "F7":
         return gen_f7.generate(level, relational, split, seed, n_tasks, exception_style)
     if family == "F3":
@@ -58,7 +71,10 @@ def make_world(
     if family == "F5":
         return gen_f5.generate(level, split, seed, n_tasks)
     if family == "F8":
-        return gen_f8.generate(level, split, seed, n_tasks)  # one session; the level is N, n_tasks is ignored
+        allowed = {"output_tokens", "memo_density", "dependency_density"}
+        if unknown := set(knobs or {}) - allowed:
+            raise ValueError(f"unknown F8 knobs {sorted(unknown)}; allowed: {sorted(allowed)}")
+        return gen_f8.generate(level, split, seed, n_tasks, **(knobs or {}))  # one session; the level is N, n_tasks is ignored
     if family in ("F1", "F2"):
         return gen_registry.generate(family, level, split, seed, n_tasks)
     raise ValueError(family)

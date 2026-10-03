@@ -41,6 +41,8 @@ Power simulation: `power/power_sim.py` (run with `uv run --with numpy --with sci
 
 ## 1. Task taxonomy and eval sets
 
+> **Status (D-028, 2026-10-03):** the public benchmarks below are deferred to Tier B. The program runs on the synthetic families of ORCHESTRATOR_BRIEF_v2 §5 (F1, F2, F3, F5, F7, F8), with GraphRAG-Bench Medical as the gate's PC1 anchor only.
+
 ### 1.1 Patterns under test (with topology tags)
 
 | ID | Pattern | Topology class | Control flow | Reference implementation (hold constant) |

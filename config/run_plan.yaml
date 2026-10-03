@@ -12,7 +12,8 @@
 #   build    one sample = one world. Fields: worlds {cell: count}, systems (default [apg, lightrag]);
 #            gate build cells may set exception_style (F7 worlds; default descriptive).
 #   session  Study G F8 sessions. Fields: arms, N (items per session), sessions (per arm), epochs; window and
-#            threshold from `study_g` below.
+#            threshold from `study_g` below; optional knobs {output_tokens, memo_density, dependency_density}
+#            passed to the F8 generator (D-028: short sessions get larger tool files so they cross W).
 #   anchor   GraphRAG-Bench questions: n_tasks per mode, modes.
 #   fixed    a capped spend (usd).
 # Every cell takes `profile` (config/models.yaml; default: the study's), optional `effort` (agent effort
@@ -98,8 +99,8 @@ studies:
     phases:
       builds:
         - {id: main.build.kg, kind: build, systems: [apg],
-           worlds: {F7-10: 11, F7-1000: 11, F3-5: 11, F3-60: 11, F1-32: 11},
-           note: "KG arm (S5, M1k, M2) graphs: 9 test + 2 pilot worlds per KG condition; LightRAG instead if the gate is NO-GO"}
+           worlds: {F7-10: 11, F7-100: 11, F7-1000: 11, F3-5: 11, F3-60: 11, F1-2: 11, F1-32: 11},
+           note: "KG arm (S5, M1k, M2) graphs: 9 test + 2 pilot worlds per KG condition; LightRAG instead if the gate is NO-GO. F7-100 (Study F, both tiers) and F1-2 (micro-pilot S5) added by D-028"}
       micro_pilot:
         - {id: main.micro-pilot, arms: [S1, S5, M1], cells: [F1-2, F1-32, F7-10, F7-1000], n_tasks: 20, epochs: 2,
            note: "brief §7.1; S5 on F1 as the KG-on-F1 probe"}
@@ -108,7 +109,7 @@ studies:
         - {id: main.tune.b, arms: {S3s: 4, M1: 4, M1k: 4, M2: 4}, cells: [F3-60, F7-1000], n_tasks: 20, epochs: 1}
       pilot:
         - {id: main.pilot.a, arms: [S1, S9, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 20, epochs: 1}
-        - {id: main.pilot.b, arms: [S1, S3s, S5, S5-P0, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
+        - {id: main.pilot.b, arms: [S1, S3s, S5, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
            n_tasks: 20, epochs: 1}
       study_a:
         - {id: main.A.s1-pool, arms: [S1], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 100, epochs: 8,
@@ -117,7 +118,7 @@ studies:
         - {id: main.A.m1s, arms: [M1s], cells: [F1-32], n_tasks: 50, epochs: 3}
       study_b:
         - {id: main.B.s1-pool, arms: [S1], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 100, epochs: 8}
-        - {id: main.B.arms, arms: [S3s, S5, S5-P0, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
+        - {id: main.B.arms, arms: [S3s, S5, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
            n_tasks: 100, epochs: 3}
       study_c:
         - {id: main.C.a, arms: [S1, S8k3, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 15, epochs: 2,
@@ -126,6 +127,8 @@ studies:
       study_f:
         - {id: main.F.luna, arms: [S5, M2], cells: [F1-32], n_tasks: 100, epochs: 3,
            note: "Luna cells not already in Studies A/B (S1, M1 on F1-32 and all four on F7-1000 are reused)"}
+        - {id: main.F.luna-f7-100, arms: [S1, S5, M1, M2], cells: [F7-100], n_tasks: 100, epochs: 3,
+           note: "D-028: Luna at the same KB size as main.F.sol, so the tier contrast (H6) is not confounded with KB size"}
         - {id: main.F.sol, profile: main_sol, arms: [S1, S5, M1, M2], cells: [F1-32, F7-100], n_tasks: 100, epochs: 3,
            note: "tier replication on Sol (4 arms x 2 families x 3 epochs); F7-100 not F7-1000: KB scaling is K4's question (Luna), and the 83K monolith x Sol price dominated the budget"}
 
@@ -159,11 +162,13 @@ studies:
         - {id: g.cm.sol-low, kind: session, profile: study_g_sol, effort: low, arms: [CM0, CM-sum, CM-todo, O-state],
            N: 40, sessions: 8, epochs: 2, enabled: false}
         - {id: g.cm.astra-high, kind: session, profile: study_g_astra, arms: [CM0, CM-sum, CM-todo, O-state],
-           N: 24, sessions: 4, epochs: 2}
+           N: 24, sessions: 4, epochs: 2, knobs: {output_tokens: 1750}}
       topology:
-        - {id: g.topo.luna, kind: session, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2}
-        - {id: g.topo.sol, kind: session, profile: study_g_sol, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2}
-        - {id: g.topo.astra, kind: session, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2}
+        - {id: g.topo.luna, kind: session, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2, knobs: {output_tokens: 2250}}
+        - {id: g.topo.sol, kind: session, profile: study_g_sol, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2,
+           knobs: {output_tokens: 2250}}
+        - {id: g.topo.astra, kind: session, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2,
+           knobs: {output_tokens: 2250}}
 
 # Right-sizing cuts (FX-5), applied IN ORDER while the conservative total exceeded budget.total_usd, stopping as
 # soon as it fit. `applied` cuts are already reflected in the cells above. Never cut: gate primary sizes, epochs of

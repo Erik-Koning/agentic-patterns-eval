@@ -75,7 +75,6 @@ arms:
   S7: {context: 150, compile: per_query, kg: null, embed: false, cache: per_query}
   # Main study (ORCHESTRATOR_BRIEF_v2 §4.2). S5 = the KG arm the gate selects (APG* if GO).
   S5: {like: APG*}
-  S5-P0: {like: APG*}
   S8k3: {like: S1, multiplier: 3.0}   # self-consistency k=3 as extra runs (Study C)
   S9: {like: S1, multiplier: 1.3}     # plan-then-execute: one planning pass in the same context
   M1: {like: S1, multiplier: 2.5, cache: multi_agent}    # orchestrator + 3 workers, monolith delivery
@@ -137,7 +136,8 @@ anchor_calls:
 # [measured offline] gen_f8 reference trajectory (the fewest possible calls, no reasoning or text; 10 seeds each,
 # default knobs, tool files ~1.1K tokens): 2.25-2.3 generations per item; CM0 mean view before W 8.6K (N=10),
 # 13.4K (N=20), 16.5K (N=24), 17.4K (N=40, ~0.54 W); W crossed at items 25-33 for N=40, never for N <= 24;
-# O-state mean view 3.1K-3.7K (N=10-40). These are lower bounds for a real agent, so the [given] priors below
+# O-state mean view 3.1K-3.7K (N=10-40). D-028 knobs: N=20 cells use 2,250-token tool files and the N=24 cell 1,750, so their reference
+# sessions cross W at a median 0.70 of the session (as N=40 at the default 1,000); views stay within the 0.6 W prior. These are lower bounds for a real agent, so the [given] priors below
 # stay until the micro-pilot calibrates them (`python -m ape.budget calibrate`).
 study_g:
   calls_per_item: 6                       # [given] F8 (reference minimum 2.25: see above)
