@@ -325,6 +325,7 @@ def test_the_dry_smoke_passes_every_check_end_to_end(clean_env, monkeypatch):
     assert report["spend_usd"] == 0.0 and 0 < report["projection_usd"]["total"] <= smoke.DEFAULT_MAX_USD
     orch = report["checks"]["orchestrator"]["measured"]
     assert orch["phases"] == dict.fromkeys(sc.SMOKE_PHASES, "done") and "is a smoke run" in orch["freeze_refusal"]
+    assert Path(orch["run_dir"]).name.startswith("smoke-dry-"), "a fresh orchestrator run per invocation"
     assert report["checks"]["recovery"]["measured"]["retries"] == 1
     # D017 measures through `ape.build_quality`, the code run_gate's build-dev check uses: one decisive F7-100 world.
     d017 = report["checks"]["D017"]["measured"]
@@ -585,11 +586,11 @@ def test_the_cost_model_check_runs_on_a_crafted_log_and_ledger_and_never_writes_
 
 
 def test_the_live_record_keeps_each_checks_latest_result():
-    report1 = {"git": {"commit": "a" * 40, "dirty": False}, "models": {"profile": "gate", "overrides": {"agent": None}}, "snapshots": {"gpt-6-luna": "s1"}, "started_utc": "t1", "finished_utc": "t1",
+    report1 = {"git": {"commit": "a" * 40, "dirty": False, "code_dirty": []}, "models": {"profile": "gate", "overrides": {"agent": None}}, "snapshots": {"gpt-6-luna": "s1"}, "started_utc": "t1", "finished_utc": "t1",
                "checks": {"L2": {"status": "pass", "finished_utc": "t1"}, "orchestrator": {"status": "fail", "reason": "boom", "finished_utc": "t1"}}}  # fmt: skip
     rec = sc.update_live_record(None, report1, ["L2", "orchestrator"])
     assert rec["required"] == ["L2", "orchestrator"] and rec["checks"]["orchestrator"]["status"] == "fail"
-    assert rec["checks"]["L2"] == {"status": "pass", "reason": None, "finished_utc": "t1", "git_commit": "a" * 40, "git_dirty": False, "profile": "gate", "overrides": {}, "snapshots": {"gpt-6-luna": "s1"}, "report_started_utc": "t1"}
+    assert rec["checks"]["L2"] == {"status": "pass", "reason": None, "finished_utc": "t1", "git_commit": "a" * 40, "git_dirty": False, "code_dirty": [], "profile": "gate", "overrides": {}, "snapshots": {"gpt-6-luna": "s1"}, "report_started_utc": "t1"}
     report2 = report1 | {"git": {"commit": "b" * 40, "dirty": False}, "started_utc": "t2", "finished_utc": "t2", "checks": {"orchestrator": {"status": "pass", "finished_utc": "t2"}}}
     rec = sc.update_live_record(rec, report2, ["L2", "orchestrator"])
     assert rec["checks"]["orchestrator"]["status"] == "pass" and rec["checks"]["orchestrator"]["git_commit"] == "b" * 40
@@ -602,3 +603,110 @@ def test_the_new_checks_are_priced_and_build_their_own_worlds(clean_env):
     assert proj["extract_f7_1000"] > proj["f8_session"] > proj["perstep_reasoning"]  # one F7-1000 world's builds dominate
     assert not {"perstep_reasoning", "f8_session", "extract_f7_1000"} & smoke.SHARED_WORLD_STEPS
     assert smoke.select_steps(["f8_session"], None) == ["f8_session"]
+
+
+# ---------- review 2 (orchestrator and smoke gating) ----------
+
+
+def test_the_orchestrator_gets_what_the_cap_leaves_on_a_first_smoke(clean_env, monkeypatch):
+    """run_gate's guard counts the whole program's spend, this invocation's earlier checks included, so the
+    orchestrator's budget is that spend plus what the cap leaves. On a first smoke (no run dir yet) it used to get
+    only what the cap leaves, so the earlier checks were counted against it twice (r1)."""
+    import os
+    from types import SimpleNamespace
+
+    from ape.llm.ledger import Ledger, LedgerEntry
+
+    os.environ["APE_SPEND_LABEL"] = "smoke"
+    os.environ["APE_CACHE"] = str(clean_env / "smokecache")
+    # The invocation's earlier checks spent $1.80, registered in the program registry as a smoke's are.
+    Ledger(clean_env / "smokecache" / "ledger.jsonl").append(LedgerEntry(role="build", model="gpt-6-luna", kind="chat", input_tokens=18_000_000))
+    seen: dict[str, float] = {}
+
+    def fake_run_phases(run, phase):
+        with rg.run_environment(run):
+            seen[phase] = round(rg.spend(run)["remaining_usd"], 4)
+        if phase == "freeze":
+            raise rg.PhaseError("freeze refused: run is a smoke run")
+        return {phase: "done"}
+
+    monkeypatch.setattr(rg, "run_phases", fake_run_phases)
+    sp = SimpleNamespace(total=lambda: 1.80, orchestrator=0.0)
+    ctx = {
+        "args": SimpleNamespace(max_usd=4.0, dry=False), "spend": sp, "provenance0": smoke._sha(ROOT / "PROVENANCE.md"),
+        "config0": smoke._tree_hash(ROOT / "config"),
+        "orchestrator_run": lambda budget_usd=None: rg.GateRun("smoke-live-first", smoke=True, runs_root=clean_env / "runs", budget_usd=budget_usd),
+    }  # fmt: skip
+    smoke.check_orchestrator(ctx)
+    assert set(seen) == {*sc.SMOKE_PHASES, "freeze"} and all(v == pytest.approx(2.2) for v in seen.values()), seen
+    assert sp.orchestrator == pytest.approx(0.0), "the orchestrator spent nothing here, so nothing is credited to it"
+
+
+def test_a_check_that_raises_fails_and_the_report_is_still_written(clean_env, monkeypatch):
+    monkeypatch.setattr(smoke, "SMOKE_ROOT", clean_env / "smoke")
+
+    def boom(c):
+        raise RuntimeError("simulated bug in a check")
+
+    monkeypatch.setitem(smoke.STEP_FUNCS, "retrieval", boom)
+    code = smoke.main(["--dry", "--only", "effort,retrieval"])
+    report = json.loads((clean_env / "smoke" / "dry" / "report.json").read_text())
+    assert code == 1 and report["status"] == sc.FAIL and report["checks"]["effort"]["status"] == sc.PASS
+    assert report["checks"]["retrieval"]["status"] == sc.FAIL and "the check raised RuntimeError: simulated bug in a check" in report["checks"]["retrieval"]["reason"]
+
+    def interrupt(c):
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(smoke.STEP_FUNCS, "retrieval", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        smoke.main(["--dry", "--only", "effort,retrieval"])
+    report = json.loads((clean_env / "smoke" / "dry" / "report.json").read_text())
+    assert report["status"] == "stopped" and report["stopped"] == "interrupted: KeyboardInterrupt" and report["checks"]["effort"]["status"] == sc.PASS
+
+
+def test_a_live_smoke_records_its_paid_checks_even_when_it_is_interrupted(clean_env, monkeypatch):
+    """Live: checks.json, which run_gate's preflight reads, is written in `finally`; a later check that raises or an
+    interrupt never loses the record of the checks already paid for. Nothing here reaches a model."""
+    import ape.models as models
+
+    monkeypatch.setattr(smoke, "SMOKE_ROOT", clean_env / "smoke")
+    monkeypatch.setattr(smoke, "PROBE_PATH", clean_env / "no-probe.json")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-never-sent")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(models, "require_preflight", lambda *a, **k: None)
+    monkeypatch.setattr(smoke, "cost_model_check", lambda *a, **k: {"status": "not measured", "reason": "test"})
+    monkeypatch.setitem(smoke.STEP_FUNCS, "effort", lambda c: (sc.result(sc.PASS, {"probe": "ok"}), []))
+
+    def interrupt(c):
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(smoke.STEP_FUNCS, "f8_session", interrupt)  # neither check builds the shared worlds
+    with pytest.raises(KeyboardInterrupt):
+        smoke.main(["--only", "effort,f8_session"])
+    rec = json.loads((clean_env / "smoke" / "live" / smoke.RECORD_NAME).read_text())
+    assert rec["checks"]["effort"]["status"] == sc.PASS and "f8_session" not in rec["checks"]
+    assert "code_dirty" in rec["checks"]["effort"], "the record says whether the smoked code was committed"
+    report = json.loads((clean_env / "smoke" / "live" / "report.json").read_text())
+    assert report["mode"] == "live" and report["status"] == "stopped"
+
+
+def test_every_smoke_runs_the_orchestrator_afresh_under_a_four_dollar_default_cap(clean_env):
+    """A fixed run id resumed the previous smoke's run, so a re-smoke on new code skipped build-dev through pilot and
+    passed on old work (r8). Each invocation now gets its own run."""
+    a, b = smoke.orchestrator_run_id(False), smoke.orchestrator_run_id(False)
+    assert a != b and a.startswith("smoke-live-") and smoke.orchestrator_run_id(True).startswith("smoke-dry-")
+    assert rg.GateRun(a, smoke=True, runs_root=clean_env / "runs").run_id == a, "a valid run id"
+    assert smoke.DEFAULT_MAX_USD == 4.0
+
+
+def test_the_anchor_index_build_never_counts_as_a_gate_build():
+    """The PC1 anchor's index is built by another model on another corpus: its ledger rows (no world) would skew the
+    LightRAG extraction priors the cost-model check compares (r5)."""
+    from ape.budget import load_assumptions
+
+    rows = [
+        {"role": "build", "context": {"anchor": "graphragbench-medical", "system": "lightrag"}, "input_tokens": 5000, "output_tokens": 100},
+        {"role": "build", "context": {"world": "F7-100-rel-desc-dev-s1000", "system": "lightrag"}, "input_tokens": 3000, "output_tokens": 1000},
+    ]
+    b = sc.build_per_call(rows, load_assumptions())["lightrag_extract"]
+    assert b["calls"] == 1 and b["input_per_call"] == 3000.0 and b["worlds"] == ["F7-100-rel-desc-dev-s1000"]

@@ -375,6 +375,7 @@ def test_offline_through_freeze_pilots_calibrates_rehearses_the_freeze_and_then_
     expected = {"GATE_PREREG.md", "GATE_PREREG.md (draft)", *(f"config/{n}" for n in run_gate.FROZEN_CONFIG + run_gate.FROZEN_OUTPUTS), *run_gate.FROZEN_CODE}
     assert set(freeze["files"]) == expected and all(f["sha256"] for f in freeze["files"].values())
     assert freeze["apg_core"]["installed_commit"] == run_gate.APG_PIN and freeze["analysis_commit"]
+    assert freeze["design_env"] == {}, "the design knobs tune and pilot ran with (none here) are frozen"
     assert "OFFLINE REHEARSAL" in (run.work_dir / "PROVENANCE.freeze.md").read_text()
     assert (ROOT / "PROVENANCE.md").read_bytes() == real_provenance
     assert run_gate.require_frozen(run)["run_id"] == "t2"
@@ -913,6 +914,8 @@ def test_a_resume_is_guarded_on_the_work_that_is_left(clean_env, monkeypatch):
 def test_a_live_paid_phase_refuses_a_stray_environment(clean_env, monkeypatch):
     run = GateRun("stray", runs_root=clean_env / "runs")
     assert run_gate.stray_environment(run) == []
+    monkeypatch.setenv("APE_EMBEDDINGS", "openai")  # the default backend, spelled out, is not stray
+    assert run_gate.stray_environment(run) == []
     monkeypatch.setenv("APE_WORLDS", str(ROOT / "worlds"))  # the default is fine
     monkeypatch.setenv("APE_CACHE", str(clean_env / "elsewhere"))
     monkeypatch.setenv("APE_EMBEDDINGS", "fake")
@@ -1004,3 +1007,156 @@ def test_gate_samples_skip_worlds_selects_the_next_block(clean_env, monkeypatch)
     first = {s.metadata["world_id"] for s in gate_samples("F7", "10", "pilot", limit_worlds=2)}
     rest = {s.metadata["world_id"] for s in gate_samples("F7", "10", "pilot", limit_worlds=2, skip_worlds=2)}
     assert len(first) == 2 and len(rest) == 1 and not first & rest
+
+
+# --- Review 2 (orchestrator and smoke gating) ----------------------------------------------------------
+
+
+def test_switching_to_the_d017_fallback_reruns_the_builds_but_never_changes_the_anchors_builder(clean_env, monkeypatch):
+    """r7: build-dev's, pilot's and build-test's params name the builder, so APE_BUILD_FALLBACK=1 re-runs the builds
+    (and, through upstream fingerprints, every phase after them) instead of keeping Luna-built indices that tune's
+    LightRAG arms would then refuse; the anchor keeps the paper's builder (D-009), so its fingerprint stays."""
+    from ape.models import build_settings, load_profile
+
+    run = GateRun("live-fb", runs_root=clean_env / "runs", probe_path=_probe(clean_env))
+    phases = ("build-dev", "pilot", "build-test", "anchor")
+    before = {p: run_gate.phase_state(run, p)["fingerprint"] for p in phases}
+    assert run_gate.build_params(run)["fallback"] is False
+    monkeypatch.setenv("APE_BUILD_FALLBACK", "1")
+    after = {p: run_gate.phase_state(run, p)["fingerprint"] for p in phases}
+    assert [p for p in phases if after[p] != before[p]] == ["build-dev", "pilot", "build-test"]
+    gate = load_profile("gate")
+    assert run_gate.build_params(run) == {"model": gate.role("build_fallback").model, "effort": gate.role("build_fallback").reasoning_effort, "fallback": True}
+    assert "APE_BUILD_FALLBACK" not in run_gate._anchor_params(run)["env_knobs"]
+    anchor = load_profile("anchor")
+    assert build_settings(anchor, fallback=False)[0] == anchor.role("build").model, "the anchor's index builder, whatever D-017 decides"
+
+
+def test_a_fixed_anchor_scorer_scores_afresh(clean_env, monkeypatch):
+    """r3: Inspect's task identity omits the scorer, so the anchor's logs are keyed by the anchor's code. After a harness
+    fix the anchor runs and scores afresh (PC1 leaves `not_evaluable`) instead of re-reading the old logs' scores."""
+    from ape.anchor import ragas
+
+    config = clean_env / "config"
+    shutil.copytree(ROOT / "config", config)
+    run = GateRun("a1", offline=True, runs_root=clean_env / "runs", config_dir=config)
+    real = ragas.answer_correctness
+
+    async def broken(*a, **k):
+        raise ragas.ScorerFailed("simulated unreadable judge reply (the harness defect)")
+
+    monkeypatch.setattr(ragas, "answer_correctness", broken)
+    run_phases(run, "preflight")
+    run_phases(run, "anchor")
+    pc1_path = run.phase_dir("anchor") / "pc1.json"
+    assert json.loads(pc1_path.read_text())["status"] == "not_evaluable"
+    old_dir = run.phase_dir("anchor") / f"logs-{run_gate.anchor_code_hash()}"
+    old_logs = {p.name: p.stat().st_mtime for p in old_dir.glob("*.eval")}
+    assert old_logs
+    # The fix: the scorer works again and the anchor's code changed (its hash: here simulated).
+    monkeypatch.setattr(ragas, "answer_correctness", real)
+    monkeypatch.setattr(run_gate, "anchor_code_hash", lambda: "fixed0000000")
+    assert run_phases(run, "anchor") == {"anchor": "done"}, "a code change re-runs the anchor (not a skip)"
+    assert json.loads(pc1_path.read_text())["status"] != "not_evaluable"
+    assert list((run.phase_dir("anchor") / "logs-fixed0000000").glob("*.eval")), "scored afresh, in its own log dir"
+    assert {p.name: p.stat().st_mtime for p in old_dir.glob("*.eval")} == old_logs, "the defective run's logs are kept, untouched"
+
+
+def test_a_live_runs_outputs_are_its_own_and_feed_its_own_projections(clean_env):
+    """Tune and pilot write a live run's outputs under runs/<id>/config/, never the repo's config/: a second live run
+    (an extension, a fix cycle) cannot rewrite a first run's frozen outputs, and each run's projections use its own
+    pilot recalibration."""
+    a, b = GateRun("gate-1", runs_root=clean_env / "runs"), GateRun("gate-2", runs_root=clean_env / "runs")
+    assert a.out_config_dir == a.dir / "config" and a.selected_path == a.dir / "config" / "selected.yaml"
+    assert a.s7_targets_path != b.s7_targets_path and not a.out_config_dir.is_relative_to(ROOT / "config")
+    off = GateRun("o", offline=True, runs_root=clean_env / "runs")
+    assert off.out_config_dir == off.work_dir / "config"
+    frozen = run_gate.frozen_files(a, a.prereg_path)
+    assert {k: frozen[k] for k in (f"config/{n}" for n in run_gate.FROZEN_OUTPUTS)} == {f"config/{n}": a.out_config_dir / n for n in run_gate.FROZEN_OUTPUTS}
+    assert frozen["config/run_plan.yaml"] == ROOT / "config" / "run_plan.yaml", "templates and inputs stay in config/"
+    entry = {
+        "arm": "S3s", "model": "openai/gpt-6-luna", "effort": "high", "cell": "F7-10", "delivery": "push", "samples": 2,
+        "roles": {"agent": {"model": "openai/gpt-6-luna", "calls_per_sample": 3.0, "input_per_call": 4000.0, "output_per_call": 900.0, "cached_fraction": 0.0}},
+    }  # fmt: skip
+    a.out_config_dir.mkdir(parents=True)
+    a.measured_out_path.write_text(yaml.safe_dump({"entries": [entry]}))
+    assert entry in run_gate._cost_kwargs(a)["measured"] and entry not in run_gate._cost_kwargs(b)["measured"]
+    assert "run/budget_calibration_measured.yaml" in run_gate.budget_inputs(a) and "run/budget_calibration_measured.yaml" not in run_gate.budget_inputs(b)
+
+
+def test_build_test_and_test_refuse_design_knobs_other_than_the_frozen_ones(clean_env, monkeypatch):
+    """freeze.json records the design knobs tune and pilot ran with; live build-test and test refuse others, naming each
+    (an offline rehearsal warns). Operational settings are no design knobs."""
+    run = GateRun("knobs", runs_root=clean_env / "runs")
+    monkeypatch.setattr(run_gate, "require_frozen", lambda r: {"frozen_at": "t"})
+    monkeypatch.setattr(run_gate, "read_freeze", lambda r: {"code_commit": "abc123", "design_env": {"APE_S3S_BUDGET": "2000"}})
+    monkeypatch.setattr(run_gate, "frozen_code_drift", lambda r: [])
+    refuse = run_gate._refuse_unless_frozen("test")
+    monkeypatch.setenv("APE_S3S_BUDGET", "2000")
+    assert refuse(run) is None
+    monkeypatch.setenv("APE_S3S_BUDGET", "4000")
+    monkeypatch.setenv("APE_MAX_TURNS", "30")
+    msg = refuse(run)
+    assert msg.startswith("test: design knob(s) differ from the ones the freeze recorded")
+    assert "APE_MAX_TURNS: frozen None, now '30'" in msg and "APE_S3S_BUDGET: frozen '2000', now '4000'" in msg
+    monkeypatch.delenv("APE_MAX_TURNS")
+    monkeypatch.setenv("APE_S3S_BUDGET", "2000")
+    monkeypatch.setenv("APE_BACKUP_DIR", str(clean_env / "bk"))
+    assert refuse(run) is None, "an operational setting is no design knob"
+    off = GateRun("knobs-off", offline=True, runs_root=clean_env / "runs")
+    monkeypatch.setenv("APE_MAX_TURNS", "30")
+    record = {"warnings": []}
+    run_gate._warn_drift(off, record)
+    assert any("design knob(s) differ" in w and "a live run would refuse" in w for w in record["warnings"])
+    monkeypatch.setattr(run_gate, "read_freeze", lambda r: {"code_commit": "abc123"})
+    assert run_gate.design_env_changes(run) == [], "a freeze from before design knobs were recorded"
+
+
+def test_a_freeze_interrupted_between_its_two_records_is_completed_not_stuck(clean_env, monkeypatch):
+    """freeze.json is written first, then PROVENANCE.md. A crash between the two used to leave the run stuck (a re-freeze
+    refused, build-test needing a complete freeze); now the next `freeze` completes it, adding the missing record once."""
+    tmp = clean_env
+    monkeypatch.setenv("APE_CACHE", str(tmp / "cache"))
+    out = tmp / "out"
+    monkeypatch.setattr(GateRun, "out_config_dir", property(lambda self: out))
+    out.mkdir()
+    (out / "selected.yaml").write_text(yaml.safe_dump({k: {"arm": a, "env": {}, "candidate": "c"} for k, a in (("APG*", "APG-s"), ("LGR*", "LGR-s"), ("S3s", "S3s"))}))
+    (out / "s7_targets.json").write_text(json.dumps({c: 120 for c in GATE_CELLS}))
+    (out / "budget_calibration.yaml").write_text("context: 300\n")
+    prereg, provenance = tmp / "GATE_PREREG.md", tmp / "PROVENANCE.md"
+    text = (ROOT / "GATE_PREREG.md").read_text()
+    start = run_gate.prereg_body_start(text)
+    prereg.write_text(text[:start] + run_gate.PLACEHOLDER_ITEM.sub("filled", text[start:]))
+    shutil.copy(ROOT / "PROVENANCE.md", provenance)
+    paths = {"runs_root": tmp / "runs", "prereg_path": prereg, "provenance_path": provenance, "probe_path": _probe(tmp)}
+    monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: [])
+    run = GateRun("crash", **paths)
+    run_gate._check_mode(run)
+    _fake_current(run, pc1_pass=True)
+    real_write = run_gate._write_freeze_provenance
+
+    def crash(run_, freeze):
+        raise OSError("disk full, simulated")
+
+    monkeypatch.setattr(run_gate, "_write_freeze_provenance", crash)
+    with pytest.raises(OSError, match="simulated"):
+        run_phases(run, "freeze")
+    frozen_at = json.loads(run.freeze_path.read_text())["frozen_at"]
+    assert read_manifest(run, "freeze")["status"] == "failed" and "Gate freeze: run `crash`" not in provenance.read_text()
+    monkeypatch.setattr(run_gate, "_write_freeze_provenance", real_write)
+    assert run_phases(run, "freeze") == {"freeze": "done"}
+    assert json.loads(run.freeze_path.read_text())["frozen_at"] == frozen_at, "the freeze itself is not redone"
+    assert provenance.read_text().count(f"## Gate freeze: run `crash` ({frozen_at})") == 1
+    assert any("completed a freeze interrupted" in w for w in read_manifest(run, "freeze")["warnings"])
+    assert run_gate.require_frozen(run)["frozen_at"] == frozen_at
+    assert run_phases(run, "freeze") == {"freeze": "skipped"}
+
+
+def test_a_smoke_runs_freeze_is_refused_before_its_budget_guard(clean_env):
+    """The smoke's freeze check expects the smoke refusal; a spent-out budget used to raise BudgetError first."""
+    run = GateRun("s", smoke=True, runs_root=clean_env / "runs", budget_usd=0.0)
+    reason = run_gate.PHASE_DEFS["freeze"].refuse(run)
+    assert "is a smoke run" in reason and "unfilled item" in reason
+    with pytest.raises(PhaseError, match="is a smoke run"):
+        run_phases(run, "freeze")
+    assert read_manifest(run, "freeze") is None, "refused before any record"

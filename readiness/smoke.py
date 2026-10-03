@@ -1,10 +1,10 @@
 """Live smoke tests (readiness E3-E5, L2-L5, H4, H6 live, D-017; FIX_PLAN FX-8).
 
-    uv run python readiness/smoke.py                      # every check, live, on config/models.yaml's gate profile
-    uv run python readiness/smoke.py --dry                # offline wiring check (mock models, fake embeddings), $0
-    uv run python readiness/smoke.py --only pull,burst    # some checks (with the checks they need)
-    uv run python readiness/smoke.py --skip orchestrator  # all but some
-    uv run python readiness/smoke.py --profile gate --agent openai/gpt-6-sol   # a flag swaps a role's model, keeps its effort
+    uv run --locked python readiness/smoke.py                      # every check, live, on config/models.yaml's gate profile
+    uv run --locked python readiness/smoke.py --dry                # offline wiring check (mock models, fake embeddings), $0
+    uv run --locked python readiness/smoke.py --only pull,burst    # some checks (with the checks they need)
+    uv run --locked python readiness/smoke.py --skip orchestrator  # all but some
+    uv run --locked python readiness/smoke.py --profile gate --agent openai/gpt-6-sol   # a flag swaps a role's model, keeps its effort
 
 Checks, in run order (`STEPS`; pass criteria in `smoke_checks.py`):
 
@@ -53,40 +53,47 @@ Checks, in run order (`STEPS`; pass criteria in `smoke_checks.py`):
 
 Cost. Before any spend the script prints each selected check's projected cost (conservative, from
 `ape.budget`'s priors and config/model_costs.yaml) and refuses to start if the total exceeds --max-usd
-(default $3). Before each check it stops if spend so far plus that check's projection would exceed the cap;
-the orchestrator also runs under run_gate's own budget guard with what is left. The gate profile's
-projection (GPT-6 Luna, high; 2026-10-02 priors): L2 $0.10, D017 $0.04, H4 $0.01, L4_L5 $0.01, APG $0.01,
+(default $4). Before each check it stops if spend so far plus that check's projection would exceed the cap;
+the orchestrator also runs under run_gate's own budget guard with exactly what the cap leaves (its budget is the
+program's spend so far, this invocation's earlier checks included, plus that remainder). The gate profile's
+projection (GPT-6 Luna, high; 2026-10-03 priors): L2 $0.10, D017 $0.04, H4 $0.01, L4_L5 $0.01, APG $0.01,
 perstep_reasoning $0.01, pull $0.05, recovery $0.01, burst $0.10, f8_session $0.12 (two N=5 sessions priced as
 Study G sessions: full-history views at the window's share, so conservative), extract_f7_1000 $1.34 (one F7-1000
-world, 547 chunks, both systems), orchestrator $1.06 (of which $0.47 is the GraphRAG-Bench anchor index, built
-with gpt-4o-mini; $0.93 in all with the Luna fallback), total ≈ $2.85 under the $3 default cap. The headroom is
-thin: a run whose early checks spend near their projections can be stopped before the orchestrator; pass
-`--max-usd 4`, or run `--skip extract_f7_1000` and that check alone. The effort check reads the probe, which
-costs ≈ $0.02 on its own. `--dry` spends $0. Spend is this invocation's: Inspect-metered calls, plus the
-growth of the build/embedding ledger and of the orchestrator run. A live smoke's log dirs and ledger also
+world, 547 chunks, both systems), orchestrator $1.15 (build-dev $0.08, tune $0.13, anchor $0.58 with gpt-4o-mini,
+pilot $0.37; $1.01 with the Luna anchor fallback), total ≈ $2.95 (≈ $2.81 with the Luna fallback) under the $4
+default cap: the $1 of headroom covers checks that spend somewhat over their projection. The effort check reads the
+probe, which costs ≈ $0.02 on its own. `--dry` spends $0. Spend is this invocation's: Inspect-metered calls, plus
+the growth of the build/embedding ledger and of the orchestrator run. A live smoke's log dirs and ledger also
 register in the program spend registry (`ape.spend`, label `smoke`), so they count toward the program's
 $5,000 in run_gate's guard and in `python -m ape.budget spend`.
+
+Robustness. A check that raises is recorded as a FAIL with the exception, and the next check runs; a spend stop or
+an interrupt (Ctrl-C) ends the run, and in every case report.json, report.md and (live) checks.json are written, so
+checks already paid for are never lost.
 
 The orchestrator check runs run_gate's gate profile (run_plan.yaml), not the --agent/--kg/--build overrides.
 
 Isolation. Dry and live smokes never share state: a dry run uses cache/smoke/dry/, a live run cache/smoke/live/
 (`smoke_dir`), each with its own worlds, indices, cache, logs (a fresh logs/<timestamp>/ per invocation), the
-orchestrator's run (runs/smoke-dry or runs/smoke-live; re-runs resume it) and report.json / report.md (which
-record the mode). A live run never reads or resumes anything a dry run made; it warns, and never deletes, if it
+orchestrator's runs (a fresh runs/smoke-<mode>-<timestamp> per invocation, `orchestrator_run_id`: a re-smoke after
+a code change really re-runs build-dev through pilot instead of skipping them as done) and report.json / report.md
+(which record the mode). A live run never reads or resumes anything a dry run made; it warns, and never deletes, if it
 finds the older flat layout directly under cache/smoke/. Nothing is written to config/, PROVENANCE.md or runs/.
 Exits non-zero when a check fails.
 
 Live record and the gate. A live run also updates cache/smoke/live/checks.json: every check's latest live result
-(status, finish time, commit, profile, model overrides, the probe's snapshots), so a check re-run alone with
---only replaces its own entry. run_gate's live preflight (`ape.run_gate.check_live_smoke`) refuses a live gate run
-unless the latest live report passed (warn allowed) on the gate profile and every check here has a passing
-result no older than 7 days, at HEAD or an ancestor of it, on PROVENANCE.md's pinned snapshots; or the run
-passes --skip-smoke-check "<reason>".
+(status, finish time, commit and its uncommitted code changes `code_dirty`, profile, model overrides, the probe's
+snapshots), so a check re-run alone with --only replaces its own entry. run_gate's live preflight
+(`ape.run_gate.check_live_smoke`) refuses a live gate run unless the latest live report passed (warn allowed) on the
+gate profile and every check here has a passing result no older than 7 days, of committed code that is exactly the
+code that would run (src/, power/, uv.lock), on PROVENANCE.md's pinned snapshots; or the run passes
+--skip-smoke-check "<reason>". A run settles this once, at its first preflight (run.json).
 
 Cost model check. After a live run, its own Inspect logs go through `ape.budget.calibrate` into
 cache/smoke/live/calibration_measured.yaml (never config/), and report.md's "Cost model check" compares the
 measured output tokens per call (reasoning included) per role and effort, calls per sample per cell, and build
-calls per system with the priors, then re-projects the whole program both ways (measured cells, and the priors
+calls per system on the gate's worlds (the PC1 anchor's index, another model on another corpus, is left out) with
+the priors, then re-projects the whole program both ways (measured cells, and the priors
 adjusted by the measured per-call figures). It warns when either exceeds $5,000 or puts the gate over its $700
 allocation, and prints the command that promotes the measurements into config/budget_calibration_measured.yaml.
 A dry run shows the section as "not measured". Live runs also print storage warnings (APE_BACKUP_DIR, free disk).
@@ -99,6 +106,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -119,7 +127,7 @@ RUN_TASKS = {"H4": 2, "L4_L5": 2, "APG": 2, "perstep_reasoning": 2, "pull": 4, "
 BURST = {"tasks": 12, "epochs": 2}  # 24 samples
 F8 = {"N": 5, "arms": ("CM0", "O-state"), "message_limit": 400}  # one short session per arm; the probe at k = N
 F7_1000_TASKS = 2  # the extraction check builds one F7-1000 dev world; its tasks are not run
-DEFAULT_MAX_USD = 3.0
+DEFAULT_MAX_USD = 4.0  # the full live smoke projects ≈ $2.9; $3 left no headroom for checks that run near their projection
 # name -> (checks it needs, what it checks), in run order: the costly extraction runs late, the orchestrator last.
 STEPS: dict[str, tuple[tuple[str, ...], str]] = {
     "effort": ((), "per role and call path: config accepted, effort honoured (from the probe)"),
@@ -145,6 +153,14 @@ def smoke_dir(dry: bool) -> Path:
     """Where a dry or a live smoke keeps everything: worlds, indices, cache, logs, the orchestrator's runs and the
     report. Separate, so a live smoke never reads or resumes anything a dry run (fake embeddings, mock models) made."""
     return SMOKE_ROOT / ("dry" if dry else "live")
+
+
+def orchestrator_run_id(dry: bool) -> str:
+    """A fresh run id per invocation for the orchestrator check: a re-smoke (after a code change, or a week later)
+    really re-runs build-dev through pilot, where a fixed id would skip its finished phases and pass on old work."""
+    from datetime import UTC, datetime
+
+    return f"smoke-{'dry' if dry else 'live'}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}"
 
 
 def legacy_layout() -> list[str]:
@@ -366,7 +382,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dir": str(out),
         "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "started_utc": _utc_now(),
-        "git": rg.git_state(),
+        # code_dirty: uncommitted changes under src/, power/ and uv.lock (`run_gate.code_drift` of HEAD); run_gate's
+        # live preflight refuses a smoke of uncommitted code, since what it smoked is no commit.
+        "git": rg.git_state() | {"code_dirty": rg.code_drift("HEAD")},
         "models": {"profile": profile.name, "roles": profile.summary(), "overrides": {k: v for k, v in vars(args).items() if k in ("agent", "kg", "build", "embed")}, "build": [build_model, build_effort]},
         "snapshots": _probe_snapshots() if not args.dry else {},
         "max_usd": args.max_usd,
@@ -386,8 +404,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for w in report["warnings"]:
             print(f"WARNING: {w}", flush=True)
 
+    run_id = orchestrator_run_id(args.dry)  # one per invocation: never resumes (and so never skips) an earlier smoke's run
+
     def orchestrator_run(budget_usd: float | None = None):
-        return rg.GateRun("smoke-dry" if args.dry else "smoke-live", offline=args.dry, smoke=True, runs_root=out / "runs", budget_usd=budget_usd)
+        return rg.GateRun(run_id, offline=args.dry, smoke=True, runs_root=out / "runs", budget_usd=budget_usd)
 
     # 1. Projection: refuse to start a run the cap cannot cover.
     try:
@@ -446,19 +466,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             sc.require_step_fits(step, proj[step], spent, args.max_usd)
             t0 = time.time()
             print(f"[{step}] {STEPS[step][1]} (projected ${proj[step]:.3f}; spent so far ${spent:.4f})", flush=True)
-            res, logs = STEP_FUNCS[step](ctx)
+            try:
+                res, logs = STEP_FUNCS[step](ctx)
+            except Exception as e:  # noqa: BLE001  (a check that raises fails; the checks already paid for stay recorded)
+                traceback.print_exc()
+                res, logs = sc.result(sc.FAIL, {}, reason=f"the check raised {type(e).__name__}: {' '.join(str(e).split())[:400]}"), []
             record(step, res, t0, spent, logs)
     except SystemExit as e:  # a spend stop: record it and write the report
         report["stopped"] = str(e)
         print(f"STOPPED: {e}", flush=True)
         status = 2
-    report["spend_usd"] = round(spend.total(), 6)
+    except BaseException as e:  # e.g. KeyboardInterrupt: the report and the live record are still written, then it re-raises
+        report["stopped"] = f"interrupted: {type(e).__name__}"
+        raise
+    finally:
+        failed = _finish(report, args, out, spend, log_root, orchestrator_run, t_start, profile)
+    print(json.dumps({"status": report["status"], "failed": failed, "spend_usd": report["spend_usd"], "report": str(out / "report.md")}, indent=1))
+    return status or (1 if failed else 0)
+
+
+def _finish(report: dict, args, out: Path, spend: "Spend", log_root: Path, orchestrator_run: Callable, t_start: float, profile) -> list[str]:
+    """Close the report whatever happened (a spend stop, a check that raised, an interrupt): spend, status, the
+    cost-model check and, live, the record of every check's latest result that run_gate's preflight reads, then
+    report.json and report.md. Returns the failed checks."""
+    try:
+        report["spend_usd"] = round(spend.total(), 6)
+    except BaseException as e:  # noqa: BLE001  (an unpriced call: the report still gets written, with the reason)
+        report["spend_usd"] = None
+        report.setdefault("stopped", f"spend could not be priced: {e}")
     report["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     report["finished_utc"] = _utc_now()
     failed = [n for n, r in report["checks"].items() if r["status"] == sc.FAIL]
     report["status"] = "stopped" if report.get("stopped") else (sc.FAIL if failed else sc.WARN if any(r["status"] == sc.WARN for r in report["checks"].values()) else sc.PASS)
-    # 4. Live: the cost model against what the smoke measured (indicative; never written to config/), and the
-    #    record of every check's latest live result that run_gate's preflight reads.
+    # Live: the cost model against what the smoke measured (indicative; never written to config/), and the record of
+    # every check's latest live result that run_gate's preflight reads.
     if args.dry:
         report["cost_model_check"] = {"status": "not measured", "reason": "dry run: mock models report no real usage"}
     else:
@@ -467,12 +508,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             report["cost_model_check"] = cost_model_check(out, log_root, orchestrator_run() if orchestrated else None, t_start, profile)
         except Exception as e:  # noqa: BLE001  (the check is informational: a failure here must not lose the report)
             report["cost_model_check"] = {"status": sc.WARN, "reason": f"cost-model check failed: {type(e).__name__}: {e}"}
+        out.mkdir(parents=True, exist_ok=True)
         record_path = out / RECORD_NAME
         previous = json.loads(record_path.read_text()) if record_path.is_file() else None
         record_path.write_text(json.dumps(sc.update_live_record(previous, report, list(STEPS)), indent=1, default=str))
     write_report(report)
-    print(json.dumps({"status": report["status"], "failed": failed, "spend_usd": report["spend_usd"], "report": str(out / "report.md")}, indent=1))
-    return status or (1 if failed else 0)
+    return failed
 
 
 def _utc_now() -> str:
@@ -1016,9 +1057,12 @@ def check_orchestrator(c: dict) -> tuple[dict, list]:
     spend: Spend = c["spend"]
     left = c["args"].max_usd - spend.total()
     probe_run = c["orchestrator_run"]()
+    # run_gate's guard counts the whole program's spend (the registry), this invocation's earlier checks included, so
+    # its budget is that spend plus what the cap leaves: its `remaining` is then exactly `left`. Always measured, run
+    # dir or not: on a first smoke the earlier checks' spend is already in the registry.
     with rg.run_environment(probe_run):
-        before = rg.spend(probe_run)["spent_usd"] if probe_run.dir.is_dir() else 0.0
-    run = c["orchestrator_run"](budget_usd=before + left)  # run_gate's own guard gets what the cap leaves
+        before = rg.spend(probe_run)["spent_usd"]
+    run = c["orchestrator_run"](budget_usd=before + left)
     statuses: dict[str, str | None] = {}
     error = None
     for phase in sc.SMOKE_PHASES:
@@ -1032,7 +1076,7 @@ def check_orchestrator(c: dict) -> tuple[dict, list]:
     if error is None:
         try:
             rg.run_phases(run, "freeze")
-        except rg.PhaseError as e:
+        except (rg.PhaseError, rg.BudgetError) as e:  # a smoke run's freeze refuses before its budget guard; either way, recorded
             freeze_error = str(e)
     with rg.run_environment(run):
         after = rg.spend(run)["spent_usd"]
@@ -1137,7 +1181,7 @@ def write_report(report: dict) -> None:
         f"# Smoke report ({'DRY: mock models, fake embeddings' if report['dry'] else 'live'})",
         "",
         f"- Status: **{report['status']}**{' (' + report['stopped'] + ')' if report.get('stopped') else ''}",
-        f"- Profile: {report['models']['profile']}; spend ${report.get('spend_usd', 0):.4f} of --max-usd {report['max_usd']} (projected ${report.get('projection_usd', {}).get('total', 0):.3f})",
+        f"- Profile: {report['models']['profile']}; spend ${report.get('spend_usd') or 0:.4f} of --max-usd {report['max_usd']} (projected ${report.get('projection_usd', {}).get('total', 0):.3f})",
         f"- {report['started']} to {report.get('finished')}; commit `{(report.get('git') or {}).get('commit')}`{' (dirty)' if (report.get('git') or {}).get('dirty') else ''}",
         *[f"- WARNING: {w}" for w in report.get("warnings") or []],
         "",

@@ -1,37 +1,49 @@
 """Gate orchestrator (FIX_PLAN FX-6): the gate as named phases, each idempotent, resumable and recorded.
 
-    uv run python -m ape.run_gate <phase> --run-id <id> [--offline] [--smoke] [--force] [--budget-usd N]
+    uv run --locked python -m ape.run_gate <phase> --run-id <id> [--offline] [--smoke] [--force] [--budget-usd N]
+
+`--locked`: uv never rewrites uv.lock under a run (the freeze hashes it).
 
 Phases, in order (`all` runs them in this order and stops at the first failure):
 
     preflight   FX-2 preflight (prices, and live: OPENAI_API_KEY) for the gate and anchor profiles; live:
                 cache/openai_probe.json lists every model the profiles call; the installed apg-core is the
                 pinned commit recorded in PROVENANCE.md; a dirty git tree is a warning. A live run (not offline,
-                not smoke) also needs a fresh passing live smoke (`check_live_smoke`: readiness/smoke.py's record
-                in cache/smoke/live/) unless `--skip-smoke-check "<reason>"`, and gets storage warnings
-                (`ape.models.storage_warnings`: APE_BACKUP_DIR, free disk).
+                not smoke) also needs a passing live smoke of this code (`check_live_smoke`: readiness/smoke.py's
+                record in cache/smoke/live/), settled once per run in run.json (`_settle_smoke`: a later preflight
+                reuses it while the code is the smoked code, without re-checking its age), unless
+                `--skip-smoke-check "<reason>"`; and storage warnings (`ape.models.storage_warnings`: APE_BACKUP_DIR,
+                free disk). Its fingerprint follows the code (`code_state`), not the commit, so a run's documented
+                steps (the pre-registration's commit, the freeze's PROVENANCE.md record) do not re-run it.
     build-dev  dev worlds (see `dev_world_specs`) and their artifacts through `ape.artifacts`: chunk
                 embeddings, the authored APG graph, the LightRAG index (extract; offline: oracle); then
-                D-017's build-quality check (`ape.build_quality`) -> build-dev/build_quality.json.
+                D-017's build-quality check (`ape.build_quality`) -> build-dev/build_quality.json. Its params name
+                the builder (`build_params`, as pilot's and build-test's do), so switching to D-017's fallback
+                (APE_BUILD_FALLBACK=1) re-runs the builds and every phase after them.
     tune      `ape.tuning.tune` for APG, LightRAG and S3s on the grid's dev cells -> tune/selected.yaml
-                and <config>/selected.yaml. Live, it refuses until config/tuning_grid.yaml names every system's
-                owner and each owner has signed off its candidates (`tuning_signoff_problems`).
-    anchor      PC1: the GraphRAG-Bench index, hybrid and naive runs, `pc1_from_logs` -> anchor/pc1.json.
+                and the run's config/selected.yaml. Live, it refuses until config/tuning_grid.yaml names every
+                system's owner and each owner has signed off its candidates (`tuning_signoff_problems`).
+    anchor      PC1: the GraphRAG-Bench index (always the paper's builder, never D-017's fallback), hybrid and
+                naive runs, `pc1_from_logs` -> anchor/pc1.json. The runs' logs are keyed by the anchor's code
+                (`anchor_code_hash`), so after a harness fix the anchor scores afresh.
     pilot       the pilot worlds (`gate.build.pilot`, split "pilot") and their artifacts; `gate.pilot` arms but
                 S7 and `gate.pilot.pull`, with every selection's knobs; S7 targets (APG*'s median realized
-                context per cell) -> <config>/s7_targets.json, then S7; `gate.pilot.sigma` (APG*, LGR* on the
+                context per cell) -> the run's config/s7_targets.json, then S7; `gate.pilot.sigma` (APG*, LGR* on the
                 pilot worlds after the main pilot's, push; D-026); the matched-budget calibration of
-                LGR* and S3s (`calibrate_caps`) -> <config>/budget_calibration.yaml; the NI power
+                LGR* and S3s (`calibrate_caps`) -> the run's config/budget_calibration.yaml; the NI power
                 re-simulation with σ_w, σ_g from the main and σ cells' worlds and its two-sided recommendation
                 (suffices / insufficient / ambiguous) -> pilot/power.json; the cost model recalibrated
-                (`ape.budget.calibrate`) -> <config>/budget_calibration_measured.yaml; pilot/pilot.json.
+                (`ape.budget.calibrate`) -> the run's config/budget_calibration_measured.yaml (the run's later
+                projections use it; promoting it to config/ is a deliberate copy); pilot/pilot.json.
     freeze      GATE_PREREG.md's body has no `[PILOT` / `[USER` marker left, the tree is committed, PC1
                 passes (or its failure is accepted with a diagnosis) and every phase it rests on is current
                 (`stale_upstream`: a re-run of build-dev, tune, anchor and pilot would each be a skip); offline: a
                 rehearsal on a filled copy, with warnings. Then the sha256 of the pre-registration, the
-                FROZEN_CONFIG, FROZEN_OUTPUTS and FROZEN_CODE files, the commit (`code_commit`), the APG pin and
-                the run's test-seed block (`choose_test_seed_base`) -> freeze.json and PROVENANCE.md.
-                `require_frozen` is the guard build-test and test call.
+                FROZEN_CONFIG files, the run's FROZEN_OUTPUTS and the FROZEN_CODE files, the commit (`code_commit`),
+                the APG pin, the design knobs tune and pilot ran with (`design_env`) and the run's test-seed block
+                (`choose_test_seed_base`) -> freeze.json, then PROVENANCE.md (a freeze interrupted between the two
+                is completed by the next `freeze`: `_complete_freeze`). `require_frozen` is the guard build-test
+                and test call.
     build-test  the test worlds (split "test", the run's frozen seed block; `test_world_specs`) and their
                 artifacts, from the frozen plan's TEST_BUILD_CELLS. Only this phase may generate the test split:
                 it sets TEST_SPLIT_ENV (and TEST_SEED_BASE_ENV) after its freeze guard, and every other generator
@@ -51,8 +63,8 @@ Freeze. A run is frozen once: after freeze.json exists, `tune`, `pilot` and `anc
 --force; they would rewrite frozen inputs or pc1.json), and `freeze` re-runs only as a skip. `build-test` and
 `test` take the frozen files as inputs and refuse (naming the file) unless every one still matches its hash,
 and, live, unless CODE_PATHS (src/, power/, uv.lock) are exactly the freeze commit's (`code_drift`; offline
-rehearsals only warn). Any change after the freeze is a logged deviation (GATE_PREREG.md, Deviations log) and
-a new --run-id.
+rehearsals only warn), and unless the design knobs are the frozen `design_env` (`design_env_changes`). Any change
+after the freeze is a logged deviation (GATE_PREREG.md, Deviations log) and a new --run-id.
 
 Test seeds (RELIABILITY_REVIEW S6). Each frozen run owns one block of SEED_BLOCK test seeds: the first run 3000,
 a later one (an INCONCLUSIVE extension, a NO-GO fix cycle) the next block no other frozen run used, or
@@ -69,15 +81,19 @@ base are always cleared (`run_environment`), since only build-test may set them.
 
 Run directory (`runs/<id>/`, git-ignored):
 
-    run.json                 run id, mode (offline or live), created; a run never switches mode
+    run.json                 run id, mode (offline or live), created; a run never switches mode. `smoke_check`: the
+                             live smoke the run settled at its first preflight (commits, checks), or its override
+    config/                  live: the run's outputs (selected.yaml, s7_targets.json, budget_calibration.yaml,
+                             budget_calibration_measured.yaml); the freeze hashes the first three. The repo's
+                             config/ holds templates and inputs only, so runs never overwrite each other's outputs
     <phase>/manifest.json    one per phase (fields below)
     build-dev/worlds.json    every dev world: id, path, group, family, level, style, tasks, artifact status
     build-dev/build_quality.json  D-017: APG and LightRAG ID coverage per world and gate cell, the verdict and the
                              builder recommendation (offline: marked offline, coverage 1.0 by construction)
-    tune/selected.yaml       the selection (format below); also written to <config>/selected.yaml
+    tune/selected.yaml       the selection (format below); also written to the run's config/selected.yaml
     tune/tuning_log.jsonl    every candidate tried and each system's selection (PC6); a re-run archives the old one
     tune/logs/<system>/<candidate>-<hash>/   Inspect logs + runner_index.json, one dir per candidate
-    anchor/logs/             Inspect logs of the hybrid and naive runs + runner_index.json
+    anchor/logs-<code>/      Inspect logs of the hybrid and naive runs + runner_index.json; <code> `anchor_code_hash`
     anchor/pc1.json          `pc1_from_logs` plus the logs, profile and sizes it came from
     pilot/worlds.json        every pilot world, as build-dev/worlds.json
     pilot/logs/main-<hash>/  the selected arms and diagnostics (push, pull); <hash> of the selections' knobs
@@ -96,8 +112,8 @@ Run directory (`runs/<id>/`, git-ignored):
                              <group> its env group, <hash> of the group's env and arms (knobs are not part of
                              Inspect's task identity, so a new env never reuses another env's logs)
     report/decision.json     the decision report (`ape.analyze_gate`), and report/report.md
-    work/                    offline only: worlds/, indices/, cache/ and config/ (the outputs live mode
-                             writes to config/), GATE_PREREG.md (the rehearsal copy) and
+    work/                    offline and smoke only: worlds/, indices/, cache/ and config/ (the outputs a live
+                             run writes to its config/), GATE_PREREG.md (the rehearsal copy) and
                              PROVENANCE.freeze.md, so an offline run never touches live artifacts
 
 Manifest fields: phase, run_id, status (running | done | failed | skipped), offline, started, finished,
@@ -308,9 +324,11 @@ class PhaseError(RuntimeError):
 class GateRun:
     """One gate run: its id, mode and where it reads and writes.
 
-    `config_dir` is where config inputs are read (tests point it at a copy). Outputs that live runs write
-    to config/ (selected.yaml, s7_targets.json, budget_calibration.yaml, budget_calibration_measured.yaml)
-    go to `out_config_dir`: config_dir when live, `runs/<id>/work/config/` offline. `prereg_path` is the
+    `config_dir` is where config inputs are read (tests point it at a copy); config/ holds templates and inputs
+    only. The outputs tune and pilot write (selected.yaml, s7_targets.json, budget_calibration.yaml,
+    budget_calibration_measured.yaml) go to `out_config_dir`, the run's own: `runs/<id>/config/` live,
+    `runs/<id>/work/config/` offline and smoke. So a second live run (an extension, a fix cycle) never rewrites
+    a first run's frozen outputs, and a re-analysis reads its own run's selection. `prereg_path` is the
     pre-registration the freeze checks and hashes (tests point it at a copy).
     """
 
@@ -369,7 +387,7 @@ class GateRun:
 
     @property
     def out_config_dir(self) -> Path:
-        return self.work_dir / "config" if self.isolated else self.config_dir
+        return self.work_dir / "config" if self.isolated else self.dir / "config"
 
     @property
     def selected_path(self) -> Path:
@@ -489,6 +507,23 @@ def code_drift(commit: str | None) -> list[str] | None:
     return sorted({f for f in (*diff.splitlines(), *untracked.splitlines()) if f.strip()})
 
 
+def code_state() -> dict | None:
+    """What CODE_PATHS hold now, for the preflight fingerprint: HEAD's object id of each (a commit that touches only
+    other files, e.g. GATE_PREREG.md, PROVENANCE.md or config/, leaves them unchanged), plus a digest of their
+    uncommitted changes and of their untracked files. None when git cannot tell."""
+    head = {}
+    for p in CODE_PATHS:
+        head[p] = _git("rev-parse", f"HEAD:{p}")
+    diff = _git("diff", "HEAD", "--", *CODE_PATHS)
+    untracked = _git("ls-files", "--others", "--exclude-standard", "--", *CODE_PATHS)
+    if diff is None or untracked is None or all(v is None for v in head.values()):
+        return None
+    h = hashlib.sha256()
+    for name in sorted(f for f in untracked.splitlines() if f.strip()):
+        h.update(name.encode() + b"\0" + (_sha256(ROOT / name) or "").encode() + b"\0")
+    return {"head": head, "uncommitted": _digest(diff) if diff else None, "untracked": h.hexdigest()[:16] if untracked.strip() else None}
+
+
 @contextlib.contextmanager
 def _environ(updates: dict[str, str | Path | None]) -> Iterator[None]:
     """Set (or, for None, remove) environment variables for the duration; restore them after."""
@@ -560,6 +595,16 @@ def _check_mode(run: GateRun) -> None:
             raise PhaseError(f"run {run.run_id!r} is {'a smoke' if info.get('smoke') else 'not a smoke'} run ({path}); use another --run-id")
         return
     _write_json(path, {"run_id": run.run_id, "offline": run.offline, "smoke": run.smoke, "created": _now(), "config_dir": _show(run.config_dir), "git": git_state()})
+
+
+def read_run_info(run: GateRun) -> dict:
+    """runs/<id>/run.json: the run's mode, and facts settled once for the run (e.g. `smoke_check`)."""
+    path = run.dir / "run.json"
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def update_run_info(run: GateRun, **fields: Any) -> None:
+    _write_json(run.dir / "run.json", read_run_info(run) | fields)
 
 
 # --- Plan, profiles, scale, budget ----------------------------------------------------------------
@@ -676,10 +721,14 @@ def dev_world_specs(run: GateRun, offline: bool | None = None) -> list[dict]:
 
 
 def _cost_kwargs(run: GateRun) -> dict:
+    """The cost model's inputs. Measured entries: config/'s (promoted program-wide by hand), then this run's pilot
+    recalibration (`run.measured_out_path`), which wins where both measure the same (arm, model, effort, cell,
+    delivery). The pilot never writes config/: promoting its measurements to the program is a deliberate copy."""
+    measured = load_measured(run.config("budget_calibration_measured.yaml")) + load_measured(run.measured_out_path)
     return {
         "assumptions": load_assumptions(run.config("budget_assumptions.yaml")),
         "prices": Prices.load(run.costs_path),
-        "measured": load_measured(run.config("budget_calibration_measured.yaml")),
+        "measured": measured,
         "models_path": run.models_path,
     }
 
@@ -694,7 +743,10 @@ def project(run: GateRun, cells: Sequence[PlanCell]) -> float:
 
 def budget_inputs(run: GateRun) -> dict:
     names = ("run_plan.yaml", "budget_assumptions.yaml", "model_costs.yaml", "models.yaml", "budget_calibration_measured.yaml")
-    return {f"config/{n}": {"path": _show(run.config(n)), "sha256": _sha256(run.config(n))} for n in names if run.config(n).exists()}
+    out = {f"config/{n}": {"path": _show(run.config(n)), "sha256": _sha256(run.config(n))} for n in names if run.config(n).exists()}
+    if run.measured_out_path.is_file():  # the run's own pilot recalibration (`_cost_kwargs`)
+        out["run/budget_calibration_measured.yaml"] = {"path": _show(run.measured_out_path), "sha256": _sha256(run.measured_out_path)}
+    return out
 
 
 def run_log_files(run: GateRun) -> list[str]:
@@ -783,7 +835,7 @@ def stray_environment(run: GateRun) -> list[str]:
     its directories. They are refused, not cleared: a value someone set on purpose must not be overridden quietly.
     - APE_WORLDS, APE_INDICES, APE_CACHE: the gate reads and writes worlds/, indices/ and cache/ under the repo
       (put them on another disk with a symlink); a moved cache also moves the ledger.
-    - APE_EMBEDDINGS: any value (the fake embedder is for offline runs).
+    - APE_EMBEDDINGS: any value but the default, `openai` (the fake embedder is for offline runs).
     - APE_EMBEDDING_MODEL, APE_MODEL_PROFILE: only the gate profile's values.
     - APE_BUILD_MODEL, APE_BUILD_EFFORT: the builder comes from config/models.yaml (APE_BUILD_FALLBACK=1 selects
       D-017's fallback builder, recorded in the phase params)."""
@@ -794,7 +846,7 @@ def stray_environment(run: GateRun) -> list[str]:
         raw = os.environ.get(name, "").strip()
         if raw and Path(raw).resolve() != default.resolve():
             out.append(f"{name}={raw} (the gate uses {_show(default)})")
-    if raw := os.environ.get("APE_EMBEDDINGS", "").strip():
+    if (raw := os.environ.get("APE_EMBEDDINGS", "").strip()) and raw != "openai":  # `openai` is the default backend
         out.append(f"APE_EMBEDDINGS={raw} (live runs use the profile's embedding model)")
     gp = gate_profile(run)
     for name, want in (("APE_EMBEDDING_MODEL", gp.role("embeddings").model), ("APE_MODEL_PROFILE", gp.name)):
@@ -900,27 +952,28 @@ def _apg_installed_commit() -> str | None:
     return ((json.loads(raw) if raw else {}).get("vcs_info") or {}).get("commit_id")
 
 
+def _provenance_facts(run: GateRun) -> dict:
+    """What preflight reads from PROVENANCE.md: whether it records the APG pin, and the snapshot pins. Not the whole
+    file, so a freeze's appended record does not re-run preflight."""
+    from .snapshots import read_pins
+
+    path = run.provenance_path
+    text = path.read_text() if path.is_file() else ""
+    return {"apg_pin_recorded": APG_PIN in text, "snapshot_pins": read_pins(path) if path.is_file() else {}}
+
+
 def _preflight_params(run: GateRun) -> dict:
-    # The environment facts preflight checks, so a new commit, another apg-core or a new key re-runs it.
-    env = {"git": git_state(), "apg_core_commit": _apg_installed_commit()}
+    # The facts preflight checks, so a code change, another apg-core, a new key, probe or pin re-runs it. Not the
+    # commit or the tree's other files: a run's documented steps (outputs under runs/<id>/, the pre-registration's
+    # commit, the freeze's PROVENANCE.md record) must not re-run it. The live smoke is settled once per run
+    # (run.json `smoke_check`, `_settle_smoke`), so a newer smoke record does not re-run it either.
+    env = {"code": code_state(), "apg_core_commit": _apg_installed_commit(), "provenance": _provenance_facts(run)}
     if not run.offline:
         from .models import _api_key_present
 
         env["api_key_present"] = _api_key_present(run.env_path)
         env["probe_sha256"] = _sha256(run.probe_path)
-        if not run.smoke:  # a new live smoke re-runs preflight (the skip reason is recorded, not fingerprinted)
-            env["smoke_report_sha256"] = _sha256(run.smoke_dir / "report.json")
-            env["smoke_record_sha256"] = _sha256(run.smoke_dir / "checks.json")
     return {"scale": scale(run), "environment": env, "env_knobs": _env_knobs()}
-
-
-def _git_is_ancestor(commit: str) -> bool | None:
-    """Whether `commit` is HEAD or an ancestor of it; None when git cannot tell (no git, unknown commit)."""
-    try:
-        r = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return {0: True, 1: False}.get(r.returncode)
 
 
 def _smoke_time(entry: dict) -> datetime | None:
@@ -945,16 +998,17 @@ def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> 
       stopped by its spend cap), and run on this gate profile.
     - checks.json, every check's latest live result across invocations (a check re-run alone with --only
       replaces its own entry): each check smoke.py lists as required has a pass or warn result, run on this
-      profile without model overrides, at a commit that is HEAD or an ancestor of it, at most
-      `run.smoke_max_age_days` old, and, where
-      PROVENANCE.md pins snapshots, served by the pinned snapshot of every alias this profile calls.
+      profile without model overrides, on committed code (no uncommitted change under CODE_PATHS when it ran) whose
+      CODE_PATHS are exactly what would run now (`code_drift` of its commit is empty: ancestry alone would accept a
+      smoke of older code), at most `run.smoke_max_age_days` old, and, where PROVENANCE.md pins snapshots, served by
+      the pinned snapshot of every alias this profile calls.
     """
     from . import snapshots as snaps
 
     now = now or datetime.now(UTC)
     report_path, record_path = run.smoke_dir / "report.json", run.smoke_dir / "checks.json"
     info: dict[str, Any] = {"report": _show(report_path), "record": _show(record_path), "max_age_days": run.smoke_max_age_days}
-    how = f"run `uv run python readiness/smoke.py --max-usd 4`, or pass --skip-smoke-check \"<reason>\""
+    how = f"run `uv run --locked python readiness/smoke.py --max-usd 4`, or pass --skip-smoke-check \"<reason>\""
     if not report_path.is_file() or not record_path.is_file():
         missing = report_path if not report_path.is_file() else record_path
         return [f"no live smoke record ({_show(missing)} missing): a live gate run needs a passing live smoke first; {how}"], info
@@ -982,7 +1036,7 @@ def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> 
     checks = record.get("checks") or {}
     required = list(record.get("required") or [])
     info["required"] = required
-    ancestors: dict[str, bool | None] = {}
+    drift: dict[str, list[str] | None] = {}
     rows = {}
     for name in required:
         entry = checks.get(name)
@@ -992,8 +1046,8 @@ def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> 
         when = _smoke_time(entry)
         age = (now - when).total_seconds() / 86400 if when else None
         commit = entry.get("git_commit")
-        if commit and commit not in ancestors:
-            ancestors[commit] = _git_is_ancestor(commit)
+        if commit and commit not in drift:
+            drift[commit] = code_drift(commit)
         rows[name] = {"status": entry.get("status"), "age_days": None if age is None else round(age, 2), "git_commit": commit}
         if entry.get("status") not in SMOKE_OK:
             problems.append(f"smoke check {name!r}: latest live result is {entry.get('status')!r}; it must pass (warn allowed)")
@@ -1007,16 +1061,75 @@ def check_live_smoke(run: GateRun, gp: Profile, now: datetime | None = None) -> 
             problems.append(f"smoke check {name!r} is {age:.1f} days old (limit {run.smoke_max_age_days:g}; --smoke-max-age-days); re-run it")
         if not commit:
             problems.append(f"smoke check {name!r} records no commit")
-        elif ancestors[commit] is False:
-            problems.append(f"smoke check {name!r} ran at commit {commit[:12]}, which is not HEAD or an ancestor of it: the code it smoked is not the code that would run")
-        elif ancestors[commit] is None:
-            problems.append(f"smoke check {name!r}: cannot tell whether its commit {commit[:12]} is an ancestor of HEAD (git unavailable or unknown commit)")
+        elif drift[commit] is None:
+            problems.append(f"smoke check {name!r}: cannot tell whether the code it ran at {commit[:12]} is the code that would run (git unavailable or unknown commit)")
+        elif d := drift[commit]:
+            problems.append(
+                f"smoke check {name!r} ran at {commit[:12]}, but {', '.join(CODE_PATHS)} differ from that commit now: {d[:10]}{' ...' if len(d) > 10 else ''}; "
+                "the code it smoked is not the code that would run: re-run the smoke on this code"
+            )
+        dirty = entry.get("code_dirty")
+        if dirty is None and entry.get("git_dirty"):  # a record from before `code_dirty`: any uncommitted change counts
+            dirty = ["(uncommitted changes; the record predates code_dirty)"]
+        if dirty:
+            problems.append(f"smoke check {name!r} ran with uncommitted code changes {list(dirty)[:10]}: what it smoked is no commit; commit, then re-run it")
         seen = entry.get("snapshots") or {}
         for a, snap in pinned.items():
             if seen.get(a) != snap:
                 problems.append(f"smoke check {name!r} ran on snapshot {seen.get(a)!r} of {a}, but PROVENANCE.md pins {snap!r}: re-run the smoke on the pinned models")
     info["checks"] = rows
+    info["commits"] = sorted(drift)
     return list(dict.fromkeys(problems)), info
+
+
+def _smoke_code_changed(settled: dict) -> list[str]:
+    """Problems when CODE_PATHS no longer match the commits of the smoke a run accepted (`code_drift`)."""
+    out = []
+    for commit in settled.get("commits") or []:
+        d = code_drift(commit)
+        if d is None:
+            out.append(f"cannot tell whether the code is still what the smoke this run accepted ran at {commit[:12]} (git unavailable or unknown commit)")
+        elif d:
+            out.append(f"{', '.join(CODE_PATHS)} changed since the smoke this run accepted (at {commit[:12]}): {d[:10]}{' ...' if len(d) > 10 else ''}")
+    return out
+
+
+def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict) -> tuple[list[str], dict | None]:
+    """Live runs: the live smoke, settled once per run in run.json (`smoke_check`), so a later preflight (after the
+    pre-registration's commit, a freeze, a resume) neither re-checks the smoke's age nor fails on it. Returns
+    (problems, the settlement to record once preflight passes, or None to keep run.json as is).
+
+    - `--skip-smoke-check "<reason>"` on this invocation: recorded as the run's override.
+    - Settled by an earlier preflight on a smoke: reused while CODE_PATHS still match the smoke's commits. Once the
+      code changes, only a smoke of this code will do: `check_live_smoke` again, as at a first preflight.
+    - Settled by an override: a passing smoke now replaces it; otherwise the override stands (a warning).
+    - Not settled: `check_live_smoke`."""
+    settled = read_run_info(run).get("smoke_check") or {}
+    if run.skip_smoke_check is not None:
+        reason = run.skip_smoke_check.strip()
+        checks["smoke"] = {"skipped": reason}
+        record["smoke_check"] = {"skipped": reason}
+        record["warnings"].append(f"the live smoke check was skipped: {reason!r}")
+        if not reason:
+            return ["--skip-smoke-check needs a reason: why this live run may go without a fresh passing live smoke"], None
+        return [], {"override": reason, "at": _now()}
+    changed: list[str] = []
+    if settled.get("commits"):
+        if not (changed := _smoke_code_changed(settled)):
+            checks["smoke"] = f"ok (settled at this run's first preflight, {settled.get('at')}; its age is not re-checked)"
+            record["smoke_check"] = settled | {"reused": True}
+            return [], None
+    smoke_problems, info = check_live_smoke(run, gp)
+    if smoke_problems and settled.get("override"):
+        checks["smoke"] = {"skipped": settled["override"], "reused": True}
+        record["smoke_check"] = settled | {"reused": True, "smoke_now": info | {"problems": smoke_problems}}
+        record["warnings"].append(f"the live smoke check was skipped at this run's first preflight: {settled['override']!r}")
+        return [], None
+    checks["smoke"] = "ok" if not smoke_problems else "failed (see errors)"
+    record["smoke_check"] = info | {"problems": changed + smoke_problems}
+    if smoke_problems:
+        return changed + smoke_problems, None
+    return [], {"at": _now(), "commits": info["commits"], "report": info["report"], "record": info["record"], "max_age_days": run.smoke_max_age_days, "checks": info["checks"]}
 
 
 def _preflight(run: GateRun, record: dict) -> None:
@@ -1066,28 +1179,31 @@ def _preflight(run: GateRun, record: dict) -> None:
     # 4. A dirty tree is a warning: results must trace to a commit.
     if record["git"].get("dirty"):
         record["warnings"].append("the git tree is dirty: commit before a live run so results trace to a commit")
-    # 5. Live runs (not smoke runs): a fresh passing live smoke on this code and these models, unless skipped with
-    #    a recorded reason; and storage warnings (backup destination, free disk).
+    # 5. Live runs (not smoke runs): a passing live smoke of this code on these models, settled once per run
+    #    (`_settle_smoke`), unless skipped with a recorded reason; and storage warnings (backup destination, free disk).
+    settlement = None
     if not run.offline and not run.smoke:
-        if run.skip_smoke_check is not None:
-            reason = run.skip_smoke_check.strip()
-            if not reason:
-                problems.append("--skip-smoke-check needs a reason: why this live run may go without a fresh passing live smoke")
-            checks["smoke"] = {"skipped": reason}
-            record["smoke_check"] = {"skipped": reason}
-            record["warnings"].append(f"the live smoke check was skipped: {reason!r}")
-        else:
-            smoke_problems, smoke_info = check_live_smoke(run, gp)
-            checks["smoke"] = "ok" if not smoke_problems else "failed (see errors)"
-            record["smoke_check"] = smoke_info | {"problems": smoke_problems}
-            problems += smoke_problems
+        smoke_problems, settlement = _settle_smoke(run, gp, record, checks)
+        problems += smoke_problems
         record["warnings"] += storage_warnings()
     record["checks"] = checks
     if problems:
         raise PreflightError("preflight failed:\n" + "\n".join(f"  - {x}" for x in dict.fromkeys(problems)))
+    if settlement is not None:
+        update_run_info(run, smoke_check=settlement)
 
 
 # build-dev -----------------------------------------------------------------------------------------
+
+
+def build_params(run: GateRun) -> dict:
+    """The builder a build phase uses (D-017): the gate profile's build role, or its fallback under
+    APE_BUILD_FALLBACK=1 (`ape.models.build_settings`). Part of build-dev's, pilot's and build-test's params, so a
+    switch of builder re-runs the builds and, through upstream fingerprints, every phase that rests on them."""
+    from .models import build_settings
+
+    model, effort = build_settings(gate_profile(run))
+    return {"model": model, "effort": effort, "fallback": os.environ.get("APE_BUILD_FALLBACK") == "1"}
 
 
 def _build_dev_projected(run: GateRun) -> float:
@@ -1356,10 +1472,29 @@ def _anchor_cells(run: GateRun, profile: str) -> list[PlanCell]:
     ]
 
 
+ANCHOR_CODE = ("src/ape/anchor", "src/ape/tasks/anchor_graphragbench.py")  # the PC1 answerer, scorers and index code
+
+
+def anchor_code_hash() -> str:
+    """sha256 (12 hex) over the anchor's code (ANCHOR_CODE): its answerer, both scorers, bge and the index build.
+    Inspect's task identity leaves the scorer out, so the anchor's eval logs live in a directory keyed by this
+    hash: after a harness fix the anchor runs and scores afresh, instead of reusing the old logs' scores."""
+    files: list[Path] = []
+    for rel in ANCHOR_CODE:
+        p = ROOT / rel
+        files += sorted(p.rglob("*.py")) if p.is_dir() else [p]
+    h = hashlib.sha256()
+    for f in files:
+        h.update(str(f.relative_to(ROOT)).encode() + b"\0" + (f.read_bytes() if f.is_file() else b"") + b"\0")
+    return h.hexdigest()[:12]
+
+
 def _anchor_params(run: GateRun) -> dict:
     name, _ = anchor_profile_name(run)
     data = "fixture" if run.offline else _show(run.anchor_data_dir) if run.anchor_data_dir else "cache/graphragbench"
-    return {"scale": scale(run), "profile": name, "modes": list(ANCHOR_MODES), "data": data, "env_knobs": _env_knobs()}
+    # The anchor always builds with the paper's builder (D-009), never D-017's fallback: APE_BUILD_FALLBACK is not its knob.
+    knobs = {k: v for k, v in _env_knobs().items() if k != "APE_BUILD_FALLBACK"}
+    return {"scale": scale(run), "profile": name, "modes": list(ANCHOR_MODES), "data": data, "code": anchor_code_hash(), "env_knobs": knobs}
 
 
 def _anchor(run: GateRun, record: dict) -> None:
@@ -1399,7 +1534,7 @@ def _anchor(run: GateRun, record: dict) -> None:
         from .llm.ledger import Ledger
         from .models import build_settings
 
-        build_model, build_effort = build_settings(profile)
+        build_model, build_effort = build_settings(profile, fallback=False)  # the paper's builder, whatever D-017 decides for the gate
         llm = BuildLlm(build_model, Ledger(cfg.ledger_path), {"anchor": gb.ANCHOR_ID, "system": "lightrag"}, reasoning_effort=build_effort).lightrag_func()
     from .anchor.bge import anchor_embedder
 
@@ -1416,8 +1551,9 @@ def _anchor(run: GateRun, record: dict) -> None:
         record["index"] = {"path": _show(wd), "status": "built", "index_hash": m.get("index_hash")}
     # The runs: one eval set, hybrid and naive.
     tasks = [graphragbench_anchor(mode=mode, n_per_type=n_per_type, data=str(data)) for mode in ANCHOR_MODES]
-    log_dir = adir / "logs"
+    log_dir = adir / f"logs-{anchor_code_hash()}"  # a fixed scorer scores afresh: Inspect's task identity omits the scorer
     record["log_dirs"] = [_show(log_dir)]
+    record["anchor_code"] = anchor_code_hash()
     if run.offline:
         from .anchor.fixture import mock_answerer, mock_judge
 
@@ -1648,6 +1784,7 @@ def _pilot_params(run: GateRun) -> dict:
         "power": {"sizes": POWER_SIZES, "sims": POWER_SIMS["offline" if run.tiny else "live"]},
         "lightrag_kind": "oracle" if run.offline else "extract",
         "fake_author": run.offline,
+        "builder": build_params(run),
         "env_knobs": _env_knobs(),
     }
 
@@ -1978,11 +2115,29 @@ def _refuse_if_frozen(name: str) -> Callable[[GateRun], str | None]:
     return refuse
 
 
+def _smoke_freeze_refusal(run: GateRun) -> str:
+    """A smoke run's freeze refusal: it never freezes; the draft pre-registration's open items are listed too."""
+    text = run.prereg_path.read_text() if run.prereg_path.is_file() else ""
+    items = prereg_placeholders(text)
+    msg = f"freeze refused:\n  - run {run.run_id!r} is a smoke run (SMOKE_SCALE, FIX_PLAN FX-8): smoke runs never freeze, so they never reach the test split"
+    if items:
+        listing = "\n".join(f"    line {p['line']}: {p['marker']}" for p in items)
+        msg += f"\n  - {_show(run.prereg_path)} still has {len(items)} unfilled item(s):\n{listing}"
+    return msg
+
+
 def _refuse_refreeze(run: GateRun) -> str | None:
+    """Before any record (and before the budget guard): a smoke run never freezes; a frozen run is frozen once. A
+    freeze interrupted after writing freeze.json (its manifest not complete, the frozen files unchanged) is not
+    refused: `_freeze` completes it (`_complete_freeze`)."""
+    if run.smoke:
+        return _smoke_freeze_refusal(run)
     record = read_freeze(run)
     if record is None:
         return None
     changed = frozen_changes(record)
+    if not changed and (read_manifest(run, "freeze") or {}).get("status") not in COMPLETE:
+        return None
     what = ("frozen file(s) changed since: " + "; ".join(changed)) if changed else "its inputs are unchanged (--force does not re-freeze)"
     return f"freeze: run {run.run_id!r} was frozen at {record['frozen_at']} ({_show(run.freeze_path)}); a run is frozen once, and {what}. {DEVIATION[0].upper() + DEVIATION[1:]}"
 
@@ -2036,7 +2191,59 @@ def _freeze_inputs(run: GateRun) -> dict[str, Path]:
     return {"GATE_PREREG.md": run.prereg_path} | {k: p for k, p in frozen_files(run, run.prereg_path).items() if k != "GATE_PREREG.md"}
 
 
+def _freeze_provenance_lines(run: GateRun, freeze: dict) -> list[str]:
+    """The freeze's record in PROVENANCE.md (its heading names the run and `frozen_at`, so a completion can find it)."""
+    git, seed_base, pc1_accepted = freeze["git"], freeze["test_seeds"]["base"], freeze.get("pc1_accepted")
+    return [
+        f"\n## Gate freeze: run `{run.run_id}` ({freeze['frozen_at']}){' (OFFLINE REHEARSAL)' if run.offline else ''}\n",
+        f"- **Commit:** `{git['commit']}`; analysis code (`src/ape/analysis/`, `src/ape/analyze_gate.py`) at `{freeze['analysis_commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{APG_PIN}`).",
+        "- **Frozen files** (sha256):",
+        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
+        f"- **Design knobs** (APE_* set when tune and pilot ran; build-test and test refuse others): {_fmt_env(freeze.get('design_env'))}.",
+        *([f"- **PC1 failed and was accepted at the freeze:** {pc1_accepted['reason']}"] if pc1_accepted else []),
+        f"- **Test seeds:** {seed_base}-{freeze['test_seeds']['last']} (block base {seed_base}). A later gate run (an extension or a fix cycle) freezes a fresh block. "
+        f"<!-- ape:test-seeds run={run.run_id} base={seed_base} count={freeze['test_seeds']['count']} -->",
+        f"- **Code:** build-test and test run only at `{git['commit']}` ({', '.join(CODE_PATHS)} unchanged).",
+        f"- **Record:** `{_show(run.freeze_path)}`. {DEVIATION[0].upper() + DEVIATION[1:]}.",
+        "",
+    ]
+
+
+def _freeze_provenance_path(run: GateRun) -> Path:
+    return run.work_dir / "PROVENANCE.freeze.md" if run.offline else run.provenance_path
+
+
+def _write_freeze_provenance(run: GateRun, freeze: dict) -> Path:
+    """Append the freeze's record to PROVENANCE.md (offline: work/PROVENANCE.freeze.md) unless it is already there."""
+    path = _freeze_provenance_path(run)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if f"## Gate freeze: run `{run.run_id}` ({freeze['frozen_at']})" not in (path.read_text() if path.is_file() else ""):
+        with path.open("a") as f:
+            f.write("\n".join(_freeze_provenance_lines(run, freeze)))
+    return path
+
+
+def _record_freeze(run: GateRun, record: dict, freeze: dict, provenance: Path) -> None:
+    record["outputs"] |= {"freeze": _show(run.freeze_path), "provenance": _show(provenance)}
+    record["frozen"] = {k: freeze.get(k) for k in ("files", "rehearsal", "analysis_commit", "code_commit", "test_seeds", "design_env")}
+    if not run.offline:
+        record["warnings"].append(f"commit {_show(run.provenance_path)} (the freeze record) before build-test")
+
+
+def _complete_freeze(run: GateRun, record: dict, freeze: dict) -> None:
+    """A freeze interrupted after writing freeze.json (`_refuse_refreeze` verified its frozen files are unchanged): add
+    PROVENANCE.md's record if it is missing and finish the phase, so the run is not stuck between the two files."""
+    provenance = _write_freeze_provenance(run, freeze)
+    record["warnings"].append(f"completed a freeze interrupted after freeze.json was written ({freeze['frozen_at']}); PROVENANCE.md checked")
+    if freeze.get("rehearsal") and (copy := run.work_dir / "GATE_PREREG.md").is_file():
+        record["outputs"]["prereg_rehearsal"] = _show(copy)
+    _record_freeze(run, record, freeze, provenance)
+
+
 def _freeze(run: GateRun, record: dict) -> None:
+    if not run.smoke and (existing := read_freeze(run)) is not None:
+        _complete_freeze(run, record, existing)
+        return
     problems: list[str] = []
     text = run.prereg_path.read_text() if run.prereg_path.is_file() else ""
     if not text:
@@ -2095,8 +2302,6 @@ def _freeze(run: GateRun, record: dict) -> None:
             (record["warnings"] if run.offline else problems).append(msg)
     if problems:
         raise PhaseError("freeze refused:\n" + "\n".join(f"  - {x}" for x in problems))
-    if not run.offline and (untracked := [_show(run.out_config_dir / n) for n in FROZEN_OUTPUTS if _git("ls-files", "--error-unmatch", str(run.out_config_dir / n)) is None]):
-        record["warnings"].append(f"frozen outputs not in git: {untracked}; commit them with PROVENANCE.md after the freeze")
     git = git_state()
     freeze = {
         "run_id": run.run_id,
@@ -2116,32 +2321,21 @@ def _freeze(run: GateRun, record: dict) -> None:
         "code_commit": git["commit"],
         "test_seeds": {"base": seed_base, "count": test_seed_count(run), "block": SEED_BLOCK, "last": seed_base + test_seed_count(run) - 1},
         "pc1_accepted": pc1_accepted,
+        # The design knobs tune and pilot ran with (stale_upstream checked they still apply): build-test and test refuse
+        # any other value (`_refuse_unless_frozen`), since freeze.json would not otherwise say what design ran.
+        "design_env": _env_knobs(),
     }
     if rehearsal is not None:
         freeze["files"]["GATE_PREREG.md (draft)"] = {"path": _show(run.prereg_path), "sha256": _sha256(run.prereg_path)}
+    # freeze.json first, then PROVENANCE.md: a crash between the two leaves freeze.json with an incomplete freeze
+    # manifest, which `_refuse_refreeze` lets through and `_complete_freeze` finishes (never a stuck run).
     _write_json(run.freeze_path, freeze)
-    lines = [
-        f"\n## Gate freeze: run `{run.run_id}` ({freeze['frozen_at']}){' (OFFLINE REHEARSAL)' if run.offline else ''}\n",
-        f"- **Commit:** `{git['commit']}`; analysis code (`src/ape/analysis/`, `src/ape/analyze_gate.py`) at `{freeze['analysis_commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{APG_PIN}`).",
-        "- **Frozen files** (sha256):",
-        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
-        *([f"- **PC1 failed and was accepted at the freeze:** {pc1_accepted['reason']}"] if pc1_accepted else []),
-        f"- **Test seeds:** {seed_base}-{freeze['test_seeds']['last']} (block base {seed_base}). A later gate run (an extension or a fix cycle) freezes a fresh block. "
-        f"<!-- ape:test-seeds run={run.run_id} base={seed_base} count={freeze['test_seeds']['count']} -->",
-        f"- **Code:** build-test and test run only at `{git['commit']}` ({', '.join(CODE_PATHS)} unchanged).",
-        f"- **Record:** `{_show(run.freeze_path)}`. {DEVIATION[0].upper() + DEVIATION[1:]}.",
-        "",
-    ]
-    provenance = run.work_dir / "PROVENANCE.freeze.md" if run.offline else run.provenance_path
-    provenance.parent.mkdir(parents=True, exist_ok=True)
-    with provenance.open("a") as f:
-        f.write("\n".join(lines))
-    record["outputs"] |= {"freeze": _show(run.freeze_path), "provenance": _show(provenance)} | ({"prereg_rehearsal": _show(prereg)} if rehearsal is not None else {})
-    record["frozen"] = {"files": freeze["files"], "rehearsal": freeze["rehearsal"], "analysis_commit": freeze["analysis_commit"], "code_commit": freeze["code_commit"], "test_seeds": freeze["test_seeds"]}
+    provenance = _write_freeze_provenance(run, freeze)
+    if rehearsal is not None:
+        record["outputs"]["prereg_rehearsal"] = _show(prereg)
+    _record_freeze(run, record, freeze, provenance)
     if run.accept_pc1_failure:  # recorded, but not part of the freeze's fingerprint (O4): a later `all` without it still skips
         record["accept_pc1_failure"] = run.accept_pc1_failure
-    if not run.offline:
-        record["warnings"].append(f"commit {_show(run.provenance_path)} (the freeze record) before build-test")
 
 
 # build-test ----------------------------------------------------------------------------------------
@@ -2160,9 +2354,20 @@ def frozen_code_drift(run: GateRun) -> list[str] | None:
     return code_drift(freeze.get("code_commit") or (freeze.get("git") or {}).get("commit"))
 
 
+def design_env_changes(run: GateRun) -> list[str]:
+    """The design knobs (`_env_knobs`) set now that differ from those the freeze recorded (`design_env`), as
+    `KNOB: frozen 'a', now 'b'`. Empty for a freeze from before design knobs were recorded."""
+    frozen = (read_freeze(run) or {}).get("design_env")
+    if frozen is None:
+        return []
+    now = _env_knobs()
+    return [f"{k}: frozen {frozen.get(k)!r}, now {now.get(k)!r}" for k in sorted(set(frozen) | set(now)) if frozen.get(k) != now.get(k)]
+
+
 def _refuse_unless_frozen(name: str) -> Callable[[GateRun], str | None]:
     """build-test and test: the run is frozen, every frozen file matches its hash, and (live) the code is exactly the
-    freeze commit's (O3). Offline rehearsals run on a working tree, so drift is only a warning there (`_warn_drift`)."""
+    freeze commit's (O3) and the design knobs are the frozen ones (`design_env_changes`). Offline rehearsals run on a
+    working tree, so drift and knobs are only warnings there (`_warn_drift`)."""
 
     def refuse(run: GateRun) -> str | None:
         if run.smoke:
@@ -2178,15 +2383,21 @@ def _refuse_unless_frozen(name: str) -> Callable[[GateRun], str | None]:
             return f"{name}: cannot verify that {', '.join(CODE_PATHS)} are the freeze commit's (git unavailable, or freeze.json has no commit)"
         if drift:
             return f"{name}: code changed since the freeze commit {(read_freeze(run) or {}).get('code_commit')}: {drift[:10]}{' ...' if len(drift) > 10 else ''}. Check out that commit to run it; {DEVIATION}"
+        if knobs := design_env_changes(run):
+            return f"{name}: design knob(s) differ from the ones the freeze recorded (tune and pilot ran with those): {'; '.join(knobs)}. Restore them; {DEVIATION}"
         return None
 
     return refuse
 
 
 def _warn_drift(run: GateRun, record: dict) -> None:
-    """Offline rehearsals: code drift since the rehearsal freeze is a warning (a live run refuses)."""
-    if run.offline and (drift := frozen_code_drift(run)):
+    """Offline rehearsals: code drift and changed design knobs since the rehearsal freeze are warnings (a live run refuses)."""
+    if not run.offline:
+        return
+    if drift := frozen_code_drift(run):
         record["warnings"].append(f"code differs from the rehearsal freeze's commit: {drift[:10]}{' ...' if len(drift) > 10 else ''} (a live run would refuse)")
+    if knobs := design_env_changes(run):
+        record["warnings"].append(f"design knob(s) differ from the rehearsal freeze's: {'; '.join(knobs)} (a live run would refuse)")
 
 
 def _test_tasks_per_world(p: Plan) -> int:
@@ -2578,7 +2789,7 @@ PHASE_DEFS: dict[str, Phase] = {
     "preflight": Phase(
         "preflight",
         _preflight,
-        inputs=lambda r: {**_cfg_inputs(r, "models.yaml", "model_costs.yaml", "run_plan.yaml"), "PROVENANCE.md": r.provenance_path},
+        inputs=lambda r: _cfg_inputs(r, "models.yaml", "model_costs.yaml", "run_plan.yaml"),  # PROVENANCE.md: `_provenance_facts`
         params=_preflight_params,
         projected=lambda r: 0.0,
         profile=gate_profile,
@@ -2587,7 +2798,7 @@ PHASE_DEFS: dict[str, Phase] = {
         "build-dev",
         _build_dev,
         inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml"),
-        params=lambda r: {"scale": scale(r), "worlds": dev_world_specs(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline},
+        params=lambda r: {"scale": scale(r), "worlds": dev_world_specs(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline, "builder": build_params(r)},
         projected=_build_dev_projected,
         profile=gate_profile,
         requires=("preflight",),
@@ -2640,7 +2851,10 @@ PHASE_DEFS: dict[str, Phase] = {
         "build-test",
         _build_test,
         inputs=_frozen_inputs,
-        params=lambda r: {"scale": scale(r), "worlds": test_world_specs(r), "test_seed_base": run_test_seed_base(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline},
+        params=lambda r: {
+            "scale": scale(r), "worlds": test_world_specs(r), "test_seed_base": run_test_seed_base(r), "lightrag_kind": "oracle" if r.offline else "extract",
+            "fake_author": r.offline, "builder": build_params(r),
+        },  # fmt: skip
         projected=lambda r: project(r, [plan(r).cell(c) for c in TEST_BUILD_CELLS.values()]),
         profile=gate_profile,
         requires=("freeze",),

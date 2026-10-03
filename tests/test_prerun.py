@@ -24,6 +24,13 @@ def clean_env(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def code_unchanged(monkeypatch):
+    """The suite runs on whatever working tree it finds (uncommitted edits included): the smoke's code is the code
+    that would run unless a test says otherwise (`code_drift` is tested on its own in test_run_gate)."""
+    monkeypatch.setattr(rg, "code_drift", lambda commit: [])
+
+
 def _head() -> str:
     return rg.git_state()["commit"]
 
@@ -105,11 +112,24 @@ def test_every_required_check_needs_a_passing_live_result(clean_env):
 def test_a_smoke_on_other_code_or_other_snapshots_is_refused(clean_env, monkeypatch):
     run = _run(clean_env)
     _write_smoke(run.smoke_dir, commit="f" * 40)
-    monkeypatch.setattr(rg, "_git_is_ancestor", lambda commit: False)
-    assert any("which is not HEAD or an ancestor of it" in p for p in rg.check_live_smoke(run, GATE)[0])
-    monkeypatch.setattr(rg, "_git_is_ancestor", lambda commit: None)
-    assert any("cannot tell whether its commit" in p for p in rg.check_live_smoke(run, GATE)[0])
-    monkeypatch.undo()
+    # Not ancestry but the code itself: an ancestor commit whose src/ differs from what would run is refused.
+    monkeypatch.setattr(rg, "code_drift", lambda commit: ["src/ape/run_gate.py"])
+    problems = rg.check_live_smoke(run, GATE)[0]
+    assert any("ran at ffffffffffff, but src, power, uv.lock differ from that commit now: ['src/ape/run_gate.py']" in p for p in problems), problems
+    monkeypatch.setattr(rg, "code_drift", lambda commit: None)
+    assert any("cannot tell whether the code it ran at ffffffffffff is the code that would run" in p for p in rg.check_live_smoke(run, GATE)[0])
+    monkeypatch.setattr(rg, "code_drift", lambda commit: [])
+    assert rg.check_live_smoke(run, GATE)[0] == [], "another commit with the same code is the same code"
+    # A smoke of uncommitted code smoked no commit; a record from before `code_dirty` falls back to `git_dirty`.
+    record = _write_smoke(run.smoke_dir)
+    record["checks"]["L2"]["code_dirty"] = ["src/ape/lgr/build.py"]
+    record["checks"]["effort"]["git_dirty"] = True
+    record["checks"]["orchestrator"] |= {"git_dirty": True, "code_dirty": []}  # dirty elsewhere only: fine
+    (run.smoke_dir / "checks.json").write_text(json.dumps(record))
+    problems = rg.check_live_smoke(run, GATE)[0]
+    assert any("smoke check 'L2' ran with uncommitted code changes ['src/ape/lgr/build.py']" in p for p in problems)
+    assert any("smoke check 'effort' ran with uncommitted code changes" in p for p in problems)
+    assert not any("'orchestrator'" in p for p in problems)
     # PROVENANCE.md pins: the smoke must have run on the pinned snapshot of every alias the gate profile calls;
     # a pinned alias the profile does not call (Sol) does not matter.
     _pins(run.provenance_path, {"gpt-6-luna": "gpt-6-luna-2026-09-01", "gpt-6-sol": "gpt-6-sol-2026-09-01"})
@@ -146,10 +166,65 @@ def test_live_preflight_refuses_without_the_smoke_and_records_an_override(clean_
     m = read_manifest(run, "preflight")
     assert m["smoke_check"] == {"skipped": "probe only: smoke deferred by the analyst"} and m["checks"]["smoke"] == {"skipped": "probe only: smoke deferred by the analyst"}
     assert any("the live smoke check was skipped" in w for w in m["warnings"])
-    # A passing smoke written afterwards re-runs preflight (its record is a preflight input) and then passes on its own.
+    assert rg.read_run_info(run)["smoke_check"]["override"] == "probe only: smoke deferred by the analyst"
+    # The smoke is settled once per run: a passing smoke written afterwards does not re-run preflight (it is no input)...
+    _write_smoke(run.smoke_dir)
+    assert run_phases(run, "preflight") == {"preflight": "skipped"}
+    # ...but a preflight that runs again (here forced) takes it, replacing the run's override.
+    assert run_phases(_run(clean_env, force=True, **paths), "preflight") == {"preflight": "done"}
+    assert read_manifest(run, "preflight")["checks"]["smoke"] == "ok"
+    assert rg.read_run_info(run)["smoke_check"]["commits"] == [_head()] and "override" not in rg.read_run_info(run)["smoke_check"]
+
+
+def test_the_smoke_is_settled_once_per_run_and_the_documented_steps_never_reopen_it(clean_env, monkeypatch):
+    """The documented flow (READINESS "Running the gate"): anchor, then all to the freeze; the pre-registration filled
+    and committed; freeze (PROVENANCE.md's record); then all again, perhaps a week later. Only the run's first preflight
+    checks the smoke's age; the later steps neither re-run preflight nor reopen the smoke while the code is unchanged."""
+    paths = _live_ready(clean_env, monkeypatch)
+    run = _run(clean_env, **paths)
     _write_smoke(run.smoke_dir)
     assert run_phases(run, "preflight") == {"preflight": "done"}
-    assert read_manifest(run, "preflight")["checks"]["smoke"] == "ok"
+    settled = rg.read_run_info(run)["smoke_check"]
+    assert settled["commits"] == [_head()] and set(settled["checks"]) == set(REQUIRED)
+    fingerprint = read_manifest(run, "preflight")["fingerprint"]
+    # A week later: the smoke is stale; the pre-registration's commit moved HEAD (no code changed); the freeze appended
+    # its record to PROVENANCE.md; the run's outputs are under runs/<id>/config/.
+    _write_smoke(run.smoke_dir, age_days=8)
+    real_git = rg._git
+    monkeypatch.setattr(rg, "_git", lambda *a: "e" * 40 if a == ("rev-parse", "HEAD") else real_git(*a))
+    with run.provenance_path.open("a") as f:
+        f.write("\n## Gate freeze: run `live` (2026-10-09T00:00:00+00:00)\n- **Record:** `runs/live/freeze.json`.\n")
+    run.out_config_dir.mkdir(parents=True, exist_ok=True)
+    (run.out_config_dir / "selected.yaml").write_text("APG*: {}\n")
+    assert rg.phase_state(run, "preflight")["fingerprint"] == fingerprint
+    assert run_phases(run, "preflight") == {"preflight": "skipped"}
+    # A preflight that does run (forced here; or after a new probe) reuses the settlement: the age is not re-checked.
+    assert run_phases(_run(clean_env, force=True, **paths), "preflight") == {"preflight": "done"}
+    m = read_manifest(run, "preflight")
+    assert m["smoke_check"]["reused"] is True and m["checks"]["smoke"].startswith("ok (settled at this run's first preflight")
+    # Another run checks afresh, and refuses the week-old smoke.
+    with pytest.raises(PreflightError, match="days old"):
+        run_phases(GateRun("live-2", runs_root=clean_env / "runs", smoke_dir=run.smoke_dir, provenance_path=run.provenance_path, **paths), "preflight")
+    # Changed code reopens it: only a smoke of this code will do.
+    monkeypatch.setattr(rg, "code_drift", lambda commit: ["src/ape/agent/kb_react.py"])
+    with pytest.raises(PreflightError, match=r"changed since the smoke this run accepted(.|\n)*days old"):
+        run_phases(_run(clean_env, force=True, **paths), "preflight")
+
+
+def test_the_preflight_fingerprint_follows_the_code_not_the_commit(clean_env, monkeypatch):
+    """`code_state`: HEAD's object ids of src/, power/ and uv.lock plus their uncommitted changes, so a commit of other
+    files leaves it alone, and a code change (committed or not) does not."""
+    real_git = rg._git
+    base = rg.code_state()
+    assert base is not None and set(base["head"]) == set(rg.CODE_PATHS)
+    monkeypatch.setattr(rg, "_git", lambda *a: "e" * 40 if a == ("rev-parse", "HEAD") else real_git(*a))
+    assert rg.code_state() == base, "a new commit that leaves CODE_PATHS alone"
+    monkeypatch.setattr(rg, "_git", lambda *a: "f" * 40 if a == ("rev-parse", "HEAD:src") else real_git(*a))
+    assert rg.code_state() != base, "a commit that changes src/"
+    monkeypatch.setattr(rg, "_git", lambda *a: "diff --git a/src/x.py b/src/x.py" if a[0] == "diff" else real_git(*a))
+    assert rg.code_state()["uncommitted"] not in (None, base["uncommitted"]), "an uncommitted change to the code"
+    monkeypatch.setattr(rg, "_git", lambda *a: None)
+    assert rg.code_state() is None
 
 
 def test_offline_and_smoke_runs_never_check_the_live_smoke(clean_env):
