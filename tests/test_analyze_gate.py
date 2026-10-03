@@ -350,3 +350,123 @@ def test_a_pc1_failure_accepted_at_the_freeze_does_not_block_the_verdict():
     assert _verdict(rows({"push": 0.0, "pull": 0.0}), pcs)["label"] == "PRECONDITION_FAIL"
     pcs[0]["accepted"] = {"reason": "judge parse rate 99.8%, no index errors; the Luna judge scores lower than gpt-4o-mini"}
     assert _verdict(rows({"push": 0.0, "pull": 0.0}), pcs)["label"] == "GO"
+
+
+
+# --- harness health and matched-budget calibration status ---
+
+
+def _apg_compile(fallback=False, error=None, repaired=(), unknown=0, **extra) -> dict:
+    meta = {"classify_error": error, "classify_fallback": fallback, "classify_repaired": list(repaired), "classify_unknown_ids": unknown}
+    return {"step": 0, "tokens": 100, "fact_ids": [], "meta": meta, "source": "push"} | extra
+
+
+def _lgr_compile(fallback=False, **extra) -> dict:
+    meta = {"lightrag": {"mode": "mix", "keyword_fallback": fallback, "keyword_error": "no keywords" if fallback else None}}
+    return {"step": 0, "tokens": 100, "fact_ids": [], "meta": meta, "source": "push"} | extra
+
+
+def test_compile_health_counts_each_counter_and_reads_absent_meta_as_zero():
+    from ape.analysis.gate_stats import HEALTH_COLUMNS, compile_health
+
+    log = [
+        _apg_compile(),
+        _apg_compile(fallback=True, error="unparseable", repaired=("fence", "fence", "id_prefix"), unknown=2),
+        _lgr_compile(fallback=True),
+        _lgr_compile(source="pull", truncated=True),
+        {"step": 1, "tokens": 50, "meta": {}, "source": "pull", "truncated": False},
+    ]
+    h = compile_health(log, {"search_errors": [{"step": 2, "error": "empty query"}]})
+    assert set(h) == set(HEALTH_COLUMNS)
+    assert (h["classify_compiles"], h["classify_errors"], h["classify_fallbacks"], h["classify_unknown_ids"]) == (2, 1, 1, 2)
+    assert h["classify_repaired"] == {"fence": 1, "id_prefix": 1}  # per compile, not per repair occurrence
+    assert (h["keyword_compiles"], h["keyword_fallbacks"], h["keyword_errors"]) == (2, 1, 1)
+    assert (h["pull_compiles"], h["pull_truncated"], h["search_errors"]) == (2, 1, 1)
+    # Naive mode extracts no keywords, so its always-set flag is not a keyword failure.
+    naive = _lgr_compile(fallback=True)
+    naive["meta"]["lightrag"]["mode"] = "naive"
+    assert compile_health([naive], {})["keyword_compiles"] == 0
+    # A log that predates the counters: zero compiles carry them, so the report reads n/a, never 0%.
+    old = compile_health([{"step": 0, "tokens": 10, "meta": {"route": {}}}], {})
+    assert old["classify_compiles"] == old["keyword_compiles"] == old["search_errors"] == 0
+
+
+def _health_rows() -> pd.DataFrame:
+    zero = {"classify_compiles": 0, "classify_errors": 0, "classify_fallbacks": 0, "classify_repaired": {}, "classify_unknown_ids": 0,
+            "keyword_compiles": 0, "keyword_fallbacks": 0, "keyword_errors": 0, "pull_compiles": 0, "pull_truncated": 0, "search_errors": 0}  # fmt: skip
+    out = []
+    for t in range(20):
+        # APG* push F7-10: 10 compiles per sample, a fallback in 2 of 20 samples -> 2 / 200 = 1% (no warning).
+        out.append(_row(ag.F7_CELL, "APG*", "push", "F7-10", 0, t, 1, 1, run_arm="APG-s", **zero | {"classify_compiles": 10, "classify_fallbacks": int(t < 2), "classify_repaired": {"fence": 1} if t < 4 else {}}))
+        # APG* push F7-1000: 1 compile per sample, a fallback in 3 of 20 -> 15% (warning).
+        out.append(_row(ag.F7_CELL, "APG*", "push", "F7-1000", 0, t, 1, 1, run_arm="APG-s", **zero | {"classify_compiles": 1, "classify_fallbacks": int(t < 3)}))
+        # LGR* pull F7-10: keyword fallback 1 of 20 (5%, not above the threshold); search errors 2 of 22 searches (9.1%, warning).
+        out.append(_row(ag.F7_CELL, "LGR*", "pull", "F7-10", 0, t, 1, 1, run_arm="LGR-s", **zero | {"keyword_compiles": 1, "keyword_fallbacks": int(t < 1), "pull_compiles": 1, "search_errors": int(t < 2)}))
+        # S5o: an APG arm whose logs carry no counters -> n/a, no warning.
+        out.append(_row(ag.DIAG_CELL, "S5o", "push", "F7-10", 0, t, 1, 1, run_arm="S5o", **zero))
+        # S1 has neither counter family: not in the classify or keyword tables.
+        out.append(_row(ag.DIAG_CELL, "S1", "push", "F7-10", 0, t, 1, 1, run_arm="S1", **zero))
+    return pd.DataFrame(out)
+
+
+def test_health_rates_per_arm_mode_and_cell_with_warnings_above_five_percent():
+    h = ag.health(_health_rows())
+    classify = {(e["plan_cell"], e["arm"], e["cell"]): e for e in h["classify"]}
+    assert set(classify) == {(ag.F7_CELL, "APG* (push)", "F7-10"), (ag.F7_CELL, "APG* (push)", "F7-1000"), (ag.DIAG_CELL, "S5o (push)", "F7-10")}
+    assert classify[(ag.F7_CELL, "APG* (push)", "F7-10")]["fallback_rate"] == pytest.approx(0.01)
+    assert classify[(ag.F7_CELL, "APG* (push)", "F7-10")]["repaired_rate"] == {"fence": pytest.approx(0.02)}
+    assert classify[(ag.F7_CELL, "APG* (push)", "F7-1000")]["fallback_rate"] == pytest.approx(0.15)
+    assert classify[(ag.DIAG_CELL, "S5o (push)", "F7-10")]["fallback_rate"] is None  # n/a
+    (kw,) = h["keywords"]
+    assert kw["arm"] == "LGR* (pull)" and kw["fallback_rate"] == pytest.approx(0.05)
+    (sk,) = h["search_kb"]
+    assert sk["searches"] == 22 and sk["error_rate"] == pytest.approx(2 / 22) and sk["truncated_rate"] == 0.0
+    assert h["warnings"] == [
+        f"APG classify fallback rate 15.0% for APG* (push) F7-1000 in {ag.F7_CELL} (> 5%)",
+        f"search_kb error rate 9.1% for LGR* (pull) F7-10 in {ag.F7_CELL} (> 5%)",
+    ]
+    empty = ag.health(pd.DataFrame())
+    assert empty["classify"] == empty["keywords"] == empty["search_kb"] == empty["warnings"] == []
+
+
+def test_matched_calibration_status_from_the_manifest_then_the_yaml_else_na(tmp_path):
+    test = {"cells": {ag.MATCHED_CELL: {"groups": [{"name": "matched", "calibration": {"matched": False, "not_converged": ["LGR*"]}}]}}}
+    c = ag.matched_calibration(test, None)
+    assert c["matched"] is False and c["label"] == "not matched (calibration did not converge for LGR*)" and c["source"] == "test manifest"
+    yml = tmp_path / "budget_calibration.yaml"
+    yml.write_text("context: 300\nmatched: true\nnot_converged: []\n")
+    assert ag.matched_calibration({}, yml) | {} == {"status": "checked", "matched": True, "not_converged": [], "source": "budget_calibration.yaml", "label": "matched"}
+    yml.write_text("context: 300\n")  # a calibration that predates the flag
+    assert ag.matched_calibration({}, yml)["status"] == "n/a"
+    assert ag.matched_calibration(None, tmp_path / "missing.yaml")["label"] == "calibration status n/a"
+
+
+def _minimal_decision(health: dict, calibration: dict) -> dict:
+    return {
+        "header": {"run_id": "r", "offline": True, "generated_at": "t", "git": {}, "freeze": None, "selected": {}, "spend": {}, "test_status": "done", "primary_complete": True, "cells_not_done": {}},
+        "verdict": {"label": "GO", "reasons": [], "notes": [], "modes": {}},
+        "extension": None,
+        "caveats": [],
+        "preconditions": [],
+        "diagnosis": {"rule": "r", "s5o_vs_lgr": None, "label": None, "reason": "n/a", "pipeline_misses": {}},
+        "tables": {"arms": {}, "costs": {}, "cost_notes": [], "build_costs": {"note": "none"}, "latency": {}, "determinism": {}, "exception_applies": {}},
+        "health": health,
+        "secondaries": {ag.MATCHED_CELL: {"title": "Matched budget", "status": "done", "reason": None, "arms": {}, "comparisons": {}, "calibration": calibration}},
+        "secondary_pairings": {"id_only_vs_descriptive": {}, "te_all_vs_retrieved": {}},
+        "coverage": [],
+        "choices": [],
+    }  # fmt: skip
+
+
+def test_report_renders_health_warnings_tables_and_the_calibration_label():
+    h = ag.health(_health_rows())
+    cal = ag.matched_calibration({"cells": {ag.MATCHED_CELL: {"groups": [{"name": "matched", "calibration": {"matched": False, "not_converged": ["LGR*", "S3s"]}}]}}}, None)
+    md = ag.render(json.loads(json.dumps(ag._clean(_minimal_decision(h, cal)))))
+    assert "\n## Harness health\n" in md and "- Harness health: 2 warning(s)" in md
+    assert "- ⚠️ APG classify fallback rate 15.0% for APG* (push) F7-1000" in md
+    assert "| gate.test.f7 | APG* (push) | F7-1000 | 20 | 15.0% | 0.0% | – | 0.00 |" in md
+    assert "| gate.diag | S5o (push) | F7-10 | 0 | n/a | n/a | – | n/a |" in md  # absent meta degrades to n/a
+    assert "| gate.test.f7 | LGR* (pull) | F7-10 | 22 | 9.1% | 0.0% |" in md
+    assert "**Not matched (calibration did not converge for LGR*, S3s):**" in md
+    na = ag.render(json.loads(json.dumps(ag._clean(_minimal_decision(ag.health(pd.DataFrame()), ag.matched_calibration(None, None))))))
+    assert "- No warnings." in na and "- n/a (no APG rows)." in na and "Calibration status: n/a" in na

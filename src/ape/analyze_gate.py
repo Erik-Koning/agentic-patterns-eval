@@ -48,6 +48,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from .analysis import cost as costs
 from .analysis.gate_stats import (
@@ -55,6 +56,7 @@ from .analysis.gate_stats import (
     CELL_FLOOR,
     COST_FLAG_RATIO,
     GATE_CELLS,
+    HEALTH_COLUMNS,
     INVARIANT_TOL,
     MARGIN,
     MIN_WORLDS_PER_CELL,
@@ -95,6 +97,8 @@ ALPHA = 0.025  # one-sided level of the reported 95% intervals and of the PC2 / 
 GATE_ALPHA = STAGE_ALPHA["stage1"]  # the gate run's familywise one-sided α across delivery modes (§2, D-023)
 EXTENSION_ALPHA = STAGE_ALPHA["extension"]  # the one pre-registered extension's α (§8)
 EXTENSION_FILE = "extension.json"  # in a run dir: this run is the extension of the named stage-1 run
+HEALTH_WARN = 0.05  # harness health: a rate above this is a report warning (GATE_PREREG sets no threshold; never gated)
+MATCHED_CELL = "gate.sec.matched-300"
 REPS = 10_000  # bootstrap and sign-flip resamples (§2)
 SEED = 0
 
@@ -132,6 +136,10 @@ CHOICES = (
     "ledger records only first embeddings; their cost is spread evenly over the arm's test samples.",
     "The NO-GO diagnosis compares S5o (gate.diag) with LGR* (push) on their shared tasks, non-inferior when the "
     "lower bound of the 95% CI is above −5 pp.",
+    f"Harness health is reported per plan cell, arm, mode and cell: APG classify errors, fallbacks, repairs and unknown "
+    f"node IDs per compile; LightRAG keyword fallbacks and errors per compile; search_kb errors per search and "
+    f"truncations per pull compile. A fallback, error or truncation rate above {HEALTH_WARN:.0%} is a report warning. "
+    "GATE_PREREG sets no threshold for these, so they never gate; a compile log without the counters reads n/a.",
 )
 
 
@@ -190,7 +198,7 @@ ROW_COLUMNS = (
     "plan_cell", "group", "label", "arm", "run_arm", "delivery", "cell", "world", "task", "epoch", "success", "error",
     "partial_credit", "evidence_recall", "evidence_recall_first", "evidence_recall_step_mean", "error_label", "case",
     "ctx_tokens", "compile_tokens", "compile_ms", "budget", "cap_hit", "limit_hit", "pipeline_miss", "cost_usd", "usd",
-    "total_time", "working_time", "exposure", "split", "exception_style",
+    "total_time", "working_time", "exposure", "split", "exception_style", *HEALTH_COLUMNS,
 )  # fmt: skip
 
 
@@ -681,6 +689,89 @@ def _seed_keys(df: pd.DataFrame) -> pd.Series:
     return df["cell"].astype(str) + ":" + df["world"].astype(str).str.rsplit("-", n=1).str[-1]
 
 
+def _rate(num: float, den: float) -> float | None:
+    return float(num) / den if den else None
+
+
+def _is_apg(run_arm: Any) -> bool:
+    return isinstance(run_arm, str) and (run_arm.startswith("APG") or run_arm == "S5o")
+
+
+def _is_lgr(run_arm: Any) -> bool:
+    return isinstance(run_arm, str) and run_arm.startswith("LGR")
+
+
+def health(rows: pd.DataFrame) -> dict:
+    """Harness health per (plan cell, arm, mode, cell), from `gate_stats.compile_health`'s per-sample counters:
+    APG classify (APG arms and S5o), LightRAG keywords (LightRAG arms) and search_kb (pull rows). Rates are per
+    compile (per search for search errors); `None` (n/a) when no compile carried the counters. A fallback, error or
+    truncation rate above HEALTH_WARN is listed under `warnings` (a report warning, never a precondition)."""
+    out: dict[str, Any] = {"threshold": HEALTH_WARN, "classify": [], "keywords": [], "search_kb": [], "warnings": []}
+    if rows.empty or "run_arm" not in rows:
+        return out
+    frame = rows.copy()
+    for c in HEALTH_COLUMNS:
+        if c not in frame:
+            frame[c] = [{} for _ in range(len(frame))] if c == "classify_repaired" else 0
+    frame["classify_repaired"] = [r if isinstance(r, dict) else {} for r in frame["classify_repaired"]]
+    num = [c for c in HEALTH_COLUMNS if c != "classify_repaired"]
+    frame[num] = frame[num].apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    def warn(kind: str, what: str, rate: float | None, where: dict) -> None:
+        if rate is not None and rate > HEALTH_WARN:
+            out["warnings"].append(f"{kind} {what} {rate:.1%} for {where['arm']} {where['cell']} in {where['plan_cell']} (> {HEALTH_WARN:.0%})")
+
+    for (plan_cell, label, delivery, cell), g in frame.groupby(["plan_cell", "label", "delivery", "cell"], sort=True):
+        where = {"plan_cell": plan_cell, "arm": _arm_key(label, delivery), "cell": cell}
+        if any(_is_apg(a) for a in g["run_arm"]):
+            n = int(g["classify_compiles"].sum())
+            repaired: dict[str, int] = {}
+            for r in g["classify_repaired"]:
+                for k, v in r.items():
+                    repaired[k] = repaired.get(k, 0) + int(v)
+            e = where | {
+                "compiles": n,
+                "fallback_rate": _rate(g["classify_fallbacks"].sum(), n),
+                "error_rate": _rate(g["classify_errors"].sum(), n),
+                "repaired_rate": {k: _rate(v, n) for k, v in sorted(repaired.items())},
+                "unknown_ids_per_compile": _rate(g["classify_unknown_ids"].sum(), n),
+            }
+            out["classify"].append(e)
+            warn("APG classify", "fallback rate", e["fallback_rate"], where)
+            warn("APG classify", "error rate", e["error_rate"], where)
+        if any(_is_lgr(a) for a in g["run_arm"]):
+            n = int(g["keyword_compiles"].sum())
+            e = where | {"compiles": n, "fallback_rate": _rate(g["keyword_fallbacks"].sum(), n), "error_rate": _rate(g["keyword_errors"].sum(), n)}
+            out["keywords"].append(e)
+            warn("LightRAG keyword", "fallback rate", e["fallback_rate"], where)
+            warn("LightRAG keyword", "error rate", e["error_rate"], where)
+        if delivery == "pull":
+            pulls, errors = int(g["pull_compiles"].sum()), int(g["search_errors"].sum())
+            e = where | {"searches": pulls + errors, "error_rate": _rate(errors, pulls + errors), "truncated_rate": _rate(g["pull_truncated"].sum(), pulls)}
+            out["search_kb"].append(e)
+            warn("search_kb", "error rate", e["error_rate"], where)
+            warn("search_kb", "truncation rate", e["truncated_rate"], where)
+    return out
+
+
+def matched_calibration(test: dict | None, calibration_path: Path | None) -> dict:
+    """The matched-budget calibration status (R4): the test manifest's `matched` group `calibration` when present,
+    else budget_calibration.yaml's `matched` / `not_converged`; n/a when neither records it."""
+    groups = (((test or {}).get("cells") or {}).get(MATCHED_CELL) or {}).get("groups") or []
+    rec = next((g.get("calibration") for g in groups if g.get("name") == "matched" and isinstance(g.get("calibration"), dict)), None)
+    source = "test manifest" if rec is not None else None
+    if rec is None and calibration_path is not None and Path(calibration_path).is_file():
+        loaded = yaml.safe_load(Path(calibration_path).read_text()) or {}
+        if "matched" in loaded:
+            rec, source = {"matched": loaded.get("matched"), "not_converged": loaded.get("not_converged")}, "budget_calibration.yaml"
+    if rec is None or rec.get("matched") is None:
+        return {"status": "n/a", "matched": None, "not_converged": [], "source": source, "label": "calibration status n/a"}
+    not_converged = [str(a) for a in rec.get("not_converged") or []]
+    matched = bool(rec["matched"])
+    label = "matched" if matched else f"not matched (calibration did not converge for {', '.join(not_converged) or 'an arm'})"
+    return {"status": "checked", "matched": matched, "not_converged": not_converged, "source": source, "label": label}
+
+
 def secondary(rows: pd.DataFrame, coverage: list[dict], plan_cell: str, title: str, comparisons, reps: int = REPS) -> dict:
     groups = [c for c in coverage if c["plan_cell"] == plan_cell]
     sub = rows[rows["plan_cell"] == plan_cell] if len(rows) else rows
@@ -873,6 +964,7 @@ def analyze(run) -> dict:
             "determinism": determinism_table(tables_rows),
             "exception_applies": exception_table(primary_rows),
         },
+        "health": health(rows),
         "secondaries": {cell: secondary(rows, coverage, cell, title, comps) for cell, title, comps in SECONDARIES},
         "secondary_pairings": {"id_only_vs_descriptive": id_only_pairing(rows), "te_all_vs_retrieved": te_pairing(rows)},
         "coverage": coverage,
@@ -891,6 +983,7 @@ def analyze(run) -> dict:
             "bootstrap_reps": REPS,
         },
     }
+    decision["secondaries"][MATCHED_CELL]["calibration"] = matched_calibration(test, getattr(run, "budget_calibration_path", None))
     decision = _clean(decision)
     out = run.dir / REPORT_DIR
     out.mkdir(parents=True, exist_ok=True)
@@ -913,6 +1006,7 @@ SECTIONS = (
     "Cost",
     "Latency",
     "Determinism",
+    "Harness health",
     "exception_applies tasks",
     "Secondaries",
     "Coverage",
@@ -944,6 +1038,7 @@ def render(d: dict) -> str:
         f"- Test phase: {h['test_status'] or 'not run'}; primary complete: {_f(h['primary_complete']) if h['primary_complete'] is not None else '–'}"
         + (f"; cells not done: {', '.join(f'{c} ({s})' for c, s in h['cells_not_done'].items())}" if h["cells_not_done"] else "")
         + ".",
+        f"- Harness health: {len((d.get('health') or {}).get('warnings') or [])} warning(s) (see Harness health).",
         "",
     ]
 
@@ -1041,6 +1136,16 @@ def render(d: dict) -> str:
                  [[a, _f(x["total_time_median_s"], 2), _f(x["total_time_p95_s"], 2), _f(x["working_time_median_s"], 2), _f(x["working_time_p95_s"], 2), _f(x["compile_ms_median"], 1), _f(x["compile_ms_p95"], 1)] for a, x in t["latency"].items()])]  # fmt: skip
     L += ["## Determinism", "", "Share of tasks whose epochs all agree on success.", ""]
     L += [_table(["Arm", "Epochs", "Agreement"], [[a, x["epochs"], _f(x["epoch_agreement"]) if x["epoch_agreement"] is not None else "– (one epoch)"] for a, x in t["determinism"].items()])]
+    hh = d.get("health") or {"threshold": HEALTH_WARN, "classify": [], "keywords": [], "search_kb": [], "warnings": []}
+    L += ["## Harness health", "", f"Per plan cell, arm, mode and cell. Rates are per compile (per search for search_kb errors); above {hh['threshold']:.0%} is a report warning, never a precondition. n/a: no compile carried the counter.", ""]
+    L += [f"- ⚠️ {w}" for w in hh["warnings"]] or ["- No warnings."]
+    L += ["", "APG classify:", ""]
+    L += [_table(["Plan cell", "Arm", "Cell", "Compiles", "Fallback", "Error", "Repaired", "Unknown IDs / compile"],
+                 [[e["plan_cell"], e["arm"], e["cell"], e["compiles"], _rate_s(e["fallback_rate"]), _rate_s(e["error_rate"]), ", ".join(f"{k} {_rate_s(v)}" for k, v in e["repaired_rate"].items()) or "–", _f(e["unknown_ids_per_compile"], 2) if e["unknown_ids_per_compile"] is not None else "n/a"] for e in hh["classify"]])] if hh["classify"] else ["- n/a (no APG rows).", ""]  # fmt: skip
+    L += ["LightRAG keywords:", ""]
+    L += [_table(["Plan cell", "Arm", "Cell", "Compiles", "Fallback", "Error"], [[e["plan_cell"], e["arm"], e["cell"], e["compiles"], _rate_s(e["fallback_rate"]), _rate_s(e["error_rate"])] for e in hh["keywords"]])] if hh["keywords"] else ["- n/a (no LightRAG rows).", ""]
+    L += ["search_kb (pull):", ""]
+    L += [_table(["Plan cell", "Arm", "Cell", "Searches", "Error", "Truncated"], [[e["plan_cell"], e["arm"], e["cell"], e["searches"], _rate_s(e["error_rate"]), _rate_s(e["truncated_rate"])] for e in hh["search_kb"]])] if hh["search_kb"] else ["- n/a (no pull rows).", ""]
     L += ["## exception_applies tasks", "", "F7 cells; reported separately (§3).", ""]
     L += [_table(["Arm", "exception_applies n", "Success", "Other n", "Success"], [[a, x["exception_applies"]["samples"], _f(x["exception_applies"]["success"]), x["other"]["samples"], _f(x["other"]["success"])] for a, x in t["exception_applies"].items()])]
 
@@ -1069,12 +1174,22 @@ def render(d: dict) -> str:
                 L += [_table(["Arm", "Median tokens", "Capped", "Within ±25%"], [[a, _f(mt[a]["median_tokens"], 0), _f(mt[a]["gated"]), _f(mt[a]["pass"]) if mt[a]["pass"] is not None else "–"] for a in arms_])]
             if mt.get("notes"):
                 L += ["**Not read as matched** (a capped arm missed the ±25% window; the contrasts above are at unequal context):", ""] + [f"- {n}" for n in mt["notes"]] + [""]
+        if cell == MATCHED_CELL:
+            cal = s.get("calibration") or {}
+            if cal.get("matched") is False:
+                L += [f"**{cal['label'][0].upper() + cal['label'][1:]}:** the pilot found no caps inside the ±25% window for these arms, so the matched-budget runs used the closest caps; the contrasts above are at unequal context.", ""]
+            elif cal.get("status") == "n/a":
+                L += ["Calibration status: n/a (neither the test manifest nor budget_calibration.yaml records it).", ""]
 
     L += ["## Coverage", "", "Every test group the manifest lists.", ""]
     L += [_table(["Plan cell", "Group", "Status", "Arms", "Samples", "Reason"], [[c["plan_cell"], c["group"], c["status"], ", ".join(c["arms"]), c["samples"], c["reason"] or ""] for c in d["coverage"]])]
     L += ["## Analysis choices", "", "Where GATE_PREREG.md is silent (`ape.analyze_gate.CHOICES`):", ""]
     L += [f"{i}. {c}" for i, c in enumerate(d["choices"], 1)] + [""]
     return "\n".join(L)
+
+
+def _rate_s(x: Any) -> str:
+    return "n/a" if x is None else f"{x:.1%}"
 
 
 def _short(value: Any) -> str:
