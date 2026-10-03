@@ -39,7 +39,8 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
                 passes (or its failure is accepted with a diagnosis) and every phase it rests on is current
                 (`stale_upstream`: a re-run of build-dev, tune, anchor and pilot would each be a skip); offline: a
                 rehearsal on a filled copy, with warnings. Then the sha256 of the pre-registration, the
-                FROZEN_CONFIG files, the run's FROZEN_OUTPUTS and the FROZEN_CODE files, the commit (`code_commit`),
+                FROZEN_CONFIG files (run_plan, models and model_costs as the gate's slice: "Config slices" below),
+                the run's FROZEN_OUTPUTS and the FROZEN_CODE files, the commit (`code_commit`),
                 the APG pin, the design knobs tune and pilot ran with (`design_env`) and the run's test-seed block
                 (`choose_test_seed_base`) -> freeze.json, then PROVENANCE.md (a freeze interrupted between the two
                 is completed by the next `freeze`: `_complete_freeze`). `require_frozen` is the guard build-test
@@ -58,6 +59,14 @@ Phases, in order (`all` runs them in this order and stops at the first failure):
                 runs it then too, before reporting the test's failure.
 
 `all` runs every phase through analyze.
+
+Config slices (`ape.freeze_scope`). config/run_plan.yaml, models.yaml and model_costs.yaml are shared with the main
+study and Study G, whose plans keep changing after the gate freezes (pilot recalibration, tuning grids, allocations).
+So the gate fingerprints and freezes only its own slice of each: run_plan's `studies.gate`, `budget.total_usd` and
+`sample_cost_limit`, and the cuts that edit a gate cell; the profiles the gate uses (`gate`, `anchor`, `anchor_luna`);
+and the prices of the models those call. tuning_grid.yaml, the pre-registration, the run's outputs and the frozen code
+are the gate's own and hashed whole. Manifests and freeze.json record a slice as `{path, slice, sha256, file_sha256}`:
+the whole file's hash is information only, never enforced (`frozen_changes` checks the slice).
 
 Freeze. A run is frozen once: after freeze.json exists, `tune`, `pilot` and `anchor` refuse to run (even with
 --force; they would rewrite frozen inputs or pc1.json), and `freeze` re-runs only as a skip. `build-test` and
@@ -218,6 +227,7 @@ import yaml
 from .budget import BudgetError, Plan, PlanCell, Prices, load_assumptions, load_measured, load_plan, program_remaining, projected_cost, remaining, require_affordable
 from .build_quality import worlds_per_cell_note
 from .config import ROOT, Config, embedding_cache
+from .freeze_scope import ConfigSlice, config_input
 from .models import PreflightError, Profile, load_profile, preflight, storage_warnings
 from .runner import INDEX_NAME
 from .spend import LABEL_ENV, REGISTRY_ENV
@@ -434,7 +444,25 @@ def _now() -> str:
 
 
 def _sha256(path: Path) -> str | None:
+    """A file's sha256; for a shared config file taken as a study's slice (`freeze_scope.ConfigSlice`), the slice's."""
+    if isinstance(path, ConfigSlice):
+        return path.sha256()
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def _file_entry(path: Path) -> dict:
+    """How a manifest's inputs and freeze.json record a file: path and sha256; a slice adds its study and, for
+    information only (never enforced), the whole file's sha256."""
+    entry = {"path": _show(path), "sha256": _sha256(path)}
+    if isinstance(path, ConfigSlice):
+        entry |= {"slice": path.study, "file_sha256": _sha256(Path(path))}
+    return entry
+
+
+def _entry_path(entry: dict) -> Path:
+    """A recorded file entry (`_file_entry`) back as the path, or slice, it was hashed as."""
+    p = _resolve(entry["path"])
+    return ConfigSlice(p, study=entry["slice"]) if entry.get("slice") else p
 
 
 def _show(path: Path) -> str:
@@ -946,7 +974,8 @@ class Phase:
 
 
 def _cfg_inputs(run: GateRun, *names: str) -> dict[str, Path]:
-    return {f"config/{n}": run.config(n) for n in names}
+    """Config inputs; the shared files (run_plan, models, model_costs) as the gate's slice (`freeze_scope`)."""
+    return {f"config/{n}": config_input(run.config(n), STUDY) for n in names}
 
 
 # preflight -----------------------------------------------------------------------------------------
@@ -2139,22 +2168,24 @@ def prereg_placeholders(text: str) -> list[dict]:
 
 
 def frozen_files(run: GateRun, prereg: Path) -> dict[str, Path]:
-    """What the freeze hashes: the pre-registration as frozen, the config inputs and the tune/pilot outputs."""
+    """What the freeze hashes: the pre-registration as frozen, the config inputs (the shared run_plan, models and
+    model_costs files as the gate's slice, `freeze_scope`) and the tune/pilot outputs."""
     return (
         {"GATE_PREREG.md": prereg}
-        | {f"config/{n}": run.config(n) for n in FROZEN_CONFIG}
+        | {f"config/{n}": config_input(run.config(n), STUDY) for n in FROZEN_CONFIG}
         | {f"config/{n}": run.out_config_dir / n for n in FROZEN_OUTPUTS}
         | {n: ROOT / n for n in FROZEN_CODE}
     )
 
 
 def frozen_changes(record: dict) -> list[str]:
-    """The frozen files that are missing or no longer match their hash, as `key (path): what`."""
+    """The frozen files that are missing or no longer match their hash, as `key (path): what` (a slice: the study's
+    slice of the file, `_entry_path`; the whole file's `file_sha256` is information only)."""
     out = []
     for key, f in record["files"].items():
-        now = _sha256(_resolve(f["path"]))
+        now = _sha256(_entry_path(f))
         if now != f["sha256"]:
-            out.append(f"{key} ({f['path']}): {'missing' if now is None else 'changed'}")
+            out.append(f"{key} ({f['path']}{', ' + f['slice'] + ' slice' if f.get('slice') else ''}): {'missing' if now is None else 'changed'}")
     return out
 
 
@@ -2323,7 +2354,7 @@ def _freeze_provenance_lines(run: GateRun, freeze: dict) -> list[str]:
         f"\n## Gate freeze: run `{run.run_id}` ({freeze['frozen_at']}){' (OFFLINE REHEARSAL)' if run.offline else ''}\n",
         f"- **Commit:** `{git['commit']}`; analysis code (`src/ape/analysis/`, `src/ape/analyze_gate.py`) at `{freeze['analysis_commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{APG_PIN}`).",
         "- **Frozen files** (sha256):",
-        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
+        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}{' (the gate slice)' if f.get('slice') else ''}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         f"- **Design knobs** (APE_* set when tune and pilot ran; build-test and test refuse others): {_fmt_env(freeze.get('design_env'))}.",
         *([f"- **PC1 failed and was accepted at the freeze:** {pc1_accepted['reason']}"] if pc1_accepted else []),
         *(
@@ -2441,7 +2472,7 @@ def _freeze(run: GateRun, record: dict) -> None:
         "offline": run.offline,
         "rehearsal": rehearsal is not None,
         "placeholders_replaced": rehearsal or [],
-        "files": {k: {"path": _show(p), "sha256": _sha256(p)} for k, p in files.items()},
+        "files": {k: _file_entry(p) for k, p in files.items()},
         "git": git,
         "analysis_commit": _git("log", "-1", "--format=%H", "--", "src/ape/analysis/", "src/ape/analyze_gate.py"),
         "apg_core": {"installed_commit": _apg_installed_commit(), "pinned_commit": APG_PIN},
@@ -2479,7 +2510,7 @@ def _frozen_inputs(run: GateRun) -> dict[str, Path]:
     """The files freeze.json froze, as a phase's inputs: an edit changes the fingerprint, so the phase is not
     skipped and its freeze check (`_refuse_unless_frozen`) names the file."""
     record = read_freeze(run) or {}
-    return {k: _resolve(f["path"]) for k, f in (record.get("files") or {}).items()}
+    return {k: _entry_path(f) for k, f in (record.get("files") or {}).items()}
 
 
 def frozen_code_drift(run: GateRun) -> list[str] | None:
@@ -2890,8 +2921,8 @@ def _analyze_inputs(run: GateRun) -> dict[str, Path]:
         "build-test/worlds.json": run.phase_dir("build-test") / "worlds.json",
         "config/selected.yaml": run.selected_path,
         "config/tuning_grid.yaml": run.config("tuning_grid.yaml"),
-        "config/run_plan.yaml": run.config("run_plan.yaml"),
-        "config/model_costs.yaml": run.costs_path,
+        "config/run_plan.yaml": config_input(run.config("run_plan.yaml"), STUDY),
+        "config/model_costs.yaml": config_input(run.costs_path, STUDY),
         "ledger": Config().ledger_path,
     }
 
@@ -3032,7 +3063,7 @@ def phase_state(run: GateRun, name: str) -> dict:
     """A phase's inputs (hashed), params, upstream fingerprints and fingerprint, as they are now. `run_phase` skips a
     complete phase whose recorded fingerprint equals this one; the freeze requires that of what it rests on."""
     phase = PHASE_DEFS[name]
-    inputs = {k: {"path": _show(p), "sha256": _sha256(p)} for k, p in phase.inputs(run).items()}
+    inputs = {k: _file_entry(p) for k, p in phase.inputs(run).items()}
     params = json.loads(json.dumps(phase.params(run), default=str))  # as a manifest stores them
     upstream = {u: (read_manifest(run, u) or {}).get("fingerprint") for u in phase.upstream}
     return {"inputs": inputs, "params": params, "upstream": upstream, "fingerprint": _fingerprint(inputs, params, upstream)}

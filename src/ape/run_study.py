@@ -31,7 +31,9 @@ Phases (`all` runs a study's in order and stops at the first failure; a failed o
                  the cells the micro-pilot did not measure -> the run's config/token_caps_pilot.json; pilot/pilot.json.
     freeze       the study's pre-registration (`Study.prereg`) has no `[PILOT` / `[USER` marker left (offline: a
                  rehearsal on a filled copy), the tree is committed, the analysis entry point exists and every phase the
-                 freeze rests on is current. It hashes the pre-registration, the config inputs, the run's outputs
+                 freeze rests on is current. It hashes the pre-registration, the config inputs (the shared run_plan,
+                 models and model_costs files as the study's own slice, `ape.freeze_scope`, so another study's later
+                 edits never break this freeze; its tuning grid whole), the run's outputs
                  (`frozen_outputs`), uv.lock, the study's analysis code and the gate run the KG arm came from, and
                  records the commit, the design knobs, the KG resolution, the role (primary, or the extension of an
                  earlier run) and a fresh test-seed block -> freeze.json, then PROVENANCE.md (offline:
@@ -113,6 +115,7 @@ from . import run_gate as rg
 from .agent.arms import KG_ARM_ENV
 from .budget import BudgetError, Plan, PlanCell, require_affordable
 from .config import ROOT, Config
+from .freeze_scope import config_input
 from .models import PreflightError, Profile, RoleSpec, load_profile, preflight, storage_warnings
 from .spend import LABEL_ENV, REGISTRY_ENV
 from .worlds.generate import SEED_BLOCK, STUDY_SEEDS, TEST_SEED_BASE_ENV, TEST_SPLIT_ENV, split_lock_value
@@ -1081,7 +1084,7 @@ def agent_logs(groups: list[dict]) -> list[str]:
 
 
 def _cfg_inputs(run: StudyRun, *names: str) -> dict[str, Path]:
-    return {f"config/{n}": run.config(n) for n in names}
+    return {f"config/{n}": config_input(run.config(n), run.study) for n in names}
 
 
 def env_knobs(run: StudyRun) -> dict[str, str]:
@@ -1550,7 +1553,7 @@ def frozen_files(run: StudyRun, prereg: Path) -> dict[str, Path]:
     kg = kg_resolution(run)
     return (
         {run.spec.prereg: prereg}
-        | {f"config/{n}": run.config(n) for n in (*FROZEN_CONFIG, run.grid_name)}
+        | {f"config/{n}": config_input(run.config(n), run.study) for n in (*FROZEN_CONFIG, run.grid_name)}
         | {f"config/{n}": run.out_config_dir / n for n in frozen_outputs(run)}
         | {f: ROOT / f for f in frozen_code(run)}
         | {k: rg._resolve(p) for k, p in (kg.get("files") or {}).items()}
@@ -1656,7 +1659,7 @@ def _write_freeze_provenance(run: StudyRun, freeze: dict) -> Path:
         f"\n{_freeze_heading(run, freeze)}{' (OFFLINE REHEARSAL)' if run.offline else ''}\n",
         f"- **Commit:** `{freeze['git']['commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{rg.APG_PIN}`).",
         "- **Frozen files** (sha256):",
-        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
+        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}{f' (the {run.study} slice)' if f.get('slice') else ''}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         f"- **Design knobs** (APE_* set when the frozen phases ran; build-test and test refuse others): {rg._fmt_env(freeze.get('design_env'))}.",
         f"- **KG arm:** {kg.get('arm')} ({kg.get('source')}{', verdict ' + kg['verdict'] if kg.get('verdict') else ''}); knobs {rg._fmt_env(kg.get('env'))}." if kg.get("needed") else "- **KG arm:** none (no cell reads the KG).",
         *([f"- **Role:** the extension of run `{freeze['role']['of']}`."] if freeze["role"]["kind"] == "extension" else []),
@@ -1744,7 +1747,7 @@ def _freeze(run: StudyRun, record: dict) -> None:
         "offline": run.offline,
         "rehearsal": rehearsal is not None,
         "placeholders_replaced": rehearsal or [],
-        "files": {k: {"path": _show(p), "sha256": rg._sha256(p)} for k, p in files.items()},
+        "files": {k: rg._file_entry(p) for k, p in files.items()},
         "git": git,
         "code_commit": git["commit"],
         "analysis": {"module": run.spec.analysis, "implemented": analysis_ready, "code": code, "commit": rg._git("log", "-1", "--format=%H", "--", *code) if code else None},
@@ -1774,7 +1777,7 @@ def _freeze_inputs(run: StudyRun) -> dict[str, Path]:
 
 
 def _frozen_inputs(run: StudyRun) -> dict[str, Path]:
-    return {k: rg._resolve(f["path"]) for k, f in ((read_freeze(run) or {}).get("files") or {}).items()}
+    return {k: rg._entry_path(f) for k, f in ((read_freeze(run) or {}).get("files") or {}).items()}
 
 
 def design_env_changes(run: StudyRun) -> list[str]:
@@ -1955,8 +1958,8 @@ def _analyze_inputs(run: StudyRun) -> dict[str, Path]:
         "freeze.json": run.freeze_path,
         "build-test/worlds.json": run.phase_dir("build-test") / "worlds.json",
         "config/selected.yaml": run.selected_path,
-        "config/run_plan.yaml": run.config("run_plan.yaml"),
-        "config/model_costs.yaml": run.costs_path,
+        "config/run_plan.yaml": config_input(run.config("run_plan.yaml"), run.study),
+        "config/model_costs.yaml": config_input(run.costs_path, run.study),
         "ledger": Config().ledger_path,
     }
 
@@ -2113,7 +2116,7 @@ def _fingerprint(inputs: dict, params: dict, upstream: dict) -> str:
 
 def phase_state(run: StudyRun, name: str) -> dict:
     phase = PHASE_DEFS[run.study][name]
-    inputs = {k: {"path": _show(p), "sha256": rg._sha256(p)} for k, p in phase.inputs(run).items()}
+    inputs = {k: rg._file_entry(p) for k, p in phase.inputs(run).items()}
     params = json.loads(json.dumps(phase.params(run), default=str))
     upstream = {u: (rg.read_manifest(run, u) or {}).get("fingerprint") for u in phase.upstream}
     return {"inputs": inputs, "params": params, "upstream": upstream, "fingerprint": _fingerprint(inputs, params, upstream)}
