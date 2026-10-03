@@ -228,9 +228,37 @@ def test_the_kg_arm_follows_the_gate_runs_verdict_and_selection(clean_env, monke
     with run_study.run_environment(run):
         assert os.environ["APE_KG_ARM"] == "APG-q" and os.environ["APE_APG_SHORTLIST_K"] == "24" and os.environ["APE_SPEND_LABEL"] == "main/m"
         assert "APE_KG_ARM" not in run_study.env_knobs(run) and "APE_APG_SHORTLIST_K" not in run_study.env_knobs(run), "recorded as the KG resolution"
-    assert "APE_KG_ARM" not in os.environ
+        assert os.environ["APE_S3S_BUDGET"] == "2000" and "APE_S3S_BUDGET" not in run_study.env_knobs(run), "S3s's inherited knobs too"
+    assert "APE_KG_ARM" not in os.environ and "APE_S3S_BUDGET" not in os.environ
     monkeypatch.setenv("APE_APG_SHORTLIST_K", "48")
     with pytest.raises(PhaseError, match=r"APE_APG_SHORTLIST_K=48 \(the gate's verdict sets 24\)"), run_study.run_environment(run):
+        pass
+
+
+def test_s3s_inherits_the_gate_runs_selection(clean_env, monkeypatch):
+    """D-041: the main grid inherits S3s from the gate (`inherited: {S3s: {source: gate, gate_key: S3s}}`): the gate
+    run's S3s selection is set with the KG arm for every phase, recorded in the params and the freeze, and a live run
+    refuses a gate run without it."""
+    runs = clean_env / "runs"
+    _fake_gate_run(runs, "g-go", "GO")
+    _fake_gate_run(runs, "g-nos3s", "GO", selected={k: v for k, v in SELECTED.items() if k != "S3s"})
+    _fake_gate_run(runs, "g-other", "GO", selected=SELECTED | {"S3s": {"arm": "S3", "env": {}, "candidate": "x"}})
+    assert run_study.gate_inherited_arms(StudyRun("main", "m", runs_root=runs)) == {"S3s": "S3s"}
+    assert run_study.gate_inherited_arms(StudyRun("study_g", "g", runs_root=runs)) == {}
+    run = StudyRun("main", "m", runs_root=runs, gate_run_id="g-go")
+    kg = run_study.kg_resolution(run)
+    assert kg["inherited"] == {"S3s": {"key": "S3s", "arm": "S3s", "env": {"APE_S3S_BUDGET": "2000"}, "candidate": "s3s-2000"}}
+    assert run_study.kg_env(run) == {"APE_KG_ARM": "APG-q", "APE_APG_SHORTLIST_K": "24", "APE_S3S_BUDGET": "2000"}
+    assert run_study.kg_params(run)["inherited"] == kg["inherited"] and run_study.base_params(run)["kg"]["inherited"] == kg["inherited"], "in every fingerprint"
+    for gid, why in (("g-nos3s", "has no S3s selection, which main's S3s inherits"), ("g-other", "the S3s selection runs S3, but main's S3s inherits only its knobs")):
+        with pytest.raises(PhaseError, match=why):
+            run_study.kg_resolution(StudyRun("main", "m", runs_root=runs, gate_run_id=gid))
+        off = run_study.kg_resolution(StudyRun("main", "m", offline=True, runs_root=runs, gate_run_id=gid))
+        assert off["inherited"] == {} and any("offline: S3s at its defaults" in n for n in off["notes"])
+    assert run_study.kg_resolution(StudyRun("main", "m", offline=True, runs_root=runs))["inherited"] == {}
+    # A live shell value for the inherited knob that disagrees is refused, as the KG arm's.
+    monkeypatch.setenv("APE_S3S_BUDGET", "4000")
+    with pytest.raises(PhaseError, match=r"APE_S3S_BUDGET=4000 \(the gate's verdict sets 2000\)"), run_study.run_environment(run):
         pass
 
 
@@ -298,8 +326,9 @@ def test_the_offline_runs_record_every_skipped_arm(offline):
         assert _manifest(run, phase)["skipped_arms"] == [], f"every main-study arm runs ({phase})"
     assert not _manifest(run, "preflight")["unbuilt_arms"]
     assert set(x["status"] for x in _manifest(run, "test")["cells"].values()) == {"done"}
-    for phase in ("micro-pilot", "tune", "test"):
+    for phase in ("micro-pilot", "test"):
         assert _manifest(g, phase)["skipped_arms"] == [], f"every Study G arm runs, B9's topology arms included ({phase})"
+    assert _manifest(g, "tune")["skipped_systems"] == [] and _manifest(run, "tune")["skipped_systems"] == []
     assert not _manifest(g, "preflight")["unbuilt_arms"]
     assert {c: x["status"] for c, x in _manifest(g, "test")["cells"].items()} == {c.id: "done" for c in run_study.phase_cells(g, "test")}
 
@@ -352,10 +381,15 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
 
     run = _run(offline, "main")
     selected = yaml.safe_load(run.selected_path.read_text())
-    grid, _ = run_study.study_grid(run)
-    assert set(selected) == set(grid["systems"]), "one selection per grid system"
+    grid = yaml.safe_load((offline["config"] / "tuning_grid_main.yaml").read_text())
+    assert set(selected) == set(grid["systems"]) == set(run_study.study_grid(run)[0]["systems"]) and all(sel["arm"] == name for name, sel in selected.items()), "each system runs as its plan arm"
     tune = _manifest(run, "tune")
-    assert tune["tuning_completeness"]["pass"] is True and set(tune["tuning_completeness"]["systems"]) == set(grid["systems"]), "PC6-style"
+    assert not any("placeholder" in w for w in tune["warnings"]) and tune["tuning_completeness"]["pass"] is True, "PC6-style"
+    assert tune["grid_problems"] == [], "B3's grid keeps the tuning rules (a live tune refuses otherwise)"
+    assert "S3s" not in selected and tune["kg"]["inherited"] == {} and any("S3s: its defaults offline" in w for w in _manifest(run, "preflight")["warnings"]), "S3s is the gate's (D-041)"
+    for name, sdef in grid["systems"].items():  # offline: each system's first candidates, one selected
+        ran = [c["id"] for c in sdef["candidates"][: run_study.OFFLINE_SCALE["tune_candidates_per_system"]]]
+        assert tune["tuning_completeness"]["systems"][name]["logged"] == sorted(ran) and selected[name]["candidate"] in ran
     kg = _manifest(run, "test")["kg"]
     assert kg["arm"] == "APG-s" and kg["system"] == "apg" and read_freeze(run)["kg"]["arm"] == "APG-s"
     targets = json.loads(run.s7_targets_path.read_text())
@@ -367,20 +401,20 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
         args, md = log.eval.task_args, log.eval.metadata
         assert log.status == "success" and log.eval.model == "mockllm/model" and not any(s.error for s in log.samples)
         assert args["seed_base"] == STUDY_SEEDS["main"]["offline_test"] and args["split"] == "test" and args["plan_cell"] == md["plan_cell"]
-        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and all(md["knobs"].get(k) == v for k, v in together.items() if k.startswith(("APE_S3S_", "APE_APG_", "APE_LGR_")))
+        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and together is not None and all(md["knobs"].get(k) == v for k, v in together.items()), "every selection's knobs"
         if args["arm"] == "S7":
             assert args["group"] == "s7" and md["knobs"]["APE_S7_PER_STEP"] == "1", "S7 mirrors the per-step KG arm"
         seen.add((args["plan_cell"], args["arm"]))
         records[args["arm"]] = sorted(k for k in log.samples[0].store if k.startswith("mas_"))
     # Every main-study arm runs through micro-pilot, pilot and test offline (the gold multi-role mock plays each role).
     arms = {"S1", "S3s", "S5", "S7", "S9", "M1", "M1s", "M1k", "M2", "M7", "S8k3"}
-    assert {a for _, a in seen} == arms and {("main.F.sol-m2", "M2"), ("main.F.luna-f7-100", "S5")} <= seen
+    assert {a for _, a in seen} == arms and {("main.F.sol-m2", "M2"), ("main.F.luna-f7-100", "S5"), ("main.B.arms", "S5"), ("main.B.arms", "S7"), ("main.F.sol", "S1")} <= seen
     assert all("mas_accounting" in records[a] and "mas_agents" in records[a] for a in arms - {"S1", "S3s", "S5", "S7"}), "B2's per-agent records"
     assert "mas_council" in records["M7"] and "mas_ensemble" in records["S8k3"] and "mas_specialists" in records["M2"]
     ran = {read_eval_log(str(f), header_only=True).eval.task_args["arm"] for phase in ("micro-pilot", "pilot") for f in (run.dir / phase).rglob("*.eval")}
     assert ran == arms - {"M1s", "S8k3"}, "the pilot cells name every arm but M1s and S8k3 (Studies A and C only)"
     sol = [read_eval_log(str(f), header_only=True).eval for f in (run.dir / "test" / "main.F.sol").rglob("*.eval")]
-    assert {e.metadata["arm"] for e in sol} == {"S1", "S5", "M1"} and {e.model_generate_config.reasoning_effort for e in sol} == {"high"}
+    assert {e.metadata["arm"] for e in sol} == {"S1", "S5", "M1"} and {e.model_generate_config.reasoning_effort for e in sol} == {"high"}, "main.F.sol's arms (M1 is built since B2)"
     # B6: the KG builds and their build-quality check, F1 included, in the one KG system built.
     bq = json.loads((run.phase_dir("micro-pilot") / "build_quality.json").read_text())
     assert bq["systems"] == ["apg"] and bq["verdict"] == "builder_passes" and {"F1-2", "F1-32", "F7-10", "F7-1000", "F3-5", "F3-60"} <= set(bq["cells"])
@@ -428,6 +462,7 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     assert {"F8-40-test-s29000", "F8-24-o1750-test-s29000", "F8-20-o2250-test-s29000", "F7-10-rel-desc-test-s29000", "F3-5-test-s29000"} <= worlds
     assert {w["world_id"] for w in json.loads((run.phase_dir("build-dev") / "worlds.json").read_text())["worlds"]} == {"F8-40-dev-s1000"}
     assert set(yaml.safe_load(run.selected_path.read_text())) == set(run_study.study_grid(run)[0]["systems"])
+    assert "CM-trim: no run_plan.yaml tuning cell prices it" in _manifest(run, "tune")["grid_problems"], "the placeholder grid's problems, recorded offline"
     assert _manifest(run, "micro-pilot")["operational_env"]["APE_SESSION_CHECKPOINTS"] == str(run.session_checkpoints_dir)
 
 
@@ -657,7 +692,7 @@ def test_main_builds_cover_the_kg_cells_and_share_the_gates_dev_worlds(clean_env
     assert run_study.kg_build_cell(StudyRun("main", "b6n", runs_root=clean_env / "runs", gate_run_id="g-nogo"), "test")[0].spec["systems"] == ["lightrag"]
     dev = {f"{s['family']}-{s['level']}": s for s in run_study.world_specs(live, "dev")}
     assert set(dev) == {"F1-32", "F2-10", "F3-60", "F7-1000"}
-    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == ["chunks", "apg"]
+    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == ["apg"], "M1k and M2 read the KG; S3s no longer tunes in main (D-041)"
     assert "shared" not in dev["F1-32"] and dev["F1-32"]["kinds"] == [] and dev["F1-32"]["seed_base"] == 1000
     assert run_study.kg_worlds(live, "dev") == {}, "shared dev worlds are the gate's: not projected again"
 
@@ -707,14 +742,36 @@ def test_build_quality_measures_registry_worlds_and_single_system_builds():
 
 def test_a_live_tune_refuses_a_placeholder_or_unsigned_grid(clean_env):
     grid = yaml.safe_load((ROOT / "config" / "tuning_grid_main.yaml").read_text())
-    assert grid["placeholder"] is True and any("placeholder" in p for p in run_study.tuning_signoff_problems(grid))
-    signed = grid | {"placeholder": False, "owners": {"S3s": "Ada"}, "signed_off": {"S3s": True}}
+    assert "placeholder" not in grid and "owners.M1 is not set" in run_study.tuning_signoff_problems(grid), "B3's grid, not signed off yet"
+    assert any("placeholder" in p for p in run_study.tuning_signoff_problems(grid | {"placeholder": True}))
+    signed = grid | {"owners": dict.fromkeys(grid["owners"], "Ada") | {"S1": "Sam"}, "signed_off": dict.fromkeys(grid["signed_off"], True)}
     assert run_study.tuning_signoff_problems(signed) == []
-    assert run_study.tuning_signoff_problems(signed | {"owners": {"S3s": "TODO"}}) == ["owners.S3s is not set"]
+    assert run_study.tuning_signoff_problems(signed | {"owners": signed["owners"] | {"M1": "TODO"}}) == ["owners.M1 is not set"]
+    # Every owners key needs its owner and sign-off, S1 (the skeptic's sign-off on the baseline) included, though no
+    # system tunes it; and the skeptic never owns a multi-agent arm's prompts (brief §7.3).
+    assert run_study.tuning_signoff_problems(signed | {"signed_off": signed["signed_off"] | {"S1": False}}) == ["signed_off.S1 is not true"]
+    skeptic_owns = run_study.tuning_signoff_problems(signed | {"owners": signed["owners"] | {"M7": " sam "}})
+    assert skeptic_owns == ["owners.M7 is the skeptic (owners.S1: Sam): a multi-agent arm's prompts need an independent author (brief §7.3)"]
     assert yaml.safe_load((ROOT / "config" / "tuning_grid_study_g.yaml").read_text())["placeholder"] is True
     run = StudyRun("study_g", "tune", runs_root=clean_env / "runs")
     assert "is not signed off for a live tune" in run_study._refuse_tune(run)
     assert run_study._refuse_tune(StudyRun("study_g", "tune", offline=True, runs_root=clean_env / "runs")) is None
+
+
+def test_a_live_tune_refuses_a_grid_that_breaks_the_tuning_rules(clean_env, monkeypatch):
+    """`tuning.study_grid_problems` before any dev run (B3): a live tune refuses a signed-off grid that breaks a rule;
+    offline the tune records the problems and runs."""
+    grid = yaml.safe_load((ROOT / "config" / "tuning_grid_main.yaml").read_text())
+    grid |= {"owners": dict.fromkeys(grid["owners"], "Ada") | {"S1": "Sam"}, "signed_off": dict.fromkeys(grid["signed_off"], True)}
+    monkeypatch.setattr(run_study, "_load_grid", lambda r: grid)
+    monkeypatch.setattr(run_study, "_refuse_frozen", lambda phase: lambda r: None)
+    monkeypatch.setattr(run_study, "_refuse_unbuilt", lambda phase: lambda r: None)
+    run = StudyRun("main", "tune", runs_root=clean_env / "runs")
+    assert run_study.grid_problems(run) == [] and run_study._refuse_tune(run) is None, "B3's grid passes once signed off"
+    grid["systems"]["M7"]["candidates"] = grid["systems"]["M7"]["candidates"][:3]
+    reason = run_study._refuse_tune(run)
+    assert reason.startswith("tune:") and "breaks the tuning rules" in reason and "M7: 3 candidates; equal budgets give every system budget_per_system (4)" in reason
+    assert run_study._refuse_tune(StudyRun("main", "tune", offline=True, runs_root=clean_env / "runs")) is None
 
 
 def test_selections_that_set_the_same_knob_run_in_eval_sets_of_their_own(clean_env):

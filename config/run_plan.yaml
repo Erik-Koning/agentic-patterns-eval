@@ -109,7 +109,8 @@ studies:
            note: "brief §7.1; S5 on F1 as the KG-on-F1 probe"}
       tuning:
         - {id: main.tune.a, arms: {S9: 4, M1: 4, M7: 4}, cells: [F1-32, F2-10], n_tasks: 20, epochs: 1}
-        - {id: main.tune.b, arms: {S3s: 4, M1: 4, M1k: 4, M2: 4}, cells: [F3-60, F7-1000], n_tasks: 20, epochs: 1}
+        - {id: main.tune.b, arms: {M1: 4, M1k: 4, M2: 4}, cells: [F3-60, F7-1000], n_tasks: 20, epochs: 1,
+           note: "D-041: S3s and S5 inherit the gate's selections (same profile and dev worlds); not re-tuned"}
       pilot:
         - {id: main.pilot.a, arms: [S1, S9, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 20, epochs: 1}
         - {id: main.pilot.b, arms: [S1, S3s, S5, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],

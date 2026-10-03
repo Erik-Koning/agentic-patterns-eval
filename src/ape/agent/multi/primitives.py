@@ -65,7 +65,9 @@ class TeamConfig:
     """How a team runs: the arm's delivery, the tool-exposure policy and the turn caps (each worker and each council
     phase gets the task's `max_turns`, so a cap never binds a subtask before it would bind the whole task in S1).
     `tools` replaces `worker_tools` (the task's non-terminal tools) for teams whose environment is not
-    `env_tools.build_tools`, e.g. Study G's sessions (B9)."""
+    `env_tools.build_tools`, e.g. Study G's sessions (B9). `notes` (the role notes of the arm's prompt variant) and
+    `clip_tokens` (the cap on a worker's result or a member's rationale as another agent reads it) are the arm's tuning
+    knobs (`knobs.py`); the defaults are B2's."""
 
     delivery: Delivery
     exposure: str
@@ -75,6 +77,8 @@ class TeamConfig:
     concurrent: bool = True
     specialists: list[Specialist] | None = None
     tools: Callable[[Team, Specialist | None], tuple[dict[str, ToolDef], list[str]]] | None = None
+    notes: P.RoleNotes = P.VARIANTS[P.DEFAULT_VARIANT]
+    clip_tokens: int = TEXT_MAX_TOKENS
 
     def worker_tools(self, team: Team, specialist: Specialist | None = None) -> tuple[dict[str, ToolDef], list[str]]:
         return (self.tools or worker_tools)(team, specialist)
@@ -129,7 +133,7 @@ async def run_worker(team: Team, agent: AgentRecord, subtask: str, cfg: TeamConf
 
     tools["report"] = ToolDef(report, name="report", description=P.REPORT_DESCRIPTION, parameters=_params(result=ToolParam(type="string", description="Your result.")))
     always = [*always, "report"]
-    note = P.WORKER_NOTE if specialist is None else f"{P.WORKER_NOTE} {P.WORKER_SPECIALTY.format(covers=specialist.coverage)}"
+    note = cfg.notes.worker if specialist is None else f"{cfg.notes.worker} {P.WORKER_SPECIALTY.format(covers=specialist.coverage)}"
     query = subtask if specialist is None else f"{specialist.query_prefix}\n{subtask}"
     messages: list[ChatMessage] = []
     try:
@@ -150,7 +154,7 @@ async def run_worker(team: Team, agent: AgentRecord, subtask: str, cfg: TeamConf
         status, text = agent.stop or "turn_cap", last_assistant_text(messages)
     agent.info.update(status=status, result=clip(text, 500))
     label = specialist.name if specialist is not None else f"worker {agent.info.get('slot', '?')}"
-    return WorkerResult(agent.id, label, status, clip(text))
+    return WorkerResult(agent.id, label, status, clip(text, cfg.clip_tokens))
 
 
 # --- orchestrator ---------------------------------------------------------------------------------------------------
@@ -231,8 +235,8 @@ def delegate_tool(team: Team, orch: AgentRecord, cfg: TeamConfig, rounds: list[d
             additionalProperties=False,
         )
         description = P.DELEGATE_SPECIALIST_DESCRIPTION
-    # Never Inspect's 16 KiB default (a silent cut): each result is clipped to TEXT_MAX_TOKENS already, with a marker.
-    max_output = cfg.n_workers * (TEXT_MAX_TOKENS * 8 + 512)
+    # Never Inspect's 16 KiB default (a silent cut): each result is clipped to the arm's clip already, with a marker.
+    max_output = cfg.n_workers * (cfg.clip_tokens * 8 + 512)
     return ToolDef(delegate, name="delegate", description=description.format(n_workers=cfg.n_workers), parallel=False, max_output=max_output,
                    parameters=_params(subtasks=ToolParam(type="array", description=f"1 to {cfg.n_workers} self-contained subtasks.", items=item)))
 
@@ -256,7 +260,7 @@ async def run_orchestrator(team: Team, cfg: TeamConfig, *, prompt: str | None = 
     team.top = orch
     plans, rounds = team.records.setdefault("mas_plan", []), team.records.setdefault("mas_rounds", [])
     tools = {"plan": plan_tool(orch, plans), "delegate": delegate_tool(team, orch, cfg, rounds), answer.name: answer}
-    note = P.ORCHESTRATOR_NOTE.format(n_workers=cfg.n_workers, answer_tool=answer.name, team=team_text(team, cfg))
+    note = cfg.notes.orchestrator.format(n_workers=cfg.n_workers, answer_tool=answer.name, team=team_text(team, cfg))
     async with team.running(orch):
         ctx = await cfg.delivery.compile(orch, prompt, 0)
         team.state.messages = [cfg.delivery.system(ctx), ChatMessageUser(content=f"{prompt}\n\n{note}")]
@@ -268,9 +272,10 @@ async def run_orchestrator(team: Team, cfg: TeamConfig, *, prompt: str | None = 
 # --- council --------------------------------------------------------------------------------------------------------
 
 
-def proposal_tool(team: Team, answer: ToolDef, sink: list[dict]) -> ToolDef:
+def proposal_tool(team: Team, answer: ToolDef, sink: list[dict], clip_tokens: int = TEXT_MAX_TOKENS) -> ToolDef:
     """The task's answer tool as a council member sees it: same name and parameters plus a rationale; it records a
-    proposal (parsed exactly as the real tool parses an answer, in a scratch store) and never answers the task."""
+    proposal (parsed exactly as the real tool parses an answer, in a scratch store; the rationale clipped to
+    `clip_tokens`) and never answers the task."""
 
     async def propose(**kwargs: Any) -> str:
         if sink:
@@ -278,7 +283,7 @@ def proposal_tool(team: Team, answer: ToolDef, sink: list[dict]) -> ToolDef:
         rationale = str(kwargs.pop("rationale", "") or "")
         scratch = Store()
         await run_isolated([lambda: answer.tool(**kwargs)], [scratch], concurrent=False)
-        sink.append({"answer": scratch.get(ANSWER), "rationale": clip(rationale)})
+        sink.append({"answer": scratch.get(ANSWER), "rationale": clip(rationale, clip_tokens)})
         return "Proposal recorded."
 
     params = ToolParams(properties={**answer.parameters.properties, "rationale": ToolParam(type="string", description=P.RATIONALE_PARAM)},
@@ -309,17 +314,17 @@ async def run_council(team: Team, cfg: TeamConfig, k: int = COUNCIL_K, rounds: i
         async def run() -> dict | None:
             agent, sink = members[i], []
             tools, always = cfg.worker_tools(team)
-            tools[answer.name] = proposal_tool(team, answer, sink)
+            tools[answer.name] = proposal_tool(team, answer, sink, cfg.clip_tokens)
             always = [*always, answer.name]
             try:
                 async with team.running(agent):
                     if phase == 0:
                         ctx = first_ctx[i] = await cfg.delivery.compile(agent, task.prompt, 0)
-                        note = P.COUNCIL_MEMBER_NOTE.format(k=k, answer_tool=answer.name)
+                        note = cfg.notes.member.format(k=k, answer_tool=answer.name)
                         histories[i][:] = [cfg.delivery.system(ctx), ChatMessageUser(content=f"{task.prompt}\n\n{note}")]
                     else:
                         others = _proposals(latest, [m for m in range(k) if m != i])
-                        histories[i].append(ChatMessageUser(content=P.CRITIQUE_ROUND.format(round=phase, rounds=rounds, proposals=others, answer_tool=answer.name)))
+                        histories[i].append(ChatMessageUser(content=cfg.notes.critique.format(round=phase, rounds=rounds, proposals=others, answer_tool=answer.name)))
                         ctx = None if cfg.delivery.per_step else first_ctx[i]
                     await react_loop(team, agent, histories[i], delivery=cfg.delivery, ctx=ctx, query=task.prompt, tools=tools, always=always,
                                      exposure=cfg.exposure, max_turns=cfg.max_turns, done=lambda: bool(sink),
@@ -341,7 +346,7 @@ async def run_council(team: Team, cfg: TeamConfig, k: int = COUNCIL_K, rounds: i
         team.top = chair
         async with team.running(chair):
             ctx = await cfg.delivery.compile(chair, task.prompt, 0)
-            note = P.CHAIR_NOTE.format(k=k, rounds=rounds, proposals=_proposals(latest, list(range(k))), answer_tool=answer.name)
+            note = cfg.notes.chair.format(k=k, rounds=rounds, proposals=_proposals(latest, list(range(k))), answer_tool=answer.name)
             team.state.messages = [cfg.delivery.system(ctx), ChatMessageUser(content=f"{task.prompt}\n\n{note}")]
             await react_loop(team, chair, team.state.messages, delivery=cfg.delivery, ctx=ctx, query=task.prompt, tools={answer.name: answer},
                              always=[answer.name], exposure=cfg.exposure, max_turns=cfg.max_turns, done=team.answered,

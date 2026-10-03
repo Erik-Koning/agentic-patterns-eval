@@ -1,24 +1,93 @@
-# PLACEHOLDER (BUILD_PLAN B1). This is NOT the main study's tuning grid. Package B3 declares the real one: equal
-# budgets for S1, S5, S9, M1, M7, M1k and M2, each system's candidates declared by its owner before any dev run, and
-# the owners' sign-off. Until then this grid tunes only an arm that exists today (S3s, on main.tune.b's dev cells), so
-# an offline `python -m ape.run_study all --study main --offline` runs end to end. A live tune refuses it
-# (`placeholder: true`, and no owner has signed off).
+# The main study's dev tuning grid (BUILD_PLAN B3; ORCHESTRATOR_BRIEF_v2 §7.3: every arm gets the same prompt-optimization
+# budget on dev). Declared BEFORE any dev run; `python -m ape.run_study tune --study main` runs it (`ape.tuning`).
 #
-# Format (ape.tuning, as config/tuning_grid.yaml): `systems.<name>.candidates` ({id, arm, env}); a system may name its
-# own `dev_cells` (the main study's systems tune on different cells: main.tune.a's F1-32/F2-10, main.tune.b's
-# F3-60/F7-1000), else it uses the top-level `dev_cells`. The selection is keyed by the system's name: a plan arm of that
-# name runs as the selected candidate's arm under its knobs (ape.run_study `run_groups`). Every dev cell must be a cell
-# of a run_plan.yaml tuning cell, so its dev worlds are built. Selection: max mean dev success; candidates within tie_pp
-# of the best go to the lower cost.
-placeholder: true
-owners: {S3s: TODO}
-signed_off: {S3s: false}
+# Format (ape.tuning, as config/tuning_grid.yaml): `systems.<name>.candidates` ({id, arm, env}). A system is named for
+# the plan arm it tunes, and its candidates run as that arm: after the tune, the arm runs everywhere as its selection
+# (ape.run_study `run_groups`), with every selection's knobs applied together, so each system's candidates set only
+# their own arm's knobs. Each system tunes on its own `dev_cells`, the cells of the run_plan.yaml tuning cells that price
+# it (main.tune.a: F1-32, F2-10; main.tune.b: F3-60, F7-1000; M1 runs in both Study A and Study B, so on all four).
+# Selection (as the gate's): max mean dev success over the system's cells; candidates within tie_pp of the best go to
+# the lower cost.
+#
+# Equal budgets (`equal_budgets`): every tuned system declares exactly budget_per_system candidates, the count
+# run_plan.yaml prices (4 per arm, 20 dev tasks per cell, 1 epoch). The knobs are the arms' own
+# (ape.agent.multi.knobs; recorded in every task's metadata and fingerprint):
+# - APE_MAS_<ARM>_PROMPT, a variant of the arm's role notes (ape.agent.multi.prompts VARIANTS): `default` is B2's notes;
+#   `concise` the same protocol in fewer words; `structured` explicit formats (a plan and subtasks that name their IDs
+#   and the values they produce, reports and rationales that pair each value with its ID: the planning instruction's
+#   detail); `verify` a check at each hand-off (results against subtasks, re-delegating what is missing; a critique
+#   that revises only on evidence; a chair that keeps a unanimous answer). Variants change only how the arm's own
+#   mechanism is used, never generic advice on the task, which would help S1 as much (prompts.py).
+# - APE_MAS_<ARM>_CLIP (M1, M1K, M2, M7): the cap on a worker's result or a member's rationale as another agent reads it
+#   (default 2,000 tokens). Available to the owners; no candidate below uses it.
+# M1s has no system: it reads M1's knobs, so it runs as M1's selection (M1 and M1s differ in CONC only and must give
+# the model identical inputs). The structural parameters (3 workers, 2 critique rounds, council k = 3; brief §4.2) are
+# fixed a priori and never tuned.
+#
+# Not tuned here (`inherited`):
+# - S1, the monolith, has no text of its own: its whole prompt (kb_react BASE_SYSTEM, the knowledge note and the
+#   corpus in a cached system prompt) is the base every agent of every arm gets, so it is held fixed for all arms, as
+#   the skeptic engineered it in the gate. Tuning parity is per arm's own free text: the M arms tune only the protocol
+#   notes they add on top of that base, and the variants exclude advice S1 could use. The skeptic signs off that S1
+#   runs as engineered (owners.S1).
+# - S5 is the gate-selected KG arm with the gate's selected knobs (APG* on GO, LGR* on NO_GO; run_study
+#   `kg_resolution`), tuned by the APG owner and the skeptic with equal budgets on the gate's dev cells.
+# - S3s is the gate's selected S3s configuration (the gate run's selected.yaml key S3s), tuned by the skeptic on the
+#   gate's dev cells, which include this grid's F3-60 and F7-1000 dev worlds (the same worlds, models and efforts).
+#
+# Sign-off. Each owner reviews their systems' candidates, and for the M arms the variant texts in
+# ape/agent/multi/prompts.py (drafts), then names themselves in `owners` and sets `signed_off` to true. Roles
+# (DECISIONS D-018; brief §7.3):
+# - S9, M1, M7, M1k, M2: the M-arm prompt author, the independent team member who writes the M-arm prompts (brief
+#   §7.3); not the skeptic, who engineers the baselines these arms are compared with (S1, S3s).
+# - S1: the skeptic.
+# A live tune refuses until every system has an owner and a sign-off; PC6-style completeness counts every configuration
+# tried (archived tuning logs included) against budget_per_system, so a candidate replaced after a live tune still
+# counts. These keys are not candidates; the freeze hashes this whole file.
+owners: {S1: TODO, S9: TODO, M1: TODO, M7: TODO, M1k: TODO, M2: TODO}
+signed_off: {S1: false, S9: false, M1: false, M7: false, M1k: false, M2: false}
 budget_per_system: 4
+equal_budgets: true
 tie_pp: 1.0
-dev_cells: [F3-60, F7-1000]
+
+inherited:
+  S1: {source: fixed, owner: skeptic}
+  S5: {source: gate, gate_key: "APG* (GO) or LGR* (NO_GO)"}
+  S3s: {source: gate, gate_key: S3s}
 
 systems:
-  S3s:
+  S9:
+    dev_cells: [F1-32, F2-10]
     candidates:
-      - {id: s3s-1000, arm: S3s, env: {APE_S3S_BUDGET: "1000"}}
-      - {id: s3s-2000, arm: S3s, env: {APE_S3S_BUDGET: "2000"}}
+      - {id: s9-default, arm: S9, env: {APE_MAS_S9_PROMPT: default}}
+      - {id: s9-concise, arm: S9, env: {APE_MAS_S9_PROMPT: concise}}
+      - {id: s9-structured, arm: S9, env: {APE_MAS_S9_PROMPT: structured}}
+      - {id: s9-verify, arm: S9, env: {APE_MAS_S9_PROMPT: verify}}
+  M1:
+    dev_cells: [F1-32, F2-10, F3-60, F7-1000]
+    candidates:
+      - {id: m1-default, arm: M1, env: {APE_MAS_M1_PROMPT: default}}
+      - {id: m1-concise, arm: M1, env: {APE_MAS_M1_PROMPT: concise}}
+      - {id: m1-structured, arm: M1, env: {APE_MAS_M1_PROMPT: structured}}
+      - {id: m1-verify, arm: M1, env: {APE_MAS_M1_PROMPT: verify}}
+  M7:
+    dev_cells: [F1-32, F2-10]
+    candidates:
+      - {id: m7-default, arm: M7, env: {APE_MAS_M7_PROMPT: default}}
+      - {id: m7-concise, arm: M7, env: {APE_MAS_M7_PROMPT: concise}}
+      - {id: m7-structured, arm: M7, env: {APE_MAS_M7_PROMPT: structured}}
+      - {id: m7-verify, arm: M7, env: {APE_MAS_M7_PROMPT: verify}}
+  M1k:
+    dev_cells: [F3-60, F7-1000]
+    candidates:
+      - {id: m1k-default, arm: M1k, env: {APE_MAS_M1K_PROMPT: default}}
+      - {id: m1k-concise, arm: M1k, env: {APE_MAS_M1K_PROMPT: concise}}
+      - {id: m1k-structured, arm: M1k, env: {APE_MAS_M1K_PROMPT: structured}}
+      - {id: m1k-verify, arm: M1k, env: {APE_MAS_M1K_PROMPT: verify}}
+  M2:
+    dev_cells: [F3-60, F7-1000]
+    candidates:
+      - {id: m2-default, arm: M2, env: {APE_MAS_M2_PROMPT: default}}
+      - {id: m2-concise, arm: M2, env: {APE_MAS_M2_PROMPT: concise}}
+      - {id: m2-structured, arm: M2, env: {APE_MAS_M2_PROMPT: structured}}
+      - {id: m2-verify, arm: M2, env: {APE_MAS_M2_PROMPT: verify}}

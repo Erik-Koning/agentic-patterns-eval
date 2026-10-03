@@ -82,9 +82,12 @@ gate run: GO (any GO label) -> its APG*, NO_GO -> its LGR*, with that selection'
 set as APE_KG_ARM and the knobs for every phase (`kg_resolution`). A live run refuses without a live gate run whose
 verdict is final; offline defaults to APG-s with the fake author's graphs (an offline gate run's LightRAG arm is its
 oracle twin, `run_gate.OFFLINE_ARMS`). run.json records the gate run at the run's first phase, so a later invocation
-may omit the flag, and one naming another gate run is refused (`settle_gate_run`). The resolution is in every manifest's params and in the freeze, which hashes
-the gate run's selected.yaml, decision.json and freeze.json. The KG arm's system (APG or LightRAG) is the one the
-builds make for the KG cells (BUILD_PLAN B6: `main.build.kg`, with the build-quality check per build phase, F1 included).
+may omit the flag, and one naming another gate run is refused (`settle_gate_run`). The gate run's selection also hands
+down the other arms the study's grid lists as `inherited: {source: gate}` (D-041: main's S3s, the gate's `S3s` entry):
+their knobs are set alongside the KG arm's for every phase, and a live run refuses when the gate run has no such entry
+(`inherited_selections`). The resolution is in every manifest's params and in the freeze, which hashes the gate run's
+selected.yaml, decision.json and freeze.json. The KG arm's system (APG or LightRAG) is the one the builds make for the
+KG cells (BUILD_PLAN B6: `main.build.kg`, with the build-quality check per build phase, F1 included).
 
 Budget. Before a phase (and before each test group, the primary groups at the start), its conservative projection
 (`ape.budget` over the plan cells it runs, at live sizes) must fit in both what is left of the program's budget
@@ -543,7 +546,8 @@ def kg_resolution(run: StudyRun) -> dict:
             raise PhaseError(
                 f"a live {run.study} run needs the gate's verdict for its KG arm (S5, M1k, M2): pass --gate-run-id <the frozen, analysed gate run>"
             )
-        run._kg = {"needed": True, "source": "offline default (no --gate-run-id)", "gate_run": None, "verdict": None, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "notes": notes}
+        notes += [f"{a}: its defaults offline (no gate run to inherit its selection from)" for a in gate_inherited_arms(run)]
+        run._kg = {"needed": True, "source": "offline default (no --gate-run-id)", "gate_run": None, "verdict": None, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "inherited": {}, "notes": notes}
         return run._kg
     gdir = run.gate_runs_root / run.gate_run_id
     info_path, freeze_path, decision_path = gdir / "run.json", gdir / "freeze.json", gdir / REPORT_DIR / "decision.json"  # analyze_gate's REPORT_DIR
@@ -568,11 +572,15 @@ def kg_resolution(run: StudyRun) -> dict:
     if problems:
         if not run.offline:
             raise PhaseError("the KG arm cannot be resolved: " + "; ".join(problems))
-        notes += [*problems, f"offline: {OFFLINE_KG_ARM} instead"]
-        run._kg = {"needed": True, "source": f"offline default (gate run {run.gate_run_id!r} unusable)", "gate_run": run.gate_run_id, "verdict": label, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "notes": notes}
+        notes += [*problems, f"offline: {OFFLINE_KG_ARM} instead", *(f"{a}: its defaults offline" for a in gate_inherited_arms(run))]
+        run._kg = {"needed": True, "source": f"offline default (gate run {run.gate_run_id!r} unusable)", "gate_run": run.gate_run_id, "verdict": label, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "inherited": {}, "notes": notes}
         return run._kg
     key = "APG*" if label in GO_LABELS else "LGR*"
-    entry = rg.read_selected(selected_path)[key]
+    gate_selected = yaml.safe_load(selected_path.read_text()) or {}
+    if key not in gate_selected:
+        raise PhaseError(f"gate run {run.gate_run_id!r}: {_show(selected_path)} has no {key} selection; run its tune phase")
+    entry = gate_selected[key]
+    inherited = inherited_selections(run, gate_selected, selected_path, notes)
     arm = str(entry["arm"])
     if run.offline:
         arm = rg.OFFLINE_ARMS.get(arm, arm)
@@ -593,21 +601,63 @@ def kg_resolution(run: StudyRun) -> dict:
         "system": "apg" if arm.startswith(("APG", "S5o")) else "lightrag",
         "candidate": entry.get("candidate"),
         "files": {"gate/selected.yaml": _show(selected_path), "gate/decision.json": _show(decision_path), "gate/freeze.json": _show(freeze_path)},
+        "inherited": inherited,
         "notes": notes,
     }
+    if clash := sorted(set(run._kg["env"]) & {k for x in inherited.values() for k in x["env"]}):
+        raise PhaseError(f"gate run {run.gate_run_id!r}: the KG arm's and the inherited selections' knobs overlap ({clash}); each sets only its own")
     return run._kg
 
 
+def gate_inherited_arms(run: StudyRun) -> dict[str, str]:
+    """The arms the study's grid inherits from the gate's selection other than the KG arm (D-041: main's S3s), that the
+    study's cells run: {arm: the gate's selected.yaml key} (the grid's `inherited.<arm>: {source: gate, gate_key}`)."""
+    path = run.config(run.grid_name)
+    if not path.is_file():
+        return {}
+    named = {a for c in plan(run).cells if c.study == run.study and c.enabled for a in rg._arm_names(c.spec.get("arms") or [])}
+    out = {}
+    for arm, spec in ((_load_grid(run).get("inherited") or {})).items():
+        if isinstance(spec, dict) and spec.get("source") == "gate" and arm not in KG_ARMS and arm in named:
+            out[str(arm)] = str(spec.get("gate_key") or arm)
+    return out
+
+
+def inherited_selections(run: StudyRun, gate_selected: dict, selected_path: Path, notes: list[str]) -> dict[str, dict]:
+    """{arm: {key, arm, env, candidate}}: each `gate_inherited_arms` arm's selection in the gate run's selected.yaml,
+    whose knobs every phase sets alongside the KG arm's (`kg_env`), recorded in the KG resolution (so in every
+    fingerprint and the freeze). A live run refuses when the gate run has no such entry, or one that runs another arm."""
+    out: dict[str, dict] = {}
+    for arm, key in gate_inherited_arms(run).items():
+        entry = gate_selected.get(key)
+        problem = None
+        if not isinstance(entry, dict):
+            problem = f"gate run {run.gate_run_id!r}: {_show(selected_path)} has no {key} selection, which {run.study}'s {arm} inherits (D-041)"
+        elif str(entry.get("arm", arm)) != arm:
+            problem = f"gate run {run.gate_run_id!r}: the {key} selection runs {entry.get('arm')}, but {run.study}'s {arm} inherits only its knobs"
+        if problem is not None:
+            if not run.offline:
+                raise PhaseError(problem)
+            notes.append(f"{problem}; offline: {arm} at its defaults")
+            continue
+        out[arm] = {"key": key, "arm": arm, "env": {str(k): str(v) for k, v in (entry.get("env") or {}).items()}, "candidate": entry.get("candidate")}
+    return out
+
+
 def kg_env(run: StudyRun) -> dict[str, str]:
+    """What the gate run decides for every phase's environment: the KG arm, its knobs and the inherited selections'."""
     kg = kg_resolution(run)
-    return {KG_ARM_ENV: kg["arm"], **kg["env"]} if kg.get("needed") else {}
+    if not kg.get("needed"):
+        return {}
+    return {KG_ARM_ENV: kg["arm"], **kg["env"], **{k: v for x in (kg.get("inherited") or {}).values() for k, v in x["env"].items()}}
 
 
 def kg_params_of(kg: dict | None) -> dict:
-    """A KG resolution as it enters fingerprints and the freeze's check: what it resolved, and its source files by hash."""
+    """A KG resolution as it enters fingerprints and the freeze's check: what it resolved (the inherited selections
+    too), and its source files by hash."""
     if not kg or not kg.get("needed"):
         return {"needed": False}
-    return {k: kg.get(k) for k in ("verdict", "key", "declared", "arm", "env", "system", "gate_run")} | {"files": {k: rg._sha256(rg._resolve(p)) for k, p in (kg.get("files") or {}).items()}}
+    return {k: kg.get(k) for k in ("verdict", "key", "declared", "arm", "env", "system", "gate_run", "inherited")} | {"files": {k: rg._sha256(rg._resolve(p)) for k, p in (kg.get("files") or {}).items()}}
 
 
 def kg_params(run: StudyRun) -> dict:
@@ -1475,16 +1525,44 @@ def study_grid(run: StudyRun) -> tuple[dict, list[dict]]:
     return {**grid, "systems": systems}, skipped
 
 
+SKEPTIC_KEY = "S1"  # the owners key of the skeptic, who signs off the baseline S1 runs as engineered (D-041)
+
+
 def tuning_signoff_problems(grid: dict) -> list[str]:
-    """Why a study grid is not ready for a live tune: a placeholder, or a system without a named owner and sign-off."""
-    owners, signed = grid.get("owners") or {}, grid.get("signed_off") or {}
+    """Why a study grid is not ready for a live tune: a placeholder; a system, or any other key of `owners` (main's S1,
+    the skeptic's sign-off that S1 runs as engineered), without a named owner and sign-off; or a multi-agent arm's
+    system owned by the skeptic (`owners.S1`): the M arms' prompts need an independent author (brief §7.3)."""
+    from .agent.solvers import MULTI_AGENT_ARMS
+
+    owners, signed, systems = grid.get("owners") or {}, grid.get("signed_off") or {}, grid.get("systems") or {}
     problems = ["the grid is a placeholder (`placeholder: true`): BUILD_PLAN B3 / B11 declare the real one"] if grid.get("placeholder") else []
-    for system in grid.get("systems") or {}:
-        if rg._unset(owners.get(system)):
-            problems.append(f"owners.{system} is not set")
-        if signed.get(system) is not True:
-            problems.append(f"signed_off.{system} is not true")
+    for key in dict.fromkeys([*systems, *owners]):
+        if rg._unset(owners.get(key)):
+            problems.append(f"owners.{key} is not set")
+        if signed.get(key) is not True:
+            problems.append(f"signed_off.{key} is not true")
+    skeptic = owners.get(SKEPTIC_KEY)
+    if not rg._unset(skeptic):
+        for name, sdef in systems.items():
+            arms = {name, *(c.get("arm") for c in sdef.get("candidates") or [])}
+            owner = owners.get(name)
+            if arms & set(MULTI_AGENT_ARMS) and not rg._unset(owner) and str(owner).strip().casefold() == str(skeptic).strip().casefold():
+                problems.append(f"owners.{name} is the skeptic (owners.{SKEPTIC_KEY}: {skeptic}): a multi-agent arm's prompts need an independent author (brief §7.3)")
     return problems
+
+
+def tune_plan_cells(run: StudyRun) -> list[tuple[str, dict]]:
+    """The study's tuning cells as `tuning.planned_tuning` reads them: (id, spec), a session cell's task cell its F8 cell."""
+    return [(c.id, c.spec if c.kind == "agent" else {**c.spec, "cells": [_f8_cell(c.spec)]}) for c in phase_cells(run, "tune")]
+
+
+def grid_problems(run: StudyRun) -> list[str]:
+    """`tuning.study_grid_problems` on the study's whole grid (as declared, not the offline cut), against what its
+    run_plan tuning cells price, with the multi-agent arms' knob check (`agent.multi.knobs.candidate_problems`)."""
+    from .agent.multi.knobs import candidate_problems
+    from .tuning import planned_tuning, study_grid_problems
+
+    return study_grid_problems(_load_grid(run), planned_tuning(tune_plan_cells(run)), candidate_problems)
 
 
 def _refuse_tune(run: StudyRun) -> str | None:
@@ -1495,6 +1573,8 @@ def _refuse_tune(run: StudyRun) -> str | None:
     path = run.config(run.grid_name)
     if problems := tuning_signoff_problems(_load_grid(run)):
         return f"tune: {_show(path)} is not signed off for a live tune: {'; '.join(problems)}. Each system's owner declares its candidates, then sets signed_off.<system>: true"
+    if problems := grid_problems(run):
+        return f"tune: {_show(path)} breaks the tuning rules (`tuning.study_grid_problems`), found before any dev run: {'; '.join(problems)}"
     return _refuse_unbuilt("tune")(run)
 
 
@@ -1528,6 +1608,9 @@ def _tune(run: StudyRun, record: dict) -> None:
     params = _tune_params(run)
     grid, skipped = study_grid(run)
     record["skipped_systems"] = skipped
+    record["grid_problems"] = grid_problems(run)  # a live tune refuses on any (`_refuse_tune`); offline, recorded
+    if record["grid_problems"]:
+        record["warnings"].append(f"the grid breaks the tuning rules (a live tune refuses it): {record['grid_problems']}")
     tdir = run.phase_dir("tune")
     log_dir, tlog = tdir / "logs", tdir / "tuning_log.jsonl"
     if tlog.exists():
@@ -1920,6 +2003,7 @@ def _write_freeze_provenance(run: StudyRun, freeze: dict) -> Path:
         *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}{f' (the {run.study} slice)' if f.get('slice') else ''}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         f"- **Design knobs** (APE_* set when the frozen phases ran; build-test and test refuse others): {rg._fmt_env(freeze.get('design_env'))}.",
         f"- **KG arm:** {kg.get('arm')} ({kg.get('source')}{', verdict ' + kg['verdict'] if kg.get('verdict') else ''}); knobs {rg._fmt_env(kg.get('env'))}." if kg.get("needed") else "- **KG arm:** none (no cell reads the KG).",
+        *[f"- **{a} (inherited from the gate run's `{x['key']}`):** candidate {x.get('candidate')}; knobs {rg._fmt_env(x['env'])}." for a, x in (kg.get("inherited") or {}).items()],
         *([f"- **Role:** the extension of run `{freeze['role']['of']}`."] if freeze["role"]["kind"] == "extension" else []),
         f"- **Test seeds:** {seeds_['base']}-{seeds_['last']} ({run.study}'s block base {seeds_['base']}). A later {run.study} run freezes a fresh block. "
         f"<!-- ape:test-seeds study={run.study} run={run.run_id} base={seeds_['base']} count={seeds_['count']} -->",
@@ -2365,8 +2449,9 @@ def stray_environment(run: StudyRun) -> list[str]:
 def run_environment(run: StudyRun) -> Iterator[None]:
     """As `run_gate.run_environment`, for a study: offline every path under runs/<study>/<id>/work, fake embeddings and
     an OpenAI key that reaches nothing; the run's S7 targets; the test split locked (only build-test unlocks it, for this
-    study); the spend label `<study>/<id>`; the session checkpoint directory; and the KG arm with its knobs. A live
-    shell value for one of the KG knobs that differs from the resolution is refused, never silently overridden."""
+    study); the spend label `<study>/<id>`; the session checkpoint directory; and the KG arm with its knobs and the
+    inherited selections' (`kg_env`). A live shell value for one of those knobs that differs from the resolution is
+    refused, never silently overridden."""
     kg = kg_env(run)
     if not run.offline and (clash := [f"{k}={os.environ[k]} (the gate's verdict sets {v})" for k, v in kg.items() if os.environ.get(k) not in (None, v)]):
         raise PhaseError("the environment sets the KG arm's knobs to other values than the gate run's selection; unset: " + "; ".join(clash))
