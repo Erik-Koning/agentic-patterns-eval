@@ -509,10 +509,10 @@ def _span(x: Mapping[str, float], pts) -> float:
     return float(max(xs) - min(xs)) if xs else 0.0
 
 
-def slope_test(v: pd.DataFrame, capability, *, null: float = 0.0, alternative: str = "less", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, weighting: str = "sessions", flip: bool = True, primary: str = "t") -> dict:
+def slope_test(v: pd.DataFrame, capability, *, null: float = 0.0, alternative: str = "less", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, weighting: str = "sessions", flip: bool = True, primary: str = "t", boot: int = 0) -> dict:
     """The slope of per-session values on measured capability (points without capability, or with fewer than 2
     sessions, are left out and named). Also reported per span: the change along the fitted line from the lowest to
-    the highest point."""
+    the highest point. `boot` > 0 adds a session-bootstrap percentile interval (`boot_ci`, `boot_ci_span`)."""
     x = capability_map(capability)
     n = v.groupby("point")["value"].count().to_dict() if len(v) else {}
     dropped = {c: ("no capability" if c not in x else f"{k} session(s)") for c, k in n.items() if c not in x or k < MIN_SESSIONS}
@@ -523,11 +523,13 @@ def slope_test(v: pd.DataFrame, capability, *, null: float = 0.0, alternative: s
     w = slope_weights(use, x, weighting)
     if not w:
         return base | {"reason": "the capability points do not differ"}
-    res = contrast(v, w, null=null, alternative=alternative, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary)
+    res = contrast(v, w, null=null, alternative=alternative, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, boot=boot)
     span = _span(x, use)
     res |= base | {"testable": res["testable"], "span": span, "weights": w}
     res["est_span"] = None if res["est"] is None else res["est"] * span
     res["ci_span"] = [None if b is None else b * span for b in res["ci"]]
+    if "boot_ci" in res:
+        res["boot_ci_span"] = [None if b is None else b * span for b in res["boot_ci"]]
     return res
 
 
@@ -536,7 +538,7 @@ def slope_test(v: pd.DataFrame, capability, *, null: float = 0.0, alternative: s
 REFERENCE_ARMS = {"S-CM*": ("S-CM*", None), "S1": ("S1", None), "S1-pre": ("S1", "S1")}
 
 
-def gh1(sessions: pd.DataFrame, capability, *, topology: str = "M2", reference: str = "S-CM*", block: str | None = "topo", outcome: str = "item_success", scale: str = "logit", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, weighting: str = "sessions", flip: bool = True, primary: str = "t") -> dict:
+def gh1(sessions: pd.DataFrame, capability, *, topology: str = "M2", reference: str = "S-CM*", block: str | None = "topo", outcome: str = "item_success", scale: str = "logit", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, weighting: str = "sessions", flip: bool = True, primary: str = "t", boot: int = 0) -> dict:
     """G-H1: the per-session gap Δ = topology − reference regressed on measured capability; H1: slope < 0 (the gap
     shrinks). `reference`: S-CM*, S1 (as scored: overflow fails the rest of the session) or S1-pre (both arms on the
     items before S1's earliest overflow in the session). Per-point gaps are reported with their intervals."""
@@ -548,7 +550,7 @@ def gh1(sessions: pd.DataFrame, capability, *, topology: str = "M2", reference: 
     gaps = {}
     for c, g in v.groupby("point"):
         gaps[c] = _brief(contrast(g, {c: 1.0}, alternative="greater", alpha=alpha, reps=reps, seed=seed, flip=flip))
-    res = slope_test(v, capability, alternative="less", alpha=alpha, reps=reps, seed=seed, weighting=weighting, flip=flip, primary=primary)
+    res = slope_test(v, capability, alternative="less", alpha=alpha, reps=reps, seed=seed, weighting=weighting, flip=flip, primary=primary, boot=boot)
     return {"topology": topology, "reference": reference, "scale": scale, "outcome": outcome, "gaps": gaps} | res
 
 
@@ -703,16 +705,17 @@ def crossing_split(sessions: pd.DataFrame, *, block: str | None = "cm", low: str
 # ---------- G-H3 ----------
 
 
-def _cost_pseudo(sessions: pd.DataFrame, a: str, b: str, meter: str, points: Sequence[str], block: str | None) -> tuple[pd.DataFrame, dict]:
+def _cost_pseudo(sessions: pd.DataFrame, a: str, b: str, meter: str, points: Sequence[str], block: str | None) -> tuple[pd.DataFrame, dict, pd.DataFrame | None]:
     """log(CPS_a / CPS_b) per point (CPS = Σ meter / Σ items solved over the point's sessions and epochs), linearised
-    per session: z = LR_c + (c_a/c̄_a − k_a/k̄_a) − (c_b/c̄_b − k_b/k̄_b)."""
+    per session: z = LR_c + (c_a/c̄_a − k_a/k̄_a) − (c_b/c̄_b − k_b/k̄_b). Also the per-session sums (for the bootstrap)."""
+    empty = pd.DataFrame(columns=["point", "session", "value"])
     df = _rows(sessions, block, None, points)
     if not len(df) or meter not in df:
-        return pd.DataFrame(columns=["point", "session", "value"]), {"reason": f"no {meter} recorded"}
+        return empty, {"reason": f"no {meter} recorded"}, None
     df = df[df["arm"].isin([a, b])]
     agg = df.groupby(["point", "session", "arm"]).agg(cost=(meter, "sum"), solved=("items_solved", "sum"), nan=(meter, lambda s: s.isna().any())).reset_index()
     if agg["nan"].any():
-        return pd.DataFrame(columns=["point", "session", "value"]), {"reason": f"{meter} missing for some sessions"}
+        return empty, {"reason": f"{meter} missing for some sessions"}, None
     wide = agg.pivot_table(index=["point", "session"], columns="arm", values=["cost", "solved"]).dropna()
     rows, info = [], {}
     for c in points:
@@ -727,7 +730,36 @@ def _cost_pseudo(sessions: pd.DataFrame, a: str, b: str, meter: str, points: Seq
         z = lr + (g[("cost", a)] / cb_a - g[("solved", a)] / kb_a) - (g[("cost", b)] / cb_b - g[("solved", b)] / kb_b)
         info[c] = {"ratio": math.exp(lr), "cps_" + a: cb_a / kb_a, "cps_" + b: cb_b / kb_b, "n": len(g)}
         rows.append(pd.DataFrame({"point": c, "session": g.index, "value": z.to_numpy()}))
-    return (pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["point", "session", "value"])), info
+    return (pd.concat(rows, ignore_index=True) if rows else empty), info, wide
+
+
+def _cost_boot(wide: pd.DataFrame, a: str, b: str, weights: Mapping[str, float], reps: int, seed: int) -> np.ndarray:
+    """Session-bootstrap replicates of the pooled log(CPS_a / CPS_b): worlds resampled (globally when a world appears
+    at several points, else within point) and Σ cost / Σ solved recomputed per arm and point."""
+    pts = list(weights)
+    sub = wide[wide.index.get_level_values("point").isin(pts)]
+    worlds = sorted(set(sub.index.get_level_values("session")))
+    G, C = len(worlds), len(pts)
+    X = np.full((4, G, C), np.nan)
+    wi, ci = {w: i for i, w in enumerate(worlds)}, {c: j for j, c in enumerate(pts)}
+    for (c, w), r in sub.iterrows():
+        X[:, wi[w], ci[c]] = [r[("cost", a)], r[("solved", a)], r[("cost", b)], r[("solved", b)]]
+    M = ~np.isnan(X[0])
+    Xz = np.where(M, X, 0.0)
+    rng = np.random.default_rng(seed)
+    if (M.sum(1) > 1).any():
+        W = rng.multinomial(G, np.full(G, 1 / G), size=reps).astype(float)
+        S = np.einsum("rg,kgc->krc", W, Xz)
+    else:
+        S = np.zeros((4, reps, C))
+        for j in range(C):
+            idx = np.flatnonzero(M[:, j])
+            Wj = rng.multinomial(len(idx), np.full(len(idx), 1 / len(idx)), size=reps).astype(float)
+            S[:, :, j] = np.einsum("rg,kg->kr", Wj, Xz[:, idx, j])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lr = np.log((S[0] / S[1]) / (S[2] / S[3]))
+    out = (lr * np.array([weights[c] for c in pts])).sum(1)
+    return out[np.isfinite(out)]
 
 
 def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[str] | None = None, outcome: str = "item_success", scale: str = "prob", iso: float = ISOLATION_SHARE, recovery: float = RECOVERY_SHARE, cost_ratio: float = COST_RATIO, meter: str = COST_METER, meters: Sequence[str] = COST_METERS, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t") -> dict:
@@ -756,11 +788,14 @@ def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[
     rec_share = ratio(long_values(ok, {"S-CM*": 1.0, "S1": -1.0}), dM2, w, alpha=alpha, boot=boot, seed=seed)
     costs = {}
     for m in dict.fromkeys([meter, *meters]):
-        v, info = _cost_pseudo(sessions, "S-CM*", "M2", m, pts, block)
+        v, info, sums = _cost_pseudo(sessions, "S-CM*", "M2", m, pts, block)
         if len(v) and v["point"].nunique() == len(pts):
             c = contrast(v, w, null=math.log(cost_ratio), alternative="less", **kw)
             c["ratio"] = None if c["est"] is None else math.exp(c["est"])
             c["ratio_ci"] = [None if b is None else math.exp(b) for b in c["ci"]]
+            if boot:
+                bs = _cost_boot(sums, "S-CM*", "M2", w, boot, seed)
+                c["ratio_boot_ci"] = [float(np.exp(np.quantile(bs, alpha))), float(np.exp(np.quantile(bs, 1 - alpha)))] if len(bs) else [None, None]
             costs[m] = c | {"per_point": info}
         else:
             costs[m] = {"testable": False, "reject": False, "reason": info.get("reason") or "cost not computable at every point", "per_point": info}
@@ -878,6 +913,8 @@ def probe_behaviour(sessions: pd.DataFrame, items: pd.DataFrame, by: Sequence[st
     measure something the policy does not use."""
     if sessions is None or items is None or not len(sessions) or not len(items) or "probes" not in sessions:
         return []
+    if {"dependency", "position", "plan_cell", "epoch"} - set(items.columns):
+        return []
     dep = items[items["dependency"].astype(bool)]
     key = ["plan_cell", "arm", "session", "epoch"]
     dep_by = {k: g for k, g in dep.groupby(key)}
@@ -936,6 +973,8 @@ def degradation(items: pd.DataFrame, *, block: str | None = None, by: Sequence[s
 
     if items is None or not len(items):
         return []
+    if missing := sorted({"success", "session", "overflow", "view_tokens", "rel_position", *by} - set(items.columns)):
+        return [{"status": f"item table lacks {missing}"}]
     df = items if block is None or "block" not in items else items[items["block"] == block]
     out = []
     for key, g in df.groupby(list(by), dropna=False):
@@ -979,6 +1018,8 @@ def glmm(items: pd.DataFrame, capability, *, block: str | None = "topo", arms: S
     x = capability_map(capability)
     if items is None or not len(items):
         return {"status": "no items"}
+    if missing := sorted({"success", "session", "arm", "point"} - set(items.columns)):
+        return {"status": "skipped", "reason": f"item table lacks {missing}"}
     df = items if block is None or "block" not in items else items[items["block"] == block]
     if arms is not None:
         df = df[df["arm"].isin(list(arms))]
@@ -989,7 +1030,8 @@ def glmm(items: pd.DataFrame, capability, *, block: str | None = "topo", arms: S
         df = df.sample(max_rows, random_state=seed)
     ref = reference if reference in set(df["arm"]) else sorted(df["arm"].unique())[0]
     cap = df["point"].map(x).astype(float)
-    data = pd.DataFrame({"success": df["success"].astype(float).to_numpy(), "arm": df["arm"].astype(str).to_numpy(), "cap": (cap - cap.mean()).to_numpy(), "session": df["session"].astype(str).to_numpy(), "item": df["item"].astype(str).to_numpy()})
+    item = df["item"] if "item" in df else df["session"].astype(str) + "#" + (df["position"].astype(str) if "position" in df else "")
+    data = pd.DataFrame({"success": df["success"].astype(float).to_numpy(), "arm": df["arm"].astype(str).to_numpy(), "cap": (cap - cap.mean()).to_numpy(), "session": df["session"].astype(str).to_numpy(), "item": item.astype(str).to_numpy()})
     formula = f"success ~ C(arm, Treatment(reference='{ref}')) * cap" if data["arm"].nunique() > 1 else "success ~ cap"
     try:
         with warnings.catch_warnings(record=True) as caught:

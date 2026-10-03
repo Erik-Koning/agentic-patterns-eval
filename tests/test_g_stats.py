@@ -266,12 +266,18 @@ def test_report_on_simulated_data_is_json_and_renders():
     var = gp.Variance()
     sessions = pd.concat([gp.simulate_block(sc["topo-h3"], gp.PLANNED_TOPO, var, rng), gp.simulate_block(sc["cm-equiv"], gp.PLANNED_CM, var, rng)], ignore_index=True)
     cap = gp.measured_capability(sc["cm-equiv"], var, rng, noise=False)
-    d = gr.g_report(None, sessions, cap, reps=500, boot=200, glmm=False)
+    d = gr.g_report(gp.to_items(sessions), sessions, cap, reps=500, boot=200, glmm=False)  # items without view tokens
     json.dumps(d)
+    assert d["gh2"]["degradation"][0]["status"].startswith("item table lacks")
+    assert gs.glmm(gp.to_items(sessions[sessions["block"] == "topo"]).head(0), cap)["status"] == "no items"
     dec = {r["id"]: r["decision"] for r in d["decisions"]}
     assert dec["G-H2a"] == "SUPPORTED" and dec["G-H3-pre"] == "SUPPORTED"
     assert dec["G-H1"] in ("SUPPORTED", "NOT_SUPPORTED") and dec["G-H2b[CM-sum]"] in ("EQUIVALENT", "NOT_SHOWN")
     assert set(d["gh1"]["references"]) == set(gh.REFERENCES)
+    lo, hi = d["gh1"]["primary"]["boot_ci_span"]
+    assert lo < hi and d["gh1"]["primary"]["ci_span"][0] < d["gh1"]["primary"]["est_span"] < d["gh1"]["primary"]["ci_span"][1]
+    cost = d["gh3"]["costs"]["cost_usd"]
+    assert cost["ratio_boot_ci"][0] < cost["ratio"] < cost["ratio_boot_ci"][1] and cost["ratio_ci"][0] < cost["ratio"] < cost["ratio_ci"][1]
     assert any("astra-high" in c and "sign-flip" in c for c in d["caveats"])
     md = gr.render(d)
     assert "## Decisions" in md and "G-H3b" in md

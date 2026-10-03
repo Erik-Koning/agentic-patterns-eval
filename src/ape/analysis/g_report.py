@@ -240,8 +240,8 @@ def g_report(
     d["capability"] = capability_section(capability, sessions)
     d["outcomes"] = gs.outcome_table(sessions)
     d["gh1"] = {
-        "primary": gs.gh1(sessions, capability, reference=reference, **kw),
-        "references": {r: gs.gh1(sessions, capability, reference=r, **kw) for r in REFERENCES},
+        "primary": gs.gh1(sessions, capability, reference=reference, boot=boot, **kw),
+        "references": {r: gs.gh1(sessions, capability, reference=r, boot=boot, **kw) for r in REFERENCES},
         "references_prob": {r: gs.gh1(sessions, capability, reference=r, scale="prob", **kw) for r in REFERENCES},
         "M1": gs.gh1(sessions, capability, topology="M1", reference=reference, **kw),
     }
@@ -310,10 +310,10 @@ def render(d: dict) -> str:
 
     g1 = d["gh1"]
     L += ["## G-H1: topology gap vs capability", "", f"Primary reference: **{g1['primary'].get('reference')}**. Slope per unit measured capability (logit scale); H1: slope < 0.", ""]
-    rows = [_test_row(f"M2 − {r} (logit)", x) + [_f(x.get("est_span"))] for r, x in g1["references"].items()]
-    rows += [_test_row(f"M2 − {r} (prob)", x) + [_f(x.get("est_span"))] for r, x in g1["references_prob"].items()]
-    rows += [_test_row(f"M1 − {g1['M1'].get('reference')} (logit)", g1["M1"]) + [_f(g1["M1"].get("est_span"))]]
-    L += [_table(["Contrast", "Slope", "Interval", "p (t)", "p (flip)", "min flip p", "Reason", "Change over span"], rows)]
+    rows = [_test_row(f"M2 − {r} (logit)", x) + [_f(x.get("est_span")), _ci(x.get("ci_span")), _ci(x.get("boot_ci_span"))] for r, x in g1["references"].items()]
+    rows += [_test_row(f"M2 − {r} (prob)", x) + [_f(x.get("est_span")), _ci(x.get("ci_span")), "–"] for r, x in g1["references_prob"].items()]
+    rows += [_test_row(f"M1 − {g1['M1'].get('reference')} (logit)", g1["M1"]) + [_f(g1["M1"].get("est_span")), _ci(g1["M1"].get("ci_span")), "–"]]
+    L += [_table(["Contrast", "Slope", "Interval", "p (t)", "p (flip)", "min flip p", "Reason", "Change over span", "Interval", "Bootstrap"], rows)]
     gap_rows = [[r, c, _f(x["est"]), _ci(x["ci"]), x["n"]] for r, xx in g1["references"].items() for c, x in xx.get("gaps", {}).items()]
     L += ["Per-point gaps (logit):", "", _table(["Reference", "Point", "Gap", "Interval", "Sessions"], gap_rows)]
 
@@ -354,7 +354,7 @@ def render(d: dict) -> str:
             _test_row(f"(S-CM* − S1) − {g3['thresholds']['recovery']} (M2 − S1) > 0", g3["h3b"]["recovery"], _pp),
         ])]
         L += [_table(["Share", "Estimate", "Fieller CI", "Bootstrap CI"], [[n, _f(g3[k].get("est")), _ci(g3[k].get("ci_fieller")) if g3[k].get("fieller_bounded") else "unbounded", _ci(g3[k].get("ci_boot"))] for n, k in (("isolation", "isolation_share"), ("specialisation", "specialization_share"), ("S-CM* recovery", "recovery_share"))])]
-        L += [_table(["Meter", "CPS ratio S-CM* / M2", "Interval", "p (≤ threshold)", "Reason"], [[m, _f(c.get("ratio")), _ci(c.get("ratio_ci")), _p(c.get("p_t")), c.get("reason") or ""] for m, c in g3["costs"].items()])]
+        L += [_table(["Meter", "CPS ratio S-CM* / M2", "Interval", "Bootstrap", "p (≤ threshold)", "Reason"], [[m, _f(c.get("ratio")), _ci(c.get("ratio_ci")), _ci(c.get("ratio_boot_ci")), _p(c.get("p_t")), c.get("reason") or ""] for m, c in g3["costs"].items()])]
     else:
         L += [f"Not testable: {g3.get('reason')}", ""]
 

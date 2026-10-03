@@ -8,8 +8,9 @@ point and N. The point is the agent's model and effort, `<tier>-<effort>` (e.g. 
 profile (config/models.yaml) gives the agent model and its effort unless the cell overrides `effort`. The arm comes
 from the log (task args or eval metadata), the session from the sample's `world_id`, so one log may hold any arm.
 
-**Item table** (one row per session-epoch × position, every position 1..N): success (overflowed and never-reached
-items fail, as the scorer counts them), answered, overflow, reached, kind, dependency flags, generations, view tokens
+**Item table** (one row per session-epoch × position, every position 1..N; with plan cell, block, point, tier, effort,
+arm, session, epoch, N and knob variant): success (overflowed and never-reached items fail, as the scorer counts
+them), answered, overflow and the session's overflow position, reached, kind, dependency flags, generations, view tokens
 at the first and decision calls (`view_tokens` = decision, else first), relative position, the taxonomy labels, and
 per-item agent / cm / probe tokens where per-call records carry them.
 
@@ -19,8 +20,10 @@ score, the binary session success, overflow position, the reference W crossing, 
 {k: {f1, taken}}; a checkpoint not taken scores 0), taxonomy counts (`tax_*`), and the cost meters with probes
 excluded: `tokens` (agent + management input and output tokens), `calls` (agent + management generations),
 `cost_usd` (cache-adjusted $: Inspect's priced usage, or the price table) and `wall_clock` (seconds; probe time is
-not separable unless per-call records carry it). Probe and management tokens are kept apart (`tokens_probe`,
-`tokens_cm`, `cost_usd_probe`, `cost_usd_cm`).
+not separable unless per-call records carry it), and each meter per solved item (`cps_<meter>`, NaN when nothing was
+solved; per arm and point `g_stats.cost_table` takes the ratio of sums instead). Probe and management tokens are
+kept apart (`tokens_probe`, `tokens_cm`, `cost_usd_probe`, `cost_usd_cm`). Also the profile, model, effort and the
+sample's knobs.
 
 **Tolerance.** Package B7 is extending the session records (per-call kind agent | cm | probe, management tokens,
 usage restored after a mid-session resume). The loader reads, when present:
@@ -58,11 +61,12 @@ CALL_KINDS = ("agent", "cm", "probe")
 PHASE_BLOCKS = {"context_management": "cm", "topology": "topo", "capability_anchor": "cap", "micro_pilot": "pilot", "tuning": "tune"}
 PREFIX_BLOCKS = {"g.cm.": "cm", "g.topo.": "topo", "g.cap.": "cap", "g.pilot.": "pilot", "g.tune.": "tune"}
 CAP_CELLS = ("F7-10", "F3-5")
+COST_METERS = ("cost_usd", "tokens", "calls", "wall_clock")
 
 ITEM_COLUMNS = (
-    "plan_cell", "block", "point", "arm", "session", "epoch", "N", "variant", "position", "rel_position", "item", "case_id", "kind",
+    "plan_cell", "block", "point", "tier", "effort", "arm", "session", "epoch", "N", "variant", "position", "rel_position", "item", "case_id", "kind",
     "dependency", "dependency_kinds", "success", "answered", "overflow", "reached", "generations", "view_tokens_first",
-    "view_tokens_decision", "view_tokens", "w_crossing_item", "labels", "tokens_agent", "tokens_cm", "tokens_probe", "error",
+    "view_tokens_decision", "view_tokens", "w_crossing_item", "overflow_at", "labels", "tokens_agent", "tokens_cm", "tokens_probe", "error",
 )  # fmt: skip
 OUTCOME_COLUMNS = ("items_solved", "n_items", "item_success", "outcomes", "overflow", "overflow_at", "dependency_success")
 
@@ -245,7 +249,7 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
         base = si or st
         vf, vd = st.get("view_tokens_first"), st.get("view_tokens_decision")
         items.append({
-            **{k: ctx.get(k) for k in ("plan_cell", "block", "point", "arm", "variant")},
+            **{k: ctx.get(k) for k in ("plan_cell", "block", "point", "tier", "effort", "arm", "variant")},
             "session": session,
             "epoch": int(sample.epoch),
             "N": N,
@@ -265,6 +269,7 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
             "view_tokens_decision": vd,
             "view_tokens": vd if vd is not None else vf,
             "w_crossing_item": wc,
+            "overflow_at": overflow_at,
             "labels": ",".join(labels.get(pos) or []),
             **{f"tokens_{k}": (per_item_tok.get((pos, k), 0.0) if k in has_kind else np.nan) for k in CALL_KINDS},
             "error": errored,
@@ -328,7 +333,8 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
     rep = smd.get("report") or {}
     counts = (smd.get("taxonomy") or {}).get("counts") or {}
     session_row = {
-        **{k: ctx.get(k) for k in ("plan_cell", "block", "point", "arm", "variant", "model", "effort")},
+        **{k: ctx.get(k) for k in ("plan_cell", "block", "point", "tier", "effort", "profile", "model", "arm", "variant")},
+        "knobs": md.get("knobs") or {},
         "session": session,
         "epoch": int(sample.epoch),
         "N": N,
@@ -419,7 +425,8 @@ def load_session_logs(log_files: Sequence[str | Path], ctx: Mapping | None = Non
             problems.append(f"{f}: no samples (status {log.status})")
             continue
         variant = args.get("variant") or ""
-        c = {**ctx, "arm": arm, "variant": variant, "model": ctx.get("model") or log.eval.model}
+        model = ctx.get("model") or log.eval.model
+        c = {**ctx, "arm": arm, "variant": variant, "model": model, "tier": ctx.get("tier") or point_label(model, None)}
         for s in log.samples:
             it, row = sample_rows(s, c, prices)
             key = (c.get("plan_cell"), arm, row["session"], row["epoch"])
@@ -436,6 +443,8 @@ def load_session_logs(log_files: Sequence[str | Path], ctx: Mapping | None = Non
     if not len(extra):
         return item_df, extra, problems
     out = extra.merge(sessions_from_items(item_df).drop(columns=["block", "point", "N"]), on=["plan_cell", "arm", "session", "epoch"], how="left")
+    for m in COST_METERS:
+        out[f"cps_{m}"] = out[m] / out["items_solved"].where(out["items_solved"] > 0)  # NaN when nothing was solved
     return item_df, out, problems
 
 
@@ -501,7 +510,8 @@ def load_g_cells(cells: Mapping[str, Sequence[str | Path]], *, plan=None, points
         if ci["block"] == "cap":
             cap_logs.setdefault(ci["point"], []).extend(files or [])
             continue
-        it, ss, pr = load_session_logs(files or [], {"plan_cell": pc, "block": ci["block"], "point": ci["point"], "model": ci.get("model"), "effort": ci.get("effort")}, prices)
+        ctx = {"plan_cell": pc, "block": ci["block"], "point": ci["point"], "model": ci.get("model"), "effort": ci.get("effort"), "profile": ci.get("profile")}
+        it, ss, pr = load_session_logs(files or [], ctx, prices)
         problems += [f"{pc}: {p}" for p in pr]
         info[pc] |= {"session_epochs": len(ss), "sessions": int(ss["session"].nunique()) if len(ss) else 0, "errors": int(ss["error"].sum()) if len(ss) else 0}
         if ci.get("known") and ci.get("sessions") and len(ss) and ss["session"].nunique() < int(ci["sessions"]):

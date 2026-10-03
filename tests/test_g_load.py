@@ -89,6 +89,9 @@ def test_loader_reads_session_and_anchor_logs(g_logs):
     # 2 cells x 2 arms x 2 worlds x 2 epochs session-epochs, every position 1..12 present.
     assert len(ss) == 16 and len(it) == 16 * 12
     assert set(ss["point"]) == {"luna-high", "sol-high"} and set(ss["block"]) == {"cm"} and set(ss["arm"]) == {"CM0", "O-state"}
+    assert set(it["tier"]) == {"luna", "sol"} and set(it["effort"]) == {"high"} and set(ss["profile"]) == {"study_g_luna", "study_g_sol"}
+    assert (ss["knobs"].map(lambda k: k.get("output_tokens")) == 1000).all() and (ss["cps_tokens"].dropna() > 0).all()
+    assert ss.loc[ss["items_solved"] == 0, "cps_cost_usd"].isna().all()
     assert (it.groupby(["plan_cell", "arm", "session", "epoch"])["position"].apply(lambda p: sorted(p) == list(range(1, 13)))).all()
     # Outcomes agree with the scorer, item by item and per session.
     log = read_eval_log(g_logs["f8-cm0"])
