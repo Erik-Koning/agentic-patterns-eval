@@ -143,18 +143,22 @@ class SessionCheckpoints:
         """Write `payload` atomically (temporary file, fsync, rename). It must be plain JSON: a policy state that is
         not raises here, at the session's first save, instead of coming back altered on resume."""
         full = {"format": FORMAT, "key": self.key, "components": self.components, "saved_at": _now(), **payload}
+        text = json.dumps(full)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(f"{self.path.name}.tmp-{os.getpid()}")
         try:
             with open(tmp, "w") as f:
-                json.dump(full, f)
+                f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        self.last = full
+        # A snapshot of what was written, never the payload itself: the recorder's events and a policy's state are
+        # live objects the session keeps changing, and a failed attempt saves `last` again (B9 found a mid-item failure
+        # carrying the failed attempt's partial tool events into the resumed session).
+        self.last = json.loads(text)
 
     def complete(self) -> None:
         """The session ended (normally or by a limit): delete its checkpoint, so it is never resumed again."""

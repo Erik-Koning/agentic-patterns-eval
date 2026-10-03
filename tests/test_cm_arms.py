@@ -95,7 +95,7 @@ def _gold(level: str = "12"):
 
 def test_every_cm_arm_is_registered():
     assert set(CM_ARMS) == {"CM-prune", "CM-trim", "CM-sum", "CM-todo", "CM-reset", "CM-native", "S-CM*"}
-    assert SESSION_ARMS == ("CM0", "O-state", *CM_ARMS)
+    assert SESSION_ARMS[: 2 + len(CM_ARMS)] == ("CM0", "O-state", *CM_ARMS)  # then B9's topology arms (S1, M1, M2)
 
 
 @pytest.mark.parametrize("arm", list(CM_ARMS))
