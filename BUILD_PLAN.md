@@ -108,5 +108,5 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | B3, B5, B9, B11, B12 | ⏳ waiting on dependencies | |
 
 **Follow-ups found during the build** (must be done before any paid run):
-- **Spend misses errored attempts** (D-030): Inspect drops the usage of a sample's errored attempts under `retry_on_error`, so `ape.budget`/`ape.spend` undercount. Fix: count every model call's usage as it happens (e.g. an Inspect hook) or add the recorded lost usage; for sessions add `f8_resume.unlogged`.
+- **Spend misses errored attempts** (D-030): Inspect drops the usage of a sample's errored attempts under `retry_on_error`, so `ape.budget`/`ape.spend` undercount. Fix (after B1 merges, since it touches runner/spend code): Inspect 0.3.273's `on_model_usage` hook fires for every successful generate call, errored attempts included, with eval/run/eval-set IDs; a hook that appends each call's usage and cost to a flushed per-run ledger makes spend complete and kill-safe, with the logs kept as a cross-check.
 
