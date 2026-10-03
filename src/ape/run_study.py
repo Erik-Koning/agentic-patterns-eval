@@ -1553,6 +1553,7 @@ def cm_candidate_problems(system: str, env: dict[str, str]) -> list[str]:
     """A Study G candidate's env, for the session arm (system) it tunes: it sets only APE_CM_* knobs that arm's policy
     reads (`KNOBS`), with values the policy takes (`resolve_knobs`, `validate`: e.g. S-CM*'s stack). Other systems may
     set the same knob names: each tuned arm runs under exactly its own selection's knobs (D-042)."""
+    from .agent import session  # noqa: F401  (registers the context policies)
     from .agent.context_policy import KNOB_ENV_PREFIX, policy_class, resolve_knobs
 
     try:

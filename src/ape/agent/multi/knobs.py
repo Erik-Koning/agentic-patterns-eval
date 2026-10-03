@@ -5,10 +5,10 @@
 | `APE_MAS_<ARM>_PROMPT` | S9, M1, M1K, M2, M7 | the role notes | a variant in `prompts.VARIANTS` (`default`: B2's notes) |
 | `APE_MAS_<ARM>_CLIP` | M1, M1K, M2, M7 | tokens of a worker's result or a member's rationale as another agent reads it | 100-8,000 (2,000) |
 
-**Each arm has its own knobs**, so one arm's tuning candidates never move another arm: the study runner applies every
-selection's knobs together (`run_study.selection_env`, which refuses two selections setting one variable). **M1s reads
-M1's knobs:** M1 and M1s differ in CONC only and must give the model identical inputs, so M1's selection is M1s's too.
-S8k3 has none: its attempts are S1's, and its aggregator note stays fixed. The structural parameters (3 workers,
+**Each arm has its own knobs**, so one arm's tuning candidates never move another arm, and the study runner runs each
+tuned arm under exactly its own selection's knobs (`run_study.env_group`, D-042). **M1s reads M1's knobs** (the runner
+runs it under M1's selection): M1 and M1s differ in CONC only and must give the model identical inputs, so M1's
+selection is M1s's too. S8k3 has none: its attempts are S1's, and its aggregator note stays fixed. The structural parameters (3 workers,
 2 critique rounds, council k = 3; brief §4.2) are fixed a priori and are not knobs.
 
 Every `APE_MAS_*` variable is checked whenever a multi-agent solver is built: a misspelt name or an unknown value raises
@@ -77,8 +77,7 @@ def env_problems(environ: Mapping[str, str]) -> list[str]:
 
 def resolve(arm: str, environ: Mapping[str, str] = os.environ) -> Knobs:
     """`arm`'s knobs from `environ`, defaults where unset. Raises ValueError on any problem with an `APE_MAS_*`
-    variable, whichever arm it belongs to: a group runs every selection's knobs together, so a bad one is found by the
-    first multi-agent solver built."""
+    variable, whichever arm it belongs to, so a bad one is found by the first multi-agent solver built."""
     if problems := env_problems(environ):
         raise ValueError("multi-agent knobs: " + "; ".join(problems))
     values = {KNOBS[name][1]: str(environ[name]).strip() for name in arm_knobs(arm) if str(environ.get(name, "")).strip()}

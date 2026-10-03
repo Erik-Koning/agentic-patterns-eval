@@ -450,7 +450,7 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     assert all((a := h.eval.task_args)["seed_base"] == 29000 and a["threshold"] == plan["threshold"] and a["plan_cell"] and a["group"] for h in sessions)
     sess = read_eval_log(str(next(f for f in sorted((run.dir / "test" / "g.cm.luna-high").rglob("*.eval")) if read_eval_log(str(f), header_only=True).eval.task_args["arm"] == "CM-native")))
     assert sess.samples[0].store["f8_cm_events"] and not sess.samples[0].error, "CM-native took its mock route offline"
-    assert _manifest(run, "preflight")["checks"]["cm_native"] == {"g.pilot.luna": "mock", "g.cm.luna-high": "mock"}
+    assert _manifest(run, "preflight")["checks"]["cm_native"] == {"g.pilot.luna": "mock", "g.cm.luna-high": "mock", "g.cm.sol-high": "mock"}, "D-043: Sol too"
     # APE_SESSION_CHECKPOINTS reached the sessions: each sample saved there (a finished session deletes only its file).
     assert {p.parent.name for p in run.session_checkpoints_dir.glob("*/epoch-1")} >= {"F8-40-pilot-s22000", "F8-40-dev-s1000", "F8-40-test-s29000", "F8-20-o2250-test-s29000"}
     tlog = [json.loads(line) for line in (run.phase_dir("tune") / "tuning_log.jsonl").read_text().splitlines()]
@@ -807,6 +807,43 @@ def test_each_tuned_arm_runs_with_exactly_its_own_selections_knobs(clean_env):
     assert run_study.env_group("S7", "S7", main_sel) == ("s7", {}), "S7's group carries only its schedule knob"
 
 
+def test_study_g_grid_checks_allow_the_shared_cm_namespace_and_hold_each_arm_to_its_own_knobs(clean_env, monkeypatch):
+    """D-042 / B11: Study G's candidates write out their arm's whole APE_CM_* configuration, so systems share knob names;
+    the grid check holds each candidate to the knobs its own arm reads, with values the policy takes, and the plan's
+    session tuning cell prices its F8 cell. T_abs is no knob: the runner passes the plan's to every session task."""
+    from ape import tuning
+
+    assert tuning.plan_task_cells({"N": 40, "sessions": 3}) == ["F8-40"] and tuning.plan_task_cells({"cells": ["F1-2"]}) == ["F1-2"]
+    run = StudyRun("study_g", "gg", offline=True, runs_root=clean_env / "runs")
+    planned = tuning.planned_tuning((c.id, c.spec) for c in run_study.phase_cells(run, "tune"))
+    assert planned["CM-sum"] == {"candidates": {"g.tune.luna": 2}, "cells": ["F8-40"]} and planned["S-CM*"]["candidates"] == {"g.tune.luna": 3}
+    grid = {
+        "budget_per_system": 3, "equal_budgets": False, "dev_cells": ["F8-40"],
+        "systems": {
+            "CM-prune": {"candidates": [{"id": f"p{k}", "arm": "CM-prune", "env": {"APE_CM_PRUNE_KEEP": str(k)}} for k in (3, 6, 12)]},
+            "CM-sum": {"candidates": [{"id": f"s-{v}", "arm": "CM-sum", "env": {"APE_CM_SUM_PROMPT": v}} for v in ("structured", "plain")]},
+            "CM-todo": {"candidates": [{"id": f"t-{v}", "arm": "CM-todo", "env": {"APE_CM_TODO_EXTRACT": v}} for v in ("true", "false")]},
+            "CM-reset": {"candidates": [{"id": f"r{e}", "arm": "CM-reset", "env": {"APE_CM_TODO_EXTRACT": "true", "APE_CM_RESET_EVERY": e}} for e in ("5", "0", "3")]},
+            "S-CM*": {"candidates": [{"id": f"x{i}", "arm": "S-CM*", "env": {"APE_CM_STACK": st, "APE_CM_PRUNE_KEEP": "3", "APE_CM_TODO_EXTRACT": "true"}} for i, st in enumerate(("prune+todo+reset", "prune+todo+sum", "prune+todo"))]},
+        },
+    }  # fmt: skip
+    monkeypatch.setattr(run_study, "_load_grid", lambda r: grid)
+    assert run_study.grid_problems(run) == [], "APE_CM_PRUNE_KEEP and APE_CM_TODO_EXTRACT are set by several systems, by design"
+    grid["systems"]["CM-prune"]["candidates"][0]["env"] |= {"APE_CM_SUM_PROMPT": "plain"}
+    grid["systems"]["S-CM*"]["candidates"][2]["env"]["APE_CM_STACK"] = "prune+trim"
+    grid["systems"]["CM-todo"]["candidates"][1]["env"] = {"APE_CM_TODO_EXTRACT": "maybe", "APE_CM_THRESHOLD": "30000"}
+    assert run_study.grid_problems(run) == [
+        "CM-prune: candidate p3: CM-prune reads none of ['APE_CM_SUM_PROMPT'] (its knobs: ['prune_keep'])",
+        "CM-todo: candidate t-false: CM-todo reads none of ['APE_CM_THRESHOLD'] (its knobs: ['todo_extract'])",
+        "CM-todo: candidate t-false: CM-todo rejects {'APE_CM_TODO_EXTRACT': 'maybe', 'APE_CM_THRESHOLD': '30000'}: not a boolean: 'maybe'",
+        "S-CM*: candidate x2: S-CM* rejects {'APE_CM_STACK': 'prune+trim', 'APE_CM_PRUNE_KEEP': '3', 'APE_CM_TODO_EXTRACT': 'true'}: stack 'prune+trim': at most one of ['prune', 'trim'] and one of ['sum', 'reset']",
+    ]
+    assert run_study.cm_candidate_problems("CM-nope", {})[0].startswith("session arm 'CM-nope' is not built yet")
+    # Topology is a primary test plan phase (G-H3 is confirmatory, D-033 / D-042): its groups run with the primary ones.
+    assert run_study.STUDIES["study_g"].primary == ("capability_anchor", "context_management", "topology")
+    assert all(g["primary"] for g in run_study.run_groups(run, "test") if g["cell"].startswith(("g.cap.", "g.cm.", "g.topo.")))
+
+
 def test_the_budget_guard_counts_the_studys_allocation(clean_env, monkeypatch):
     run = StudyRun("main", "guard", offline=True, runs_root=clean_env / "runs")
     assert run_phases(run, "preflight") == {"preflight": "done"}
@@ -932,10 +969,14 @@ def test_a_live_study_preflight_needs_a_fresh_smoke_and_the_studys_own_checks(cl
     from ape.agent.cm_arms import NATIVE_RECORD_ENV, record_native_support
 
     monkeypatch.setenv(NATIVE_RECORD_ENV, str(record_native_support("openai/gpt-6-luna", True, evidence="test", path=clean_env / "native.json")))
+    with pytest.raises(PreflightError, match="g.cm.sol-high: CM-native needs confirmed native compaction for openai/gpt-6-sol") as e:
+        run_phases(StudyRun("study_g", "g1", **kw), "preflight")
+    assert "g.cm.luna-high" not in str(e.value), "D-043: Sol's CM-native cell needs Sol's own support record"
+    record_native_support("openai/gpt-6-sol", True, evidence="test", path=clean_env / "native.json")
     assert run_phases(StudyRun("study_g", "g1", **kw), "preflight") == {"preflight": "done"}
     m = json.loads(StudyRun("study_g", "g1", **kw).manifest_path("preflight").read_text())
     assert m["checks"]["smoke"] == "ok" and m["checks"]["probe"]["missing"] == [] and set(m["profiles"]) == {"study_g_luna", "study_g_sol", "study_g_astra"}
-    assert m["checks"]["cm_native"] == {"g.pilot.luna": "provider", "g.cm.luna-high": "provider"}
+    assert m["checks"]["cm_native"] == {"g.pilot.luna": "provider", "g.cm.luna-high": "provider", "g.cm.sol-high": "provider"}
     # A study's own required checks (BUILD_PLAN B12 adds them) are held to the same conditions.
     monkeypatch.setitem(run_study.STUDIES, "study_g", replace(STUDIES["study_g"], smoke_checks=("g-sessions",)))
     with pytest.raises(PreflightError, match="smoke check 'g-sessions' has no live result"):
