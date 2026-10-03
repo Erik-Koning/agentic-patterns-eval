@@ -39,7 +39,7 @@ import numpy as np
 import pandas as pd
 
 from . import g_stats as gs
-from .g_hypotheses import ALPHA, DEFAULT_REFERENCE, HYPOTHESES, OPEN_CHOICES, REFERENCES, TOST_ESTIMAND, TOST_MARGIN, GHypothesis
+from .g_hypotheses import ALPHA, DEFAULT_REFERENCE, HYPOTHESES, OPEN_CHOICES, REFERENCES, TIER_ORDER, TOST_ESTIMAND, TOST_MARGIN, GHypothesis
 
 CHOICES = (
     "Sessions are the clusters (D-029): epochs of a session are pooled before any statistic; a world run at several "
@@ -60,6 +60,8 @@ CHOICES = (
     "D-033: G-H1 (reference S-CM*, sensitivity S1-pre, S1 descriptive only) and G-H2b (the change in R_x over the "
     "capability span) are estimates with 95% intervals; no decision rests on them. The confirmatory rows are G-H2a and "
     "G-H3-pre → G-H3a → G-H3b.",
+    "D-043: G-H1 and G-H2b are also reported with measured capability replaced by the tier rank (Luna-low < Luna-high "
+    "< Sol < Astra, equally spaced), a pre-registered sensitivity for an anchor near the ceiling.",
 )
 
 
@@ -176,6 +178,7 @@ def decisions(d: dict, hypotheses: Sequence[GHypothesis]) -> list[dict]:
         conf = h.role == "confirmatory"
         if h.id == "G-H1":
             sens = d["gh1"]["references"].get("S1-pre", {})
+            tier = d["gh1"].get("tier_order") or {}
             row |= {
                 "decision": _label(g1) if conf else "descriptive",
                 "reference": g1.get("reference"),
@@ -184,6 +187,7 @@ def decisions(d: dict, hypotheses: Sequence[GHypothesis]) -> list[dict]:
                 "estimate": g1.get("est"),
                 "ci": g1.get("ci"),
                 "sensitivity_S1_pre": {"estimate_span": sens.get("est_span"), "ci_span": sens.get("ci_span")},
+                "tier_order": {r: {"estimate_span": x.get("est_span"), "ci_span": x.get("ci_span"), "points": x.get("points_used")} for r, x in tier.items() if r in (g1.get("reference"), "S1-pre")},
                 "reason": g1.get("reason"),
             }
             if conf:
@@ -193,7 +197,8 @@ def decisions(d: dict, hypotheses: Sequence[GHypothesis]) -> list[dict]:
         if h.id == "G-H2b":
             for s, r in g2["tost"].items():
                 label = ("NOT_TESTABLE" if not r["testable"] else ("EQUIVALENT" if r.get("holm_equivalent") else "NOT_SHOWN")) if conf else "descriptive"
-                out.append(row | {"id": f"G-H2b[{s}]", "decision": label, "estimate": r.get("est"), "ci": r.get("ci"), "reason": r.get("reason"), **({"margin": r.get("margin"), "p": r.get("p_t"), "holm_level": r.get("holm_level")} if conf else {})})
+                t = (g2.get("tost_tier_order") or {}).get(s) or {}
+                out.append(row | {"id": f"G-H2b[{s}]", "decision": label, "estimate": r.get("est"), "ci": r.get("ci"), "tier_order": {"estimate": t.get("est"), "ci": t.get("ci")}, "reason": r.get("reason"), **({"margin": r.get("margin"), "p": r.get("p_t"), "holm_level": r.get("holm_level")} if conf else {})})
             continue
         if not conf:
             out.append(row | {"decision": "descriptive"})
@@ -315,11 +320,14 @@ def g_report(
         "references": {r: gs.gh1(sessions, capability, reference=r, boot=boot, **kw) for r in REFERENCES},
         "references_prob": {r: gs.gh1(sessions, capability, reference=r, scale="prob", **kw) for r in REFERENCES},
         "M1": gs.gh1(sessions, capability, topology="M1", reference=reference, **kw),
+        # D-043: capability replaced by the tier rank (equally spaced), every reference
+        "tier_order": {r: gs.gh1(sessions, TIER_ORDER, reference=r, boot=boot, **kw) for r in REFERENCES},
     }
     margin = tost_margin if tost_margin is not None else TOST_MARGIN[tost_estimand]
     d["gh2"] = gs.gh2(sessions, capability, estimand=tost_estimand, margin=margin, boot=boot, planned_points=(planned or {}).get("G-H2a"), **kw)
     other = "gain" if tost_estimand == "R" else "R"
     d["gh2"]["tost_sensitivity"] = {s: gs.tost(sessions, capability, s, estimand=other, **kw) for s in d["gh2"]["tost"]}
+    d["gh2"]["tost_tier_order"] = {s: gs.tost(sessions, TIER_ORDER, s, estimand=tost_estimand, margin=margin, **kw) for s in d["gh2"]["tost"]}  # D-043
     d["gh2"]["short_control"] = gs.short_control(sessions, alpha=alpha, reps=reps, seed=seed)
     d["gh2"]["crossing_split"] = gs.crossing_split(sessions, alpha=alpha, seed=seed)
     d["gh2"]["degradation"] = gs.degradation(items) if len(items) and "block" in items else []
@@ -380,8 +388,12 @@ def render(d: dict) -> str:
             s = r.get("sensitivity_S1_pre") or {}
             rows.append([f"G-H1 (M2 − {r.get('reference')})", "change in the logit gap over the capability span", _f(r.get("estimate_span")), _ci(r.get("ci_span")), r.get("reason") or ""])
             rows.append(["G-H1 (M2 − S1-pre, sensitivity)", "same, on items before S1's overflow", _f(s.get("estimate_span")), _ci(s.get("ci_span")), ""])
+            for ref, x in (r.get("tier_order") or {}).items():
+                rows.append([f"G-H1 (M2 − {ref}), tier order (D-043)", "change in the logit gap over the tier ranks spanned", _f(x.get("estimate_span")), _ci(x.get("ci_span")), ", ".join(x.get("points") or [])])
         elif r["id"].startswith("G-H2b"):
             rows.append([r["id"], "change in R_x over the capability span", _f(r.get("estimate")), _ci(r.get("ci")), r.get("reason") or ""])
+            t = r.get("tier_order") or {}
+            rows.append([f"{r['id']}, tier order (D-043)", "change in R_x over the tier ranks spanned", _f(t.get("estimate")), _ci(t.get("ci")), ""])
     if rows:
         L += ["Descriptive estimates (D-033; 95% intervals, no decision):", "", _table(["Row", "Estimand", "Estimate", "Interval", "Note"], rows)]
 
@@ -399,7 +411,8 @@ def render(d: dict) -> str:
         "",
         f"Reference **{g1['primary'].get('reference')}**; S1-pre (both arms on items before S1's overflow) is the sensitivity analysis; S1 as scored is "
         "reported only descriptively (its gap carries the overflow rule, which drifts with capability). Slope per unit measured capability and the "
-        "change along the fitted line over the capability span, with 95% session-clustered and bootstrap intervals.",
+        "change along the fitted line over the capability span, with 95% session-clustered and bootstrap intervals; the D-043 sensitivity "
+        "repeats each with capability replaced by the tier rank (Luna-low < Luna-high < Sol < Astra, equally spaced), so its slope is per tier step.",
         "",
     ]
 
@@ -409,6 +422,7 @@ def render(d: dict) -> str:
     rows = [g1_row(f"M2 − {r} (logit)", x) for r, x in g1["references"].items()]
     rows += [g1_row(f"M2 − {r} (prob)", x, boot=False) for r, x in g1["references_prob"].items()]
     rows += [g1_row(f"M1 − {g1['M1'].get('reference')} (logit)", g1["M1"], boot=False)]
+    rows += [g1_row(f"M2 − {r} (logit), tier order (D-043)", x) for r, x in (g1.get("tier_order") or {}).items()]
     L += [_table(["Contrast", "Slope", "Interval", "Change over span", "Interval", "Bootstrap", "Points", "Note"], rows)]
     gap_rows = [[r, c, _f(x["est"]), _ci(x["ci"]), x["n"]] for r, xx in g1["references"].items() for c, x in xx.get("gaps", {}).items()]
     L += ["Per-point gaps (logit):", "", _table(["Reference", "Point", "Gap", "Interval", "Sessions"], gap_rows)]
@@ -425,6 +439,7 @@ def render(d: dict) -> str:
     L += ["### Persistence across capability (G-H2b, descriptive, D-033)", "", "The change in each strategy's headroom recovered R_x along the fitted line over the capability span, with its 95% session-clustered interval; the audit's gain on the logit scale is shown as a sensitivity (it drifts with capability under CM0's overflow rule).", ""]
     rows = [[s, r.get("estimand"), _f(r.get("est")), _ci(r.get("ci")), ", ".join(r.get("points_used") or []), r.get("reason") or ""] for s, r in g2["tost"].items()]
     rows += [[f"{s} (sensitivity)", r.get("estimand"), _f(r.get("est")), _ci(r.get("ci")), ", ".join(r.get("points_used") or []), r.get("reason") or ""] for s, r in g2.get("tost_sensitivity", {}).items()]
+    rows += [[f"{s}, tier order (D-043)", r.get("estimand"), _f(r.get("est")), _ci(r.get("ci")), ", ".join(r.get("points_used") or []), r.get("reason") or ""] for s, r in g2.get("tost_tier_order", {}).items()]
     L += [_table(["Strategy", "Estimand", "Change over span", "Interval", "Points", "Note"], rows)]
     sc = g2.get("short_control") or {}
     if sc.get("testable"):

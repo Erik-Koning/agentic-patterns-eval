@@ -308,6 +308,13 @@ def test_report_on_simulated_data_is_json_and_renders():
     # D-033's design: G-H1 with S-CM* spans the three points where it ran; G-H3 pools them.
     assert d["gh1"]["primary"]["points_used"] == ["luna-low", "luna-high", "sol-high"] and d["gh3"]["points"] == ["luna-low", "luna-high", "sol-high"]
     assert d["planned_points"] == {"G-H2a": ["luna-low", "luna-high", "sol-high", "astra-high"], "G-H3": ["luna-low", "luna-high", "sol-high"]}
+    # D-043's sensitivity: the same estimates on the tier rank (equally spaced), carried in the descriptive rows.
+    tier = d["gh1"]["tier_order"]["S-CM*"]
+    assert tier["points_used"] == ["luna-low", "luna-high", "sol-high"] and tier["span"] == 2.0 and tier["ci_span"][0] < tier["est_span"] < tier["ci_span"][1]
+    assert set(g1["tier_order"]) == {"S-CM*", "S1-pre"} and g1["tier_order"]["S1-pre"]["points"] == ["luna-low", "luna-high", "sol-high", "astra-high"]
+    h2b = next(r for r in d["decisions"] if r["id"] == "G-H2b[CM-sum]")
+    assert h2b["tier_order"]["ci"][0] < h2b["tier_order"]["estimate"] < h2b["tier_order"]["ci"][1]
+    assert d["gh2"]["tost_tier_order"]["CM-sum"]["span"] == 3.0  # Luna-low to Astra: three tier steps
     assert not d["gh2"]["gap"]["incomplete"] and not d["gh3"]["incomplete"]
     assert set(d["gh1"]["references"]) == set(gh.REFERENCES)
     lo, hi = d["gh1"]["primary"]["boot_ci_span"]
@@ -317,6 +324,7 @@ def test_report_on_simulated_data_is_json_and_renders():
     assert any("astra-high" in c and "sign-flip" in c for c in d["caveats"])
     md = gr.render(d)
     assert "## Decisions" in md and "G-H3b" in md and "Descriptive estimates (D-033" in md and "G-H1 (M2 − S-CM*)" in md
+    assert "G-H1 (M2 − S-CM*), tier order (D-043)" in md and "G-H2b[CM-sum], tier order (D-043)" in md and "CM-todo, tier order (D-043)" in md
 
 
 def test_a_missing_planned_point_makes_the_confirmatory_rows_incomplete():

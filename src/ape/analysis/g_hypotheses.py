@@ -25,8 +25,14 @@ Conventions (D-029, D-032, D-033; CONTEXT_MANAGEMENT_AUDIT §2, §7; HYPOTHESES 
 - **Scale:** G-H1's slope on the empirical-logit scale (the audit's §2.1: near the ceiling a constant logit effect
   shrinks in pp); gaps, shares and headroom on the probability scale, where they are defined.
 
-Still open for B11 (`OPEN_CHOICES`): the capability anchor near the ceiling, and the remaining priors the
-micro-pilot calibrates.
+- **Tier order (D-043):** every analysis that uses measured capability (G-H1's slope, G-H2b's change in R_x) is
+  also reported with capability replaced by the tier rank (`TIER_ORDER`: Luna-low < Luna-high < Sol < Astra, equally
+  spaced), a pre-registered sensitivity: the anchor is near the ceiling, so the measured scale may not separate the
+  top tiers.
+- **Tier B, not run (D-043):** S1+KG (F8's knowledge base is already in the system prompt, so a KG arm has nothing to
+  retrieve) and S-subiso (the audit's CM-subiso); HYPOTHESES G1 and G3 name them, this table does not.
+
+Still open for B11 (`OPEN_CHOICES`): the remaining priors the micro-pilot calibrates.
 """
 
 from dataclasses import asdict, dataclass
@@ -48,6 +54,8 @@ ISOLATION_SHARE = 0.5  # H3a
 RECOVERY_SHARE = 0.8  # H3b
 COST_RATIO = 0.6  # H3b: S-CM* cost per solved item at most this share of M2's
 COST_METER = "cost_usd"  # cache-adjusted $ is primary (audit §5.1); tokens, calls and wall-clock are reported
+# D-043's sensitivity: capability as the tier rank, equally spaced, in place of measured capability.
+TIER_ORDER = {"luna-low": 1.0, "luna-high": 2.0, "sol-high": 3.0, "astra-high": 4.0}
 
 CAP_CELLS = ("g.cap.luna-low", "g.cap.luna-high", "g.cap.sol-high", "g.cap.astra-high")
 TOPO_CELLS = ("g.topo.luna-low", "g.topo.luna", "g.topo.sol", "g.topo.astra")  # D-033 adds g.topo.luna-low
@@ -87,14 +95,17 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "Slope of the per-session gap Δ_s = logit(M2) − logit(S-CM*) on measured capability (OLS over sessions), and "
         "the change along the fitted line over the capability span, at Luna-low, Luna-high and Sol-high (S-CM* does not "
         "run at Astra). Sensitivity: S1-pre (M2 − S1 on the items before S1's overflow; all four points). S1 as scored "
-        "is reported only descriptively.",
+        "is reported only descriptively. Sensitivity (D-043): the same with capability replaced by the tier rank "
+        "(Luna-low < Luna-high < Sol < Astra, equally spaced).",
         "estimate with 95% session-clustered t and session-bootstrap intervals; no decision (D-033)",
         "estimate",
         None,
         "logit over the capability span",
         "G-H1",
         "descriptive",
-        notes="D-033 made this row descriptive. g_power at the D-033 design: its 95% interval covers the true 0 in 95.6% of null studies (S1-pre 94.8%); the change over the span has SD 0.29 logit (0.37 before D-033; S1-pre 0.36), so the interval excludes 0 in 26% of studies when M2's advantage falls 0.9 → 0 across the points (S1-pre 39%). Under a constant mechanism the S-CM* estimate drifts +0.24 and S1's +0.67 (CM0's overflow rule); S1-pre's does not.",
+        notes="D-033 made this row descriptive. g_power at the D-033 design: its 95% interval covers the true 0 in 95.6% of null studies (S1-pre 94.8%); the change over the span has SD 0.29 logit (0.37 before D-033; S1-pre 0.36), so the interval excludes 0 in 26% of studies when M2's advantage falls 0.9 → 0 across the points (S1-pre 39%). Under a constant mechanism the S-CM* estimate drifts +0.24 and S1's +0.67 (CM0's overflow rule); S1-pre's does not. Tier order (D-043): the S-CM* interval covers 0 in 95.2% of null studies "
+        "and the change over the tier steps spanned has SD 0.31 logit (S1-pre 0.40); it excludes 0 in 30% of studies under "
+        "the same convergence (S1-pre 42%).",
     ),
     GHypothesis(
         "G-H1-M1",
@@ -133,7 +144,8 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         ("CM-sum", "CM-todo", "O-state", "CM0"),
         (*CM_CELLS, *CAP_CELLS),
         "θ_x = slope of R_x,c = (s_x − s_CM0) / (s_O − s_CM0) on measured capability × the capability span (per-point "
-        "ratio estimators, linearised per session). Sensitivity: the gain s_x − s_CM0 on the logit scale.",
+        "ratio estimators, linearised per session). Sensitivities: the gain s_x − s_CM0 on the logit scale; and (D-043) "
+        "capability replaced by the tier rank (Luna-low < Luna-high < Sol < Astra, equally spaced).",
         "estimate with 95% session-clustered interval; no decision (D-033)",
         "estimate",
         None,
@@ -141,7 +153,8 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "G-H2",
         "descriptive",
         notes="D-033 made this row descriptive (the TOST at ±0.20 R had power 0.01; 80% would need ±0.46). The gain on "
-        "the logit scale drifts +0.16 to +0.22 over the span under a constant R_x, because of CM0's overflow rule. g_power: θ has SD 0.14 R; its 95% interval covers 0 in 95% of studies at a constant R_x and excludes 0 in 20% when R_x falls by 0.2 over the span.",
+        "the logit scale drifts +0.16 to +0.22 over the span under a constant R_x, because of CM0's overflow rule. g_power: θ has SD 0.14 R; its 95% interval covers 0 in 95% of studies at a constant R_x and excludes 0 in 20% when R_x falls by 0.2 over the span. Tier order (D-043): SD 0.15 R, covering 0 in 96% of studies at a "
+        "constant R_x and excluding it in 22% under that fall.",
     ),
     GHypothesis(
         "G-H2c",
@@ -279,9 +292,6 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
 )
 
 OPEN_CHOICES = (
-    "The capability anchor near the ceiling: measured capability spans about 0.72–0.90 with a standard error near 0.035 "
-    "per point, so Sol and Astra may not separate; a harder anchor (F7-1000, F3-60) or the tier order would. It affects "
-    "the descriptive G-H1 and G-H2b slopes only.",
     "The power priors (σ_world 0.5, σ_item 1.0, σ_arm 0.3, σ_epoch 0.2, σ_mix 0.5, crossing 0.70, base success per "
     "point) are assumptions until the micro-pilot (g.pilot.luna) calibrates them; G-H3a and G-H3b lose power if σ_arm "
     "is larger (see g_power's σ_arm 0.6 sensitivity).",
