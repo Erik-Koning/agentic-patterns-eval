@@ -5,6 +5,7 @@
   same world-clustered intervals as every contrast (worlds of different levels are independent clusters).
 - `m4` (M4 / H1d): M1 − M1s accuracy on F1-32 (95% and 90% intervals) and the wall-clock ratio M1 / M1s.
 - `mechanism_contrasts` (§4.3): each single-switch contrast per cell where both arms ran.
+- `tier_contrasts` (Study F): each arm contrast in Luna and in Sol on the same tasks, and its Sol − Luna change.
 - `frontier_table` (§4.5): each condition's S8 curve on every meter, and every arm against S8 at its own realised
   cost, per meter (beyond-the-frontier arms named, not extrapolated).
 - `rank_flips` (C1 / H3): per family, each arm's ranking quantity (default cost per solved task: mean cost / mean
@@ -31,7 +32,7 @@ from scipy.special import comb
 from scipy.stats import kendalltau
 
 from .gate_stats import violation_test
-from .main_hypotheses import KB_CELLS, MECHANISM_CONTRASTS, PRIMARY_TIER, STUDY_A_CELLS, STUDY_B_CELLS, Member, Term
+from .main_hypotheses import KB_CELLS, MECHANISM_CONTRASTS, PRIMARY_TIER, STUDY_A_CELLS, STUDY_B_CELLS, TIER_CELLS, Member, Term
 from .main_stats import (
     DETERMINISM_PREFIX,
     REPS,
@@ -108,6 +109,28 @@ def mechanism_contrasts(tables: Tables, alpha: float = 0.025, reps: int = REPS, 
             r = describe(tables, (Term(a), Term(b, -1)), (cell,), alpha=alpha, reps=reps, seed=seed)
             if r.get("evaluable"):
                 out.append({"mechanism": name, "contrast": f"{a} − {b}", "cell": cell} | {k: r.get(k) for k in ("est", "ci", "ci_boot", "ci_t", "tasks", "clusters")})
+    return out
+
+
+TIER_CONTRASTS = (("M1", "S1"), ("S5", "S1"), ("M2", "S1"), ("M2", "S5"), ("M2", "M1"))
+
+
+def tier_contrasts(tables: Tables, cells=TIER_CELLS, contrasts=TIER_CONTRASTS, tiers=(PRIMARY_TIER, "sol"), alpha: float = 0.025, reps: int = REPS, seed: int = 0) -> list[dict]:
+    """Study F's arm × tier model as paired contrasts (brief §7.4): each arm contrast in each tier, and its change from
+    the first tier to the second, a difference in differences on the same tasks (descriptive; H6 tests the
+    cost-matched coordination payoff)."""
+    base, other = tiers
+    out = []
+    for cell in cells:
+        for a, b in contrasts:
+            row = {"cell": cell, "contrast": f"{a} − {b}"}
+            for tier in tiers:
+                r = describe(tables, (Term(a, 1, tier), Term(b, -1, tier)), (cell,), alpha=alpha, reps=reps, seed=seed)
+                row[tier] = {k: r.get(k) for k in ("est", "ci", "ci_t", "tasks")} if r.get("evaluable") else None
+            r = describe(tables, (Term(a, 1, other), Term(b, -1, other), Term(a, -1, base), Term(b, 1, base)), (cell,), alpha=alpha, reps=reps, seed=seed)
+            row[f"{other} − {base}"] = {k: r.get(k) for k in ("est", "ci", "ci_t", "tasks")} if r.get("evaluable") else None
+            if any(row[t] for t in tiers):
+                out.append(row)
     return out
 
 

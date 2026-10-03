@@ -170,6 +170,7 @@ def main_report(
         "K4": _safe(errors, "K4", desc.k4_slopes, tables, reps=reps, seed=seed),
         "M4": _safe(errors, "M4", desc.m4, tables, reps=reps, seed=seed),
         "mechanisms": _safe(errors, "mechanisms", desc.mechanism_contrasts, tables, reps=reps, seed=seed),
+        "tiers": _safe(errors, "tier contrasts", desc.tier_contrasts, tables, reps=reps, seed=seed),
     }
     d["arms"] = _safe(errors, "arms", desc.arm_summary, tables)
     d["frontier"] = _safe(errors, "frontier", desc.frontier_table, tables, reps=frontier_reps, seed=seed)
@@ -259,6 +260,12 @@ def render_main(d: dict) -> str:
         L += ["### M4: concurrency (F1-32)", "", f"- M1 − M1s accuracy {_pp(acc.get('est'))}, 95% {_ci(acc.get('ci'))}, 90% {_ci((m4.get('accuracy_90') or {}).get('ci'))}.", f"- Wall-clock ratio M1/M1s {_f(w.get('ratio'), 2)} [{_f((w.get('ci') or [None])[0], 2)}, {_f((w.get('ci') or [None, None])[1], 2)}] (brief: < 0.6)." + (f" {w.get('reason')}" if w.get("reason") else ""), ""]
     mech = desc_.get("mechanisms") or []
     L += ["### Mechanism contrasts (§4.3)", "", _table(["Mechanism", "Contrast", "Cell", "Δ", "Interval (flip)", "BCa 95%", "Tasks"], [[m["mechanism"], m["contrast"], m["cell"], _pp(m.get("est")), _ci(m.get("ci")), _ci(m.get("ci_boot")), m.get("tasks")] for m in mech])]
+    tiers = desc_.get("tiers") or []
+
+    def _cell(x: Any) -> str:
+        return "–" if not x else f"{_pp(x.get('est'))} {_ci(x.get('ci'))}"
+
+    L += ["### Arm × tier (Study F, same tasks)", "", _table(["Cell", "Contrast", "Luna", "Sol", "Sol − Luna"], [[t["cell"], t["contrast"], _cell(t.get("luna")), _cell(t.get("sol")), _cell(t.get("sol − luna"))] for t in tiers])]
 
     L += ["## S8 frontier (primary meter)", ""]
     for row in d.get("frontier") or []:

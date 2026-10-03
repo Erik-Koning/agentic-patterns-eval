@@ -32,7 +32,10 @@ def test_the_report_is_complete_and_json_serialisable(report):
     json.dumps(report, allow_nan=False)
     assert [s["member"] for s in report["summary"]] == CONFIRMATORY
     assert all(s["label"] in ("supported", "not supported", "not tested") for s in report["summary"]), "every member evaluable on a full study"
-    assert set(report["descriptive"]) == {"K4", "M4", "mechanisms"} and report["frontier"] and report["determinism"]["available"]
+    assert set(report["descriptive"]) == {"K4", "M4", "mechanisms", "tiers"} and report["frontier"] and report["determinism"]["available"]
+    tiers = {(t["cell"], t["contrast"]): t for t in report["descriptive"]["tiers"]}
+    m1 = tiers[("F1-32", "M1 − S1")]
+    assert m1["sol − luna"]["est"] == pytest.approx(m1["sol"]["est"] - m1["luna"]["est"]), "the DiD on the same tasks"
     md = render_main(report)
     for heading in ("## Confirmatory tests", "## S8 frontier", "## Cost-meter rank flips", "## Determinism", "## Invariants", "## Analysis choices"):
         assert heading in md
