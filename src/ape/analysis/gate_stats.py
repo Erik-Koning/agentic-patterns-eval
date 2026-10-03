@@ -55,7 +55,8 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
     whether it was hit, plus any Inspect sample limit that fired (`limit_hit`, e.g. "cost" from the runner's
     per-sample guard), both counted by PC5's `cap_hit`; the arm's configured context budget from the task's recorded knobs and the
     realized tokens and latency of every compile (PC4, latency), and `pipeline_miss`, where a failed
-    sample lost the gold knowledge (§8 NO-GO diagnosis; `pipeline_miss`).
+    sample lost the gold knowledge (§8 NO-GO diagnosis; `pipeline_miss`). The `HEALTH_COLUMNS` count APG classify,
+    LightRAG keyword and search_kb failures per sample (`compile_health`).
     """
     from inspect_ai.log import read_eval_log
 
@@ -118,9 +119,51 @@ def load_results(log_files: list[str | Path], require_cost: bool = True) -> pd.D
                     "total_time": s.total_time,
                     "working_time": s.working_time,
                     "error": s.error is not None,
+                    **compile_health(compiles, store),
                 }
             )
     return pd.DataFrame(rows)
+
+
+# Per-sample harness-health counters the decision report aggregates (`analyze_gate.health`).
+HEALTH_COLUMNS = (
+    "classify_compiles", "classify_errors", "classify_fallbacks", "classify_repaired", "classify_unknown_ids",
+    "keyword_compiles", "keyword_fallbacks", "keyword_errors", "pull_compiles", "pull_truncated", "search_errors",
+)  # fmt: skip
+
+
+def compile_health(compiles: list[dict], store: dict) -> dict:
+    """Harness-health counts for one sample from its compile log and store.
+
+    - APG classify (`apg/arm.py` compile meta): compiles carrying the counters, and how many had a parse error,
+      fell back to the root for lack of a usable match, needed each repair kind, or named unknown node IDs.
+    - LightRAG keywords (`lgr/adapter.py` meta `lightrag`): compiles carrying the flags, keyword fallbacks and errors.
+      Naive-mode compiles are left out: naive mode extracts no keywords, so the adapter's flag is always set there.
+    - search_kb (pull, `agent/kb_react.py`): pull compiles, those whose result was cut to `max_output`, and failed
+      searches (`search_errors`, never in the compile log).
+
+    A compile counts only if its meta carries the key, so logs that predate a counter read as 0 compiles ("n/a")."""
+    metas = [r.get("meta") or {} for r in compiles]
+    apg = [m for m in metas if "classify_fallback" in m]
+    lgr = [m["lightrag"] for m in metas if isinstance(m.get("lightrag"), dict) and "keyword_fallback" in m["lightrag"] and m["lightrag"].get("mode") != "naive"]
+    pulls = [r for r in compiles if r.get("source") == "pull"]
+    repaired: dict[str, int] = {}
+    for m in apg:
+        for kind in set(m.get("classify_repaired") or []):
+            repaired[kind] = repaired.get(kind, 0) + 1
+    return {
+        "classify_compiles": len(apg),
+        "classify_errors": sum(1 for m in apg if m.get("classify_error")),
+        "classify_fallbacks": sum(1 for m in apg if m.get("classify_fallback")),
+        "classify_repaired": repaired,
+        "classify_unknown_ids": sum(int(m.get("classify_unknown_ids") or 0) for m in apg),
+        "keyword_compiles": len(lgr),
+        "keyword_fallbacks": sum(1 for m in lgr if m.get("keyword_fallback")),
+        "keyword_errors": sum(1 for m in lgr if m.get("keyword_error")),
+        "pull_compiles": len(pulls),
+        "pull_truncated": sum(1 for r in pulls if r.get("truncated")),
+        "search_errors": len((store or {}).get("search_errors") or []),
+    }
 
 
 def _s7_targets(path: str) -> dict:
