@@ -59,30 +59,43 @@ def candidates(grid: dict, system: str) -> list[dict]:
     return cands
 
 
+def plan_task_cells(spec: dict) -> list[str]:
+    """A run_plan cell's task cells: an agent cell's `cells`; a session cell's one F8 cell, `F8-<N>` plus its knob tag
+    (`gen_f8.variant_tag`), as a grid's `dev_cells` name it."""
+    if "cells" in spec:
+        return list(spec["cells"])
+    from .worlds import gen_f8
+
+    tag = gen_f8.variant_tag(spec.get("knobs"))
+    return [f"F8-{int(spec['N'])}{'-' + tag if tag else ''}"]
+
+
 def planned_tuning(cells: Iterable[tuple[str, dict]]) -> dict[str, dict]:
     """What a study's run_plan.yaml tuning cells price, per arm: {arm: {"candidates": {cell id: count}, "cells": [its
-    task cells, in plan order]}}. `cells` are (cell id, spec) pairs; a spec's `arms` is {arm: candidates} or a list."""
+    task cells, in plan order]}}. `cells` are (cell id, spec) pairs; a spec's `arms` is {arm: candidates} or a list;
+    a session cell (no `cells`) prices its F8 cell (`plan_task_cells`)."""
     out: dict[str, dict] = {}
     for cell_id, spec in cells:
         arms = spec["arms"] if isinstance(spec["arms"], dict) else dict.fromkeys(spec["arms"], 1)
         for arm, n in arms.items():
             p = out.setdefault(arm, {"candidates": {}, "cells": []})
             p["candidates"][cell_id] = int(n)
-            p["cells"] += [c for c in spec["cells"] if c not in p["cells"]]
+            p["cells"] += [c for c in plan_task_cells(spec) if c not in p["cells"]]
     return out
 
 
 def study_grid_problems(grid: dict, planned: dict[str, dict] | None = None, env_problems: Callable[[str, dict[str, str]], list[str]] | None = None) -> list[str]:
     """What a study grid (`config/tuning_grid_<study>.yaml`) breaks of the tuning rules, found before any dev run: the
     PC6 rules that can be checked up front, so a broken candidate is found before it is paid for. A study system is
-    keyed by the plan arm it tunes (`run_study`: that arm runs as its selection, under every selection's knobs at once):
+    keyed by the plan arm it tunes (`run_study`: that arm runs as its selection, under exactly its own selection's
+    knobs, D-042, so two systems may share a knob name, as Study G's CM arms do):
     - every system declares 1 to `budget_per_system` candidates with distinct ids, and exactly that many when the grid
       sets `equal_budgets`;
     - every candidate runs as the system's own arm;
-    - no two systems' candidates set the same variable (`run_study.selection_env` would refuse the selections at the
-      pilot, after the tune is paid for);
-    - each candidate's env passes `env_problems(system, env)`, the arm's own check (`agent.multi.knobs.candidate_problems`:
-      a multi-agent arm's candidates set only its own knobs, with values they take);
+    - each candidate's env passes `env_problems(system, env)`, the arm's own check: it sets only knobs its own arm
+      reads, with values they take (main: `agent.multi.knobs.candidate_problems`; Study G: `run_study.cm_candidate_problems`).
+      Two systems may set the same variable: Study G's CM arms share one APE_CM_* namespace (D-037), and the runner
+      gives each tuned arm exactly its own selection's knobs;
     - an arm the grid lists under `inherited` (configured elsewhere, e.g. by the gate) is not also a system;
     - with `planned` (`planned_tuning` over the study's run_plan tuning cells): each system is priced there, with its
       candidate count in every cell that names it and its dev cells exactly those cells', and every arm the plan prices
@@ -90,7 +103,6 @@ def study_grid_problems(grid: dict, planned: dict[str, dict] | None = None, env_
     problems: list[str] = []
     budget = int(grid.get("budget_per_system") or 0)
     systems, inherited = grid.get("systems") or {}, grid.get("inherited") or {}
-    setters: dict[str, set[str]] = {}
     for name, sdef in systems.items():
         cands = sdef.get("candidates") or []
         ids = [c.get("id") for c in cands]
@@ -104,15 +116,10 @@ def study_grid_problems(grid: dict, planned: dict[str, dict] | None = None, env_
             if c.get("arm") != name:
                 problems.append(f"{name}: candidate {c.get('id')} runs {c.get('arm')}, not {name} (a system's candidates run as the plan arm it is named for)")
             env = {str(k): str(v) for k, v in (c.get("env") or {}).items()}
-            for k in env:
-                setters.setdefault(k, set()).add(name)
             if env_problems is not None:
                 problems += [f"{name}: candidate {c.get('id')}: {p}" for p in env_problems(name, env)]
         if name in inherited:
             problems.append(f"{name} is both tuned here and inherited ({inherited[name]})")
-    for k, names in sorted(setters.items()):
-        if len(names) > 1:
-            problems.append(f"{k} is set by the candidates of {', '.join(sorted(names))}: every selection's knobs apply together, so each system sets only its own")
     if planned is not None:
         for arm, p in planned.items():
             where = ", ".join(p["candidates"])

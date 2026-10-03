@@ -38,6 +38,12 @@ Every entry point (gate runs, tuning, anchor, smoke) runs through `run_evals`, s
   (`ape.spend`, label from APE_SPEND_LABEL), and the finish after it. So `ape.budget.program_spend`, and the
   orchestrator's guard, see a run's flushed spend even if the process is killed. Offline runs (mock agent)
   are recorded only where APE_SPEND_REGISTRY points.
+- **Usage ledger.** Inspect logs a sample's last attempt only. While `eval_set` runs, every model call's usage and
+  cost is appended to `<log_dir>/usage_ledger.jsonl` (`ape.usage_ledger`, an Inspect hook), errored attempts and
+  killed runs included, so the spend guards also count what no log holds (D-030).
+- **No leaked model context.** `eval_set` runs in a copy of the caller's context: Inspect sets its active model
+  and model roles there and never resets them, so without the copy a later `get_model(role="kg")` in the same
+  process (another run, a test) would silently get this run's model.
 - **Resume.** `eval_set` pairs each task with the logs in `log_dir` by `inspect_ai.task_identifier`:
   `task#hash(task args)/model/hash(plan, generate config, model args, roles, limits)`. Concurrency and
   retry settings are not part of it. Calling again with the same `log_dir` reuses every successful log
@@ -58,6 +64,7 @@ keyword goes to `eval_set` unchanged. Returns `eval_set`'s `(success, logs)`. Th
 without samples; read one in full with `inspect_ai.log.read_eval_log(log.location)`.
 """
 
+import contextvars
 import json
 import math
 import os
@@ -71,7 +78,7 @@ from inspect_ai import Task, eval_set, task_identifier
 from inspect_ai.log import EvalLog, read_eval_log_sample_summaries
 from inspect_ai.model import Model
 
-from . import spend
+from . import spend, usage_ledger
 from .models import COSTS_PATH, Profile, agent_model, eval_cost_kwargs, load_costs, load_profile, require_preflight, role_models
 
 INDEX_NAME = "runner_index.json"
@@ -178,9 +185,16 @@ def run_evals(
 
     run = {"key": uuid.uuid4().hex, "started": _now(), "status": "running", "pid": os.getpid(), "profile": p.name, "live": live, "cost_limit_usd": limit, "tasks_planned": per_task}
     registry = spend.register_logs(log_dir, live=live, tasks=[x["task"] for x in per_task])
+    run["usage_ledger"] = str(Path(log_dir) / usage_ledger.LEDGER_NAME)
     write_index(log_dir, [], run)
     try:
-        success, logs = eval_set(task_list, log_dir=str(log_dir), model=agent, model_roles=role_map or None, epochs=epochs, **options)
+        with usage_ledger.recording(Path(log_dir) / usage_ledger.LEDGER_NAME):
+            # In a copy of the caller's context: Inspect sets its active model and model roles (context variables)
+            # in the context it is called from and never resets them, so a later `get_model(role=...)` in this
+            # process would resolve to this run's models instead of failing.
+            success, logs = contextvars.copy_context().run(
+                eval_set, task_list, log_dir=str(log_dir), model=agent, model_roles=role_map or None, epochs=epochs, **options
+            )
     except BaseException as e:
         error = f"{type(e).__name__}: {e}"[:500]
         write_index(log_dir, [], {**run, "finished": _now(), "status": "failed", "success": False, "error": error})

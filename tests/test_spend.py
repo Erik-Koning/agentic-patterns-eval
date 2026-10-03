@@ -192,7 +192,11 @@ def test_program_spend_sums_run_ids_and_smoke_and_counts_retried_samples_once(en
 
     s = program_spend(env["registry"], env["costs"])
     assert s["inspect_usd"] == pytest.approx((2 + 3 + 1) * CALL_USD + truth)
-    assert s["by_study"] == pytest.approx({"gate": (2 + 3) * CALL_USD + truth, "smoke": CALL_USD})
+    # D-030: q1's first run failed all three sample attempts (retry_on_error=2); its log holds the last only. The usage
+    # ledger holds the two earlier attempts' calls, which no log does: spend counts them (this test predates the ledger).
+    assert s["unlogged_usd"] == pytest.approx(2 * CALL_USD) and s["spent_usd"] == pytest.approx(s["inspect_usd"] + 2 * CALL_USD)
+    assert s["usage_ledger_usd"] == pytest.approx(s["inspect_usd"] + s["unlogged_usd"]), "every call once in the ledgers"
+    assert s["by_study"] == pytest.approx({"gate": (2 + 3) * CALL_USD + truth + 2 * CALL_USD, "smoke": CALL_USD})
     assert {r["label"] for r in s["dirs"]} == {"gate/run-1", "gate/run-2", "smoke", "gate/run-3"} and not s["unfinished_dirs"]
     # A registered ledger counts too (registered on its first append).
     monkeypatch.setenv(spend.LABEL_ENV, "gate/run-1")

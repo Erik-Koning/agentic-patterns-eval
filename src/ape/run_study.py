@@ -29,13 +29,23 @@ Phases (`all` runs a study's in order and stops at the first failure; a failed o
     pilot        main only: the run_plan `pilot` cells with the selections and caps; S7 last, sized per cell by the KG
                  arm's median realized context (the run's config/s7_targets.json, as the gate sizes S7 by APG*); B0 of
                  the cells the micro-pilot did not measure -> the run's config/token_caps_pilot.json; pilot/pilot.json.
+                 Then the cap-hit gate (D-039, `_cap_gate`): each arm's cap-hit rate per task cell; while an arm is over
+                 10% (PC5), the multiple doubles for every arm (8 -> 16 -> 32) and that arm's pilot cells re-run under
+                 the new caps (its projection includes both re-runs for every arm) -> config/cap_gate.json, whose final
+                 multiple the test applies. Offline, only token-cap hits count (the mocks' turn-cap runs are reported).
+                 Then the power re-simulation at the gate pilot's σ (PREREGISTRATION_MAIN §2.6, `_pilot_power`) ->
+                 pilot/power.json; pilot.json's `prereg_items` give the token caps, the cap multiple, the S7 targets,
+                 the KG arm and "pilot σ and power".
     freeze       the study's pre-registration (`Study.prereg`) has no `[PILOT` / `[USER` marker left (offline: a
                  rehearsal on a filled copy), the tree is committed, the analysis entry point exists and every phase the
-                 freeze rests on is current. It hashes the pre-registration, the config inputs, the run's outputs
+                 freeze rests on is current. It hashes the pre-registration, the config inputs (the shared run_plan,
+                 models and model_costs files as the study's own slice, `ape.freeze_scope`, so another study's later
+                 edits never break this freeze; its tuning grid whole), the run's outputs
                  (`frozen_outputs`), uv.lock, the study's analysis code and the gate run the KG arm came from, and
                  records the commit, the design knobs, the KG resolution, the role (primary, or the extension of an
-                 earlier run) and a fresh test-seed block -> freeze.json, then PROVENANCE.md (offline:
-                 work/PROVENANCE.freeze.md).
+                 earlier run), the token caps with their multiple and every pilot cap-hit rate (main; it refuses while
+                 an arm is over 10% at 32 x B0, D-039) and a fresh test-seed block -> freeze.json, then PROVENANCE.md
+                 (offline: work/PROVENANCE.freeze.md).
     build-test   the test worlds of the run's frozen seed block. Only this phase unlocks the study's test split
                  (TEST_SPLIT_ENV = `<study>/<run id>`, `worlds.generate.split_lock_value`): the gate's unlock never
                  opens it, nor this one the gate's.
@@ -57,25 +67,31 @@ block (`seed_base`), so it reads only its run's worlds, though world files of ev
 Cells -> tasks. `agent` cells run `tasks.main.main_study` (F1, F2, F3, F7; Study G's capability anchor too, on its own
 worlds) with `plan_cell`, `group` and `seed_base`, and, in the main study, the cell's token cap as Inspect's
 `token_limit` (it bounds the whole sample, every agent). `session` cells run `tasks.study_g.f8_session` (level N,
-`variant` = `gen_f8.variant_tag(knobs)`, `limit_worlds` = sessions, the plan's window), passing `plan_cell`, `group`,
-`seed_base` and `skip_worlds` only when f8_session takes them (BUILD_PLAN B7 adds them), and APE_SESSION_CHECKPOINTS
-points at the run's session_checkpoints/ directory for B7's mid-session resume. A cell's `profile`, `effort` (the
-agent's) and `models` choose its models. A tuned arm (a selection key) runs as its selection, under every selection's
-knobs together; S7 runs in its own group (`s7`) under APE_S7_PER_STEP, mirroring the KG arm's schedule (D-024).
+`variant` = `gen_f8.variant_tag(knobs)`, `limit_worlds` = sessions, the plan's window and compaction threshold),
+with `plan_cell`, `group` and `seed_base`, and APE_SESSION_CHECKPOINTS points at the run's session_checkpoints/
+directory for B7's mid-session resume. A cell's `profile`, `effort` (the agent's) and `models` choose its models (the
+test manifest records all three per group). A tuned arm (a selection key) runs as its selection, under its own
+selection's knobs alone, in an eval set of its own (`env_group`, D-042; M1s under M1's, whose knobs it reads), never
+another selection's; S7 runs in its own group (`s7`) under APE_S7_PER_STEP, mirroring the KG arm's schedule (D-024).
+The test manifest records each group's final log files relative to the run directory (`run_relative`,
+`resolve_log`).
 
 Arms not built yet. Offline, a cell's arms without a solver (a multi-agent arm not in `agent.solvers.MULTI_AGENT_ARMS`,
-a session arm not in `agent.session.SESSION_ARMS`) are skipped and every manifest lists them (`skipped_arms`); grid
-systems likewise. Live, a phase whose cells name an unbuilt arm refuses to start. When a package registers an arm, it
-runs here unchanged.
+a session arm neither a context policy nor in `agent.session.SESSION_ARMS`) are skipped and every manifest lists them
+(`skipped_arms`); grid systems likewise. Live, a phase whose cells name an unbuilt arm refuses to start. When a package
+registers an arm, it runs here unchanged. Since B2, B8 and B9 every arm of both studies is built.
 
 The KG arm (S5, and the KG workers of M1k and M2; `agent.arms.kg_arm_name`). `--gate-run-id` names a frozen, analysed
 gate run: GO (any GO label) -> its APG*, NO_GO -> its LGR*, with that selection's knobs (the gate run's selected.yaml),
 set as APE_KG_ARM and the knobs for every phase (`kg_resolution`). A live run refuses without a live gate run whose
 verdict is final; offline defaults to APG-s with the fake author's graphs (an offline gate run's LightRAG arm is its
 oracle twin, `run_gate.OFFLINE_ARMS`). run.json records the gate run at the run's first phase, so a later invocation
-may omit the flag, and one naming another gate run is refused (`settle_gate_run`). The resolution is in every manifest's params and in the freeze, which hashes
-the gate run's selected.yaml, decision.json and freeze.json. The KG arm's system (APG or LightRAG) is the one the
-builds make for the KG cells (BUILD_PLAN B6: `main.build.kg`, with the build-quality check per build phase, F1 included).
+may omit the flag, and one naming another gate run is refused (`settle_gate_run`). The gate run's selection also hands
+down the other arms the study's grid lists as `inherited: {source: gate}` (D-041: main's S3s, the gate's `S3s` entry):
+their knobs are set alongside the KG arm's for every phase, and a live run refuses when the gate run has no such entry
+(`inherited_selections`). The resolution is in every manifest's params and in the freeze, which hashes the gate run's
+selected.yaml, decision.json and freeze.json. The KG arm's system (APG or LightRAG) is the one the builds make for the
+KG cells (BUILD_PLAN B6: `main.build.kg`, with the build-quality check per build phase, F1 included).
 
 Budget. Before a phase (and before each test group, the primary groups at the start), its conservative projection
 (`ape.budget` over the plan cells it runs, at live sizes) must fit in both what is left of the program's budget
@@ -84,7 +100,7 @@ registry, where every log dir this run writes is labelled `<study>/<run id>` (of
 the run's own registry). Every eval set gets the runner's per-sample `cost_limit`.
 
 Run directory: `runs/<study>/<id>/`, laid out as a gate run's (`ape.run_gate`): run.json, <phase>/manifest.json,
-config/ (live outputs: selected.yaml, token_caps.json, token_caps_pilot.json, s7_targets.json,
+config/ (live outputs: selected.yaml, token_caps.json, token_caps_pilot.json, cap_gate.json, s7_targets.json,
 budget_calibration_measured.yaml), freeze.json, report/, session_checkpoints/, and work/ for offline runs (worlds/,
 indices/, cache/, config/, the rehearsal pre-registration and PROVENANCE.freeze.md). Gate run ids `main` and
 `study_g` are refused, so the two layouts never meet.
@@ -92,9 +108,9 @@ indices/, cache/, config/, the rehearsal pre-registration and PROVENANCE.freeze.
 
 import argparse
 import contextlib
+import functools
 import importlib
 import importlib.util
-import inspect
 import json
 import math
 import os
@@ -113,6 +129,7 @@ from . import run_gate as rg
 from .agent.arms import KG_ARM_ENV
 from .budget import BudgetError, Plan, PlanCell, require_affordable
 from .config import ROOT, Config
+from .freeze_scope import config_input
 from .models import PreflightError, Profile, RoleSpec, load_profile, preflight, storage_warnings
 from .spend import LABEL_ENV, REGISTRY_ENV
 from .worlds.generate import SEED_BLOCK, STUDY_SEEDS, TEST_SEED_BASE_ENV, TEST_SPLIT_ENV, split_lock_value
@@ -123,6 +140,11 @@ SPLITS = {"build-dev": "dev", "micro-pilot": "pilot", "tune": "dev", "pilot": "p
 TASKS_PER_WORLD = 12  # the gate's convention: 100 tasks -> 9 worlds, 20 -> 2 (main.build.kg: "9 test + 2 pilot worlds")
 OFFLINE_SCALE = {"worlds_per_cell": 1, "tasks_per_world": 2, "sessions": 1, "epochs": 1, "tune_candidates_per_system": 2}
 CAP_MULTIPLE = 8  # ORCHESTRATOR_BRIEF_v2 §4.5: C_max = 8 x B0 total tokens, one cap for every arm
+CAP_DOUBLINGS = 2  # D-039: the pilot's cap-hit gate doubles the multiple at most twice (8 -> 16 -> 32)
+CAP_HIT_MAX = 0.10  # D-039: PC5's cap-hit threshold (`analysis.gate_stats.MAX_CAP_HIT_RATE`), per arm and task cell
+POWER_REPS = 1000  # PREREGISTRATION_MAIN §2.6: the pilot's power re-simulation (about 20 min of CPU, no API calls)
+POWER_SEED = 20261003  # main_power's default seed, as the pre-registration's command uses it
+OFFLINE_POWER = {"reps": 2, "flip_reps": 100}  # the rehearsal checks the plumbing, not the numbers
 CAP_ARM = "S1"  # B0 is S1's realized total tokens
 KG_ARMS = ("S5", "M1k", "M2")  # agent arms that read the KG (the gate-selected arm, APE_KG_ARM); session arms read none yet
 ARM_KINDS = {"S3s": ("chunks",)}  # other artifacts an arm reads (S3s embeds the shared chunks); the KG arms read the KG
@@ -185,7 +207,7 @@ STUDIES = {
         title="Study G",
         phases=("preflight", "build-dev", "micro-pilot", "tune", "freeze", "build-test", "test", "analyze"),
         cells={"micro-pilot": ("micro_pilot",), "tune": ("tuning",), "test": ("capability_anchor", "context_management", "topology")},
-        primary=("capability_anchor", "context_management"),
+        primary=("capability_anchor", "context_management", "topology"),  # G-H3 is confirmatory (D-033, D-042)
         prereg="PREREGISTRATION_G.md",
         analysis="ape.analyze_g",
         analysis_code=("src/ape/analyze_g.py", "src/ape/analysis"),
@@ -287,6 +309,10 @@ class StudyRun:
         return self.out_config_dir / "token_caps_pilot.json"
 
     @property
+    def cap_gate_path(self) -> Path:
+        return self.out_config_dir / "cap_gate.json"
+
+    @property
     def measured_out_path(self) -> Path:
         return self.out_config_dir / "budget_calibration_measured.yaml"
 
@@ -316,6 +342,23 @@ class StudyRun:
 
 def _show(path: Path) -> str:
     return rg._show(path)
+
+
+def run_relative(run: StudyRun, path: str | Path) -> str:
+    """A path inside the run directory as the test manifest records it (`log_files`): relative to the run directory, so
+    a moved run, or one restored from a backup elsewhere, still finds its logs; a path outside it as `_show` records it."""
+    p = Path(path).resolve()
+    root = run.dir.resolve()
+    return str(p.relative_to(root)) if p.is_relative_to(root) else _show(p)
+
+
+def resolve_log(run_dir: Path, recorded: str) -> Path:
+    """A recorded log path back as a path: absolute as is (manifests written before run-relative paths); relative, under
+    the run directory when it is there, else under the repo (`_show`'s convention)."""
+    p = Path(recorded)
+    if p.is_absolute():
+        return p
+    return run_dir / p if (run_dir / p).exists() else rg._resolve(recorded)
 
 
 def _check_mode(run: StudyRun) -> None:
@@ -412,17 +455,30 @@ def window(run: StudyRun) -> int:
 # --- Arms --------------------------------------------------------------------------------------------
 
 
+@functools.cache
+def single_agent_arms() -> frozenset[str]:
+    """The single-agent delivery arms `agent.arms` builds: the baselines, S5 (the KG arm), the APG and LightRAG arms."""
+    from .agent.arms import BASELINE_ARMS
+    from .apg.arm import ARMS as APG_ARMS
+    from .lgr.adapter import ARMS as LGR_ARMS
+
+    return frozenset({*BASELINE_ARMS, "S5", *APG_ARMS, *LGR_ARMS})
+
+
 def arm_built(arm: str, kind: str = "agent") -> bool:
-    """Whether `arm` has a solver now: a session arm in `agent.session.SESSION_ARMS`; a multi-agent or ensemble arm
-    registered in `agent.solvers.MULTI_AGENT_ARMS`; every single-agent delivery arm (S1, S3s, S5, S6, S7, APG/LGR arms).
-    Read at call time, so the arms other packages register flow through."""
+    """Whether `arm` has a solver now: a session arm registered as a context policy (`agent.context_policy.POLICIES`,
+    which `agent.session` fills with CM0, O-state and B8's arms) or listed in `agent.session.SESSION_ARMS`; a
+    multi-agent or ensemble arm registered in `agent.solvers.MULTI_AGENT_ARMS`; a single-agent delivery arm
+    (`single_agent_arms`). Anything else, a typo included, is not built. Read at call time, so the arms other packages
+    register flow through."""
     if kind == "session":
+        from .agent.context_policy import POLICIES
         from .agent.session import SESSION_ARMS
 
-        return arm in SESSION_ARMS
-    from .agent.solvers import MULTI_AGENT_ARMS, is_multi_agent
+        return arm in POLICIES or arm in SESSION_ARMS
+    from .agent.solvers import MULTI_AGENT_ARMS
 
-    return not is_multi_agent(arm) or arm in MULTI_AGENT_ARMS
+    return arm in MULTI_AGENT_ARMS or arm in single_agent_arms()
 
 
 def arm_kinds(run: StudyRun, arms: Sequence[str], kind: str) -> tuple[str, ...]:
@@ -497,7 +553,8 @@ def kg_resolution(run: StudyRun) -> dict:
             raise PhaseError(
                 f"a live {run.study} run needs the gate's verdict for its KG arm (S5, M1k, M2): pass --gate-run-id <the frozen, analysed gate run>"
             )
-        run._kg = {"needed": True, "source": "offline default (no --gate-run-id)", "gate_run": None, "verdict": None, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "notes": notes}
+        notes += [f"{a}: its defaults offline (no gate run to inherit its selection from)" for a in gate_inherited_arms(run)]
+        run._kg = {"needed": True, "source": "offline default (no --gate-run-id)", "gate_run": None, "verdict": None, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "inherited": {}, "notes": notes}
         return run._kg
     gdir = run.gate_runs_root / run.gate_run_id
     info_path, freeze_path, decision_path = gdir / "run.json", gdir / "freeze.json", gdir / REPORT_DIR / "decision.json"  # analyze_gate's REPORT_DIR
@@ -522,11 +579,15 @@ def kg_resolution(run: StudyRun) -> dict:
     if problems:
         if not run.offline:
             raise PhaseError("the KG arm cannot be resolved: " + "; ".join(problems))
-        notes += [*problems, f"offline: {OFFLINE_KG_ARM} instead"]
-        run._kg = {"needed": True, "source": f"offline default (gate run {run.gate_run_id!r} unusable)", "gate_run": run.gate_run_id, "verdict": label, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "notes": notes}
+        notes += [*problems, f"offline: {OFFLINE_KG_ARM} instead", *(f"{a}: its defaults offline" for a in gate_inherited_arms(run))]
+        run._kg = {"needed": True, "source": f"offline default (gate run {run.gate_run_id!r} unusable)", "gate_run": run.gate_run_id, "verdict": label, "key": None, "declared": OFFLINE_KG_ARM, "arm": OFFLINE_KG_ARM, "env": {}, "system": "apg", "files": {}, "inherited": {}, "notes": notes}
         return run._kg
     key = "APG*" if label in GO_LABELS else "LGR*"
-    entry = rg.read_selected(selected_path)[key]
+    gate_selected = yaml.safe_load(selected_path.read_text()) or {}
+    if key not in gate_selected:
+        raise PhaseError(f"gate run {run.gate_run_id!r}: {_show(selected_path)} has no {key} selection; run its tune phase")
+    entry = gate_selected[key]
+    inherited = inherited_selections(run, gate_selected, selected_path, notes)
     arm = str(entry["arm"])
     if run.offline:
         arm = rg.OFFLINE_ARMS.get(arm, arm)
@@ -547,21 +608,63 @@ def kg_resolution(run: StudyRun) -> dict:
         "system": "apg" if arm.startswith(("APG", "S5o")) else "lightrag",
         "candidate": entry.get("candidate"),
         "files": {"gate/selected.yaml": _show(selected_path), "gate/decision.json": _show(decision_path), "gate/freeze.json": _show(freeze_path)},
+        "inherited": inherited,
         "notes": notes,
     }
+    if clash := sorted(set(run._kg["env"]) & {k for x in inherited.values() for k in x["env"]}):
+        raise PhaseError(f"gate run {run.gate_run_id!r}: the KG arm's and the inherited selections' knobs overlap ({clash}); each sets only its own")
     return run._kg
 
 
+def gate_inherited_arms(run: StudyRun) -> dict[str, str]:
+    """The arms the study's grid inherits from the gate's selection other than the KG arm (D-041: main's S3s), that the
+    study's cells run: {arm: the gate's selected.yaml key} (the grid's `inherited.<arm>: {source: gate, gate_key}`)."""
+    path = run.config(run.grid_name)
+    if not path.is_file():
+        return {}
+    named = {a for c in plan(run).cells if c.study == run.study and c.enabled for a in rg._arm_names(c.spec.get("arms") or [])}
+    out = {}
+    for arm, spec in ((_load_grid(run).get("inherited") or {})).items():
+        if isinstance(spec, dict) and spec.get("source") == "gate" and arm not in KG_ARMS and arm in named:
+            out[str(arm)] = str(spec.get("gate_key") or arm)
+    return out
+
+
+def inherited_selections(run: StudyRun, gate_selected: dict, selected_path: Path, notes: list[str]) -> dict[str, dict]:
+    """{arm: {key, arm, env, candidate}}: each `gate_inherited_arms` arm's selection in the gate run's selected.yaml,
+    whose knobs every phase sets alongside the KG arm's (`kg_env`), recorded in the KG resolution (so in every
+    fingerprint and the freeze). A live run refuses when the gate run has no such entry, or one that runs another arm."""
+    out: dict[str, dict] = {}
+    for arm, key in gate_inherited_arms(run).items():
+        entry = gate_selected.get(key)
+        problem = None
+        if not isinstance(entry, dict):
+            problem = f"gate run {run.gate_run_id!r}: {_show(selected_path)} has no {key} selection, which {run.study}'s {arm} inherits (D-041)"
+        elif str(entry.get("arm", arm)) != arm:
+            problem = f"gate run {run.gate_run_id!r}: the {key} selection runs {entry.get('arm')}, but {run.study}'s {arm} inherits only its knobs"
+        if problem is not None:
+            if not run.offline:
+                raise PhaseError(problem)
+            notes.append(f"{problem}; offline: {arm} at its defaults")
+            continue
+        out[arm] = {"key": key, "arm": arm, "env": {str(k): str(v) for k, v in (entry.get("env") or {}).items()}, "candidate": entry.get("candidate")}
+    return out
+
+
 def kg_env(run: StudyRun) -> dict[str, str]:
+    """What the gate run decides for every phase's environment: the KG arm, its knobs and the inherited selections'."""
     kg = kg_resolution(run)
-    return {KG_ARM_ENV: kg["arm"], **kg["env"]} if kg.get("needed") else {}
+    if not kg.get("needed"):
+        return {}
+    return {KG_ARM_ENV: kg["arm"], **kg["env"], **{k: v for x in (kg.get("inherited") or {}).values() for k, v in x["env"].items()}}
 
 
 def kg_params_of(kg: dict | None) -> dict:
-    """A KG resolution as it enters fingerprints and the freeze's check: what it resolved, and its source files by hash."""
+    """A KG resolution as it enters fingerprints and the freeze's check: what it resolved (the inherited selections
+    too), and its source files by hash."""
     if not kg or not kg.get("needed"):
         return {"needed": False}
-    return {k: kg.get(k) for k in ("verdict", "key", "declared", "arm", "env", "system", "gate_run")} | {"files": {k: rg._sha256(rg._resolve(p)) for k, p in (kg.get("files") or {}).items()}}
+    return {k: kg.get(k) for k in ("verdict", "key", "declared", "arm", "env", "system", "gate_run", "inherited")} | {"files": {k: rg._sha256(rg._resolve(p)) for k, p in (kg.get("files") or {}).items()}}
 
 
 def kg_params(run: StudyRun) -> dict:
@@ -809,15 +912,27 @@ def read_selected(run: StudyRun) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
-def selection_env(selected: dict) -> dict[str, str]:
-    """Every selection's knobs together; each must hold only its own arm's knobs."""
-    env: dict[str, str] = {}
-    for key, entry in selected.items():
-        knobs = {k: str(v) for k, v in (entry.get("env") or {}).items()}
-        if clash := sorted(set(knobs) & set(env)):
-            raise PhaseError(f"selected.yaml: {key} sets {clash}, which another selection also sets")
-        env |= knobs
-    return env
+def selection_for(declared: str, selected: dict) -> str | None:
+    """The selection whose knobs a declared plan arm runs under: its own (a tuned arm, a key of selected.yaml), else
+    the selection of the arm whose knobs it reads (`agent.multi.knobs.KNOB_ARM`: M1s reads M1's, D-041), else none."""
+    if declared in selected:
+        return declared
+    from .agent.multi.knobs import KNOB_ARM
+
+    part = KNOB_ARM.get(declared)
+    return next((name for name in selected if part is not None and KNOB_ARM.get(name) == part), None)
+
+
+def env_group(declared: str, run_arm: str, selected: dict) -> tuple[str, dict[str, str]]:
+    """(group name, env) an arm runs in (D-042: each tuned arm with exactly its own selection's knobs). S7 apart (`s7`;
+    its schedule knob is added by the caller); an arm with a selection that sets knobs, in a group of that selection's
+    alone (`sel-<selection>`, M1s with M1); every other arm (untuned, or a selection without knobs) in `selected`, with
+    no selection's knobs. The study-wide knobs (the KG arm's and the inherited S3s's, `kg_env`) are every phase's."""
+    if run_arm == "S7":
+        return "s7", {}
+    system = selection_for(declared, selected)
+    own = {k: str(v) for k, v in ((selected.get(system) or {}).get("env") or {}).items()} if system else {}
+    return (f"sel-{re.sub(r'[^A-Za-z0-9._-]', '_', system)}", own) if own else ("selected", {})
 
 
 def b0_from_logs(log_files: Sequence[str], arm: str = CAP_ARM) -> dict[str, dict]:
@@ -857,21 +972,32 @@ def _level_distance(a: str, b: str) -> float:
 
 
 CAP_SOURCES = {"micro-pilot": 0, "tune": 1, "pilot": 1, "test": 2}  # how many cap files (micro-pilot's, pilot's) a phase reads
+BASE_MULTIPLE_PHASES = ("micro-pilot", "tune", "pilot")  # they run at CAP_MULTIPLE; the test at the pilot gate's (D-039)
 
 
-def token_caps(run: StudyRun, phase: str = "test") -> dict[str, dict]:
-    """task cell -> {cap, b0, source} as `phase` applies them: the micro-pilot's measured caps (token_caps.json), then the
-    pilot's for cells the micro-pilot did not run (token_caps_pilot.json). The micro-pilot itself runs uncapped (it
-    measures B0); tune and the pilot read the micro-pilot's caps only (never their own outputs); the test both. A cell
-    still unmeasured borrows the cap of its family's nearest measured level (log scale; a tie takes the larger cap, so
-    an extrapolation never cuts an arm short); a family never measured runs uncapped (`uncapped_cells`)."""
+def cap_multiple(run: StudyRun, phase: str = "test") -> int:
+    """The token caps' multiple of B0 `phase` applies: CAP_MULTIPLE up to the pilot (which may re-run arms at a larger
+    one, `cap_gate`); after it, the pilot cap-hit gate's final multiple (config/cap_gate.json, D-039)."""
+    if phase in BASE_MULTIPLE_PHASES or not run.cap_gate_path.is_file():
+        return CAP_MULTIPLE
+    return int(json.loads(run.cap_gate_path.read_text()).get("multiple") or CAP_MULTIPLE)
+
+
+def token_caps(run: StudyRun, phase: str = "test", multiple: int | None = None) -> dict[str, dict]:
+    """task cell -> {cap, b0, source} as `phase` applies them: `multiple` (default `cap_multiple(run, phase)`) x B0, from
+    the micro-pilot's B0 (token_caps.json), then the pilot's for cells the micro-pilot did not run
+    (token_caps_pilot.json). The micro-pilot itself runs uncapped (it measures B0); tune and the pilot read the
+    micro-pilot's B0 only (never their own outputs); the test both. A cell still unmeasured borrows the cap of its
+    family's nearest measured level (log scale; a tie takes the larger cap, so an extrapolation never cuts an arm
+    short); a family never measured runs uncapped (`uncapped_cells`)."""
     if not run.spec.caps:
         return {}
+    m = cap_multiple(run, phase) if multiple is None else multiple
     measured: dict[str, dict] = {}
     for path, source in ((run.token_caps_path, "micro-pilot"), (run.pilot_caps_path, "pilot"))[: CAP_SOURCES.get(phase, 2)]:
         if path.is_file():
             for c, v in (json.loads(path.read_text()).get("cells") or {}).items():
-                measured.setdefault(c, {"cap": int(v["cap"]), "b0": v["b0"], "source": source})
+                measured.setdefault(c, {"cap": int(math.ceil(m * float(v["b0"]))), "b0": v["b0"], "source": source})
     out = dict(measured)
     for c in agent_task_cells(run):
         if c in out:
@@ -901,14 +1027,14 @@ def _caps_params(run: StudyRun, phase: str = "test") -> dict:
 
 
 def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[dict]:
-    """Every eval set a run phase runs, in order: per plan cell, the `selected` group (its arms under every selection's
-    knobs together) and, apart, the `s7` group (S7 under the KG arm's schedule). Each group carries its arms (declared
-    and as run), the arms skipped because they are not built, its profile, split, seed block, worlds, epochs and, for
-    agent cells of a capped study, each task cell's token cap. Knobs are not part of Inspect's task identity, so each
-    group has its own log dir, keyed by everything that shapes it."""
+    """Every eval set a run phase runs, in order: per plan cell, the `selected` group (its arms with no selection's
+    knobs), the `s7` group (S7 under the KG arm's schedule) and one `sel-<system>` group per selection with knobs, its
+    arm alone under exactly those knobs (`env_group`, D-042). Each group carries its arms (declared and as run), the arms skipped
+    because they are not built, its profile, split, seed block, worlds, epochs and, for agent cells of a capped study,
+    each task cell's token cap. Knobs are not part of Inspect's task identity, so each group has its own log dir, keyed
+    by everything that shapes it."""
     offline = run.offline if offline is None else offline
     selected = read_selected(run) if phase != "micro-pilot" and run.selected_path.is_file() else {}
-    sel_env = selection_env(selected)
     caps = _caps_params(run, phase)
     split = SPLITS[phase]
     seed_base = split_seed_base(run, split)
@@ -917,10 +1043,13 @@ def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[d
     for cell in phase_cells(run, phase):
         s = cell.spec
         by_name: dict[str, list[dict]] = {}
+        envs: dict[str, dict[str, str]] = {}
         for a in rg._arm_names(s["arms"]):
             run_arm = _resolved(a, selected)
-            by_name.setdefault("s7" if run_arm == "S7" else "selected", []).append({"declared": a, "run": run_arm, "built": arm_built(run_arm, cell.kind)})
-        for name in sorted(by_name, key=("selected", "s7").index):
+            name, envs_ = env_group(a, run_arm, selected)
+            envs[name] = envs_
+            by_name.setdefault(name, []).append({"declared": a, "run": run_arm, "built": arm_built(run_arm, cell.kind)})
+        for name in sorted(by_name, key=lambda n: (("selected", "s7").index(n) if n in ("selected", "s7") else 2, n)):
             members = by_name[name]
             g: dict[str, Any] = {
                 "cell": cell.id,
@@ -930,7 +1059,7 @@ def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[d
                 "primary": cell.phase in run.spec.primary,
                 "arms": [{"declared": a["declared"], "run": a["run"]} for a in members if a["built"]],
                 "skipped": [{"declared": a["declared"], "run": a["run"], "reason": "not built yet"} for a in members if not a["built"]],
-                "env": sel_env | (s7_env(run) if name == "s7" else {}),
+                "env": envs[name] | (s7_env(run) if name == "s7" else {}),
                 "profile": s["profile"],
                 "effort": s.get("effort"),
                 "models": dict(s.get("models") or {}),
@@ -970,17 +1099,37 @@ def group_profile(run: StudyRun, g: dict) -> Profile:
     return cell_profile(run, {"profile": g["profile"], "effort": g.get("effort"), "models": g.get("models")})
 
 
+_GOLD: dict[tuple, Any] = {}
+
+
+def offline_gold(run: StudyRun) -> Any:
+    """The offline agent of agent cells: `llm.mock_multi.GoldMulti` over the run's worlds. It plays every role of every
+    main-study arm from the worlds' gold (single agent, planner, orchestrator, worker, specialist, council member, chair,
+    aggregator; `GoldMulti.kg` the APG classify), so the multi-agent arms run their real plumbing; the naive
+    `mock_agent` would answer at once and never plan or delegate. Offline success is therefore about 100% by
+    construction: a plumbing check, never a result. One instance per world set (the worlds' files and mtimes)."""
+    from .llm.mock_multi import GoldMulti
+
+    root = Config().worlds_dir
+    key = (str(root), tuple(sorted((str(p), p.stat().st_mtime_ns) for p in root.rglob("*.json"))))
+    if key not in _GOLD:
+        _GOLD.clear()
+        _GOLD[key] = GoldMulti(root)
+    return _GOLD[key]
+
+
 def group_models(run: StudyRun, profile: Profile, kind: str) -> tuple[Any, dict[str, Any]]:
-    """Offline: the mock scripts under the profile's settings (`mock_agent` with `mock_kg`, or `mock_session_agent`);
-    live: the profile's models, after the FX-2 preflight (sessions: the `probe` role when the profile sets one)."""
+    """Offline: the mocks under the profile's settings: `offline_gold` (agent cells; its `kg` for the kg role) or the
+    naive `mock_session_agent` (sessions: it also answers management calls, todo extractions, CM-native's mock
+    compaction and probes). Live: the profile's models, after the FX-2 preflight (sessions: the `probe` role when the
+    profile sets one; management calls use the agent's model)."""
     if run.offline:
         if kind == "session":
             from .llm.mock_session import mock_session_agent
 
             return rg._mock_models(profile, {"agent": mock_session_agent})
-        from .llm.mock_agent import mock_agent, mock_kg
-
-        return rg._mock_models(profile, {"agent": mock_agent, "kg": mock_kg})
+        gold = offline_gold(run)
+        return rg._mock_models(profile, {"agent": gold, "kg": gold.kg})
     from .models import agent_model, require_preflight, role_models
 
     require_preflight(profile, live=True, costs_path=run.costs_path, env_path=run.env_path)
@@ -988,16 +1137,11 @@ def group_models(run: StudyRun, profile: Profile, kind: str) -> tuple[Any, dict[
     return agent_model(profile), role_models(profile, roles)
 
 
-def _session_options(**values: Any) -> dict:
-    """The keyword arguments f8_session takes among `values` (B7 adds plan_cell, group, seed_base and skip_worlds)."""
-    from .tasks.study_g import f8_session
+def threshold(run: StudyRun) -> int:
+    """T_abs, the sessions' compaction threshold (run_plan.yaml `study_g.threshold`), passed to every session task."""
+    from .agent.session import plan_threshold
 
-    params = inspect.signature(f8_session).parameters
-    return {k: v for k, v in values.items() if k in params and v is not None}
-
-
-def f8_takes_seed_base() -> bool:
-    return "seed_base" in _session_options(seed_base=0)
+    return int(plan(run).study_g.get("threshold") or plan_threshold())
 
 
 def agent_task(run: StudyRun, *, family: str, level: str, split: str, arm: str, delivery: str = "push", exposure: str = "retrieved", limit_worlds: int | None, seed_base: int, cap: int | None, **labels: Any):
@@ -1011,9 +1155,10 @@ def agent_task(run: StudyRun, *, family: str, level: str, split: str, arm: str, 
 
 
 def session_task(run: StudyRun, *, level: str, split: str, arm: str, limit_worlds: int, variant: str, seed_base: int, **labels: Any):
+    """One F8 session task (`tasks.study_g.f8_session`): the run's seed block, the plan's window and threshold."""
     from .tasks.study_g import f8_session
 
-    return f8_session(level=level, split=split, arm=arm, limit_worlds=limit_worlds, window=window(run), variant=variant, **_session_options(seed_base=seed_base, **labels))
+    return f8_session(level=level, split=split, arm=arm, limit_worlds=limit_worlds, window=window(run), variant=variant, threshold=threshold(run), seed_base=seed_base, **labels)
 
 
 def group_tasks(run: StudyRun, g: dict) -> list:
@@ -1081,7 +1226,7 @@ def agent_logs(groups: list[dict]) -> list[str]:
 
 
 def _cfg_inputs(run: StudyRun, *names: str) -> dict[str, Path]:
-    return {f"config/{n}": run.config(n) for n in names}
+    return {f"config/{n}": config_input(run.config(n), run.study) for n in names}
 
 
 def env_knobs(run: StudyRun) -> dict[str, str]:
@@ -1127,6 +1272,37 @@ def _preflight_params(run: StudyRun) -> dict:
     return base_params(run) | {"environment": env, "smoke_checks": list(run.spec.smoke_checks)}
 
 
+NATIVE_ARM = "CM-native"
+
+
+def native_routes(run: StudyRun) -> tuple[dict[str, str], list[str]]:
+    """({where: route}, problems) for every session cell, and tuning-grid candidate, that runs CM-native: its agent
+    model's route (`agent.cm_arms.native_route`: "provider" when the support record confirms native compaction,
+    "mock" for the offline mock). A live model without a confirmed record is a problem."""
+    from .agent.cm_arms import NativeCompactionUnsupported, native_route
+
+    uses: dict[str, str] = {}
+    for phase in ("micro-pilot", "test"):
+        for cell in phase_cells(run, phase):
+            if cell.kind == "session" and NATIVE_ARM in rg._arm_names(cell.spec["arms"]):
+                uses[cell.id] = cell_profile(run, cell.spec).role("agent").model
+    if run.config(run.grid_name).is_file():
+        grid = _load_grid(run)
+        tune = phase_cells(run, "tune")
+        profile = cell_profile(run, tune[0].spec) if tune else study_profile(run)
+        for name, sdef in grid["systems"].items():
+            if any(c["arm"] == NATIVE_ARM for c in sdef["candidates"]):
+                uses[f"{run.grid_name}: {name}"] = profile.role("agent").model
+    routes, problems = {}, []
+    for where, model in uses.items():
+        try:
+            routes[where] = native_route(rg.MOCK if run.offline else model)
+        except NativeCompactionUnsupported as e:
+            routes[where] = "unsupported"
+            problems.append(f"{where}: {e}")
+    return routes, list(dict.fromkeys(problems))
+
+
 def _preflight(run: StudyRun, record: dict) -> None:
     problems: list[str] = []
     checks: dict[str, Any] = {}
@@ -1167,6 +1343,10 @@ def _preflight(run: StudyRun, record: dict) -> None:
         what = "skipped (offline)" if run.offline else "a live run refuses those phases until they are built"
         record["warnings"].append(f"arms not built yet, {what}: " + "; ".join(f"{p}: {a}" for p, a in record["unbuilt_arms"].items()))
     record["warnings"] += [f"KG arm: {n}" for n in kg_resolution(run).get("notes") or []]
+    # 4b. CM-native runs only on a model whose native compaction is confirmed (`agent.cm_arms.native_route`): checked
+    #     here for every model a CM-native cell or grid candidate uses, so a live run refuses now, not per sample.
+    checks["cm_native"], native = native_routes(run)
+    problems += native
     # 5. Live: a passing live smoke of this code (and of the study's own required checks), settled once per run.
     settlement = None
     if not run.offline:
@@ -1349,16 +1529,62 @@ def study_grid(run: StudyRun) -> tuple[dict, list[dict]]:
     return {**grid, "systems": systems}, skipped
 
 
+SKEPTIC_KEY = "S1"  # the owners key of the skeptic, who signs off the baseline S1 runs as engineered (D-041)
+
+
 def tuning_signoff_problems(grid: dict) -> list[str]:
-    """Why a study grid is not ready for a live tune: a placeholder, or a system without a named owner and sign-off."""
-    owners, signed = grid.get("owners") or {}, grid.get("signed_off") or {}
+    """Why a study grid is not ready for a live tune: a placeholder; a system, or any other key of `owners` (main's S1,
+    the skeptic's sign-off that S1 runs as engineered), without a named owner and sign-off; or a multi-agent arm's
+    system owned by the skeptic (`owners.S1`): the M arms' prompts need an independent author (brief §7.3)."""
+    from .agent.solvers import MULTI_AGENT_ARMS
+
+    owners, signed, systems = grid.get("owners") or {}, grid.get("signed_off") or {}, grid.get("systems") or {}
     problems = ["the grid is a placeholder (`placeholder: true`): BUILD_PLAN B3 / B11 declare the real one"] if grid.get("placeholder") else []
-    for system in grid.get("systems") or {}:
-        if rg._unset(owners.get(system)):
-            problems.append(f"owners.{system} is not set")
-        if signed.get(system) is not True:
-            problems.append(f"signed_off.{system} is not true")
+    for key in dict.fromkeys([*systems, *owners]):
+        if rg._unset(owners.get(key)):
+            problems.append(f"owners.{key} is not set")
+        if signed.get(key) is not True:
+            problems.append(f"signed_off.{key} is not true")
+    skeptic = owners.get(SKEPTIC_KEY)
+    if not rg._unset(skeptic):
+        for name, sdef in systems.items():
+            arms = {name, *(c.get("arm") for c in sdef.get("candidates") or [])}
+            owner = owners.get(name)
+            if arms & set(MULTI_AGENT_ARMS) and not rg._unset(owner) and str(owner).strip().casefold() == str(skeptic).strip().casefold():
+                problems.append(f"owners.{name} is the skeptic (owners.{SKEPTIC_KEY}: {skeptic}): a multi-agent arm's prompts need an independent author (brief §7.3)")
     return problems
+
+
+def cm_candidate_problems(system: str, env: dict[str, str]) -> list[str]:
+    """A Study G candidate's env, for the session arm (system) it tunes: it sets only APE_CM_* knobs that arm's policy
+    reads (`KNOBS`), with values the policy takes (`resolve_knobs`, `validate`: e.g. S-CM*'s stack). Other systems may
+    set the same knob names: each tuned arm runs under exactly its own selection's knobs (D-042)."""
+    from .agent import session  # noqa: F401  (registers the context policies)
+    from .agent.context_policy import KNOB_ENV_PREFIX, policy_class, resolve_knobs
+
+    try:
+        cls = policy_class(system)
+    except ValueError as e:
+        return [str(e)]
+    problems = [f"{k} is not an {KNOB_ENV_PREFIX}* knob" for k in env if not k.startswith(KNOB_ENV_PREFIX)]
+    if foreign := sorted(k for k in env if k.startswith(KNOB_ENV_PREFIX) and k.removeprefix(KNOB_ENV_PREFIX).lower() not in cls.KNOBS):
+        problems.append(f"{system} reads none of {foreign} (its knobs: {sorted(cls.KNOBS)})")
+    try:
+        cls.validate(resolve_knobs(cls, {k: str(v) for k, v in env.items()}))
+    except ValueError as e:
+        problems.append(f"{system} rejects {dict(env)}: {e}")
+    return problems
+
+
+def grid_problems(run: StudyRun) -> list[str]:
+    """`tuning.study_grid_problems` on the study's whole grid (as declared, not the offline cut), against what its
+    run_plan tuning cells price, with each study's own-knob check (main: `agent.multi.knobs.candidate_problems`;
+    Study G: `cm_candidate_problems`)."""
+    from .agent.multi.knobs import candidate_problems
+    from .tuning import planned_tuning, study_grid_problems
+
+    check = cm_candidate_problems if run.study == "study_g" else candidate_problems
+    return study_grid_problems(_load_grid(run), planned_tuning((c.id, c.spec) for c in phase_cells(run, "tune")), check)
 
 
 def _refuse_tune(run: StudyRun) -> str | None:
@@ -1369,6 +1595,8 @@ def _refuse_tune(run: StudyRun) -> str | None:
     path = run.config(run.grid_name)
     if problems := tuning_signoff_problems(_load_grid(run)):
         return f"tune: {_show(path)} is not signed off for a live tune: {'; '.join(problems)}. Each system's owner declares its candidates, then sets signed_off.<system>: true"
+    if problems := grid_problems(run):
+        return f"tune: {_show(path)} breaks the tuning rules (`tuning.study_grid_problems`), found before any dev run: {'; '.join(problems)}"
     return _refuse_unbuilt("tune")(run)
 
 
@@ -1402,6 +1630,9 @@ def _tune(run: StudyRun, record: dict) -> None:
     params = _tune_params(run)
     grid, skipped = study_grid(run)
     record["skipped_systems"] = skipped
+    record["grid_problems"] = grid_problems(run)  # a live tune refuses on any (`_refuse_tune`); offline, recorded
+    if record["grid_problems"]:
+        record["warnings"].append(f"the grid breaks the tuning rules (a live tune refuses it): {record['grid_problems']}")
     tdir = run.phase_dir("tune")
     log_dir, tlog = tdir / "logs", tdir / "tuning_log.jsonl"
     if tlog.exists():
@@ -1436,7 +1667,7 @@ def _tune(run: StudyRun, record: dict) -> None:
     header = (
         f"# Dev-tuned selections ({run.spec.title}), written by `python -m ape.run_study tune --study {run.study} --run-id {run.run_id}`"
         f"{' (OFFLINE: mock models)' if run.offline else ''}{' from a PLACEHOLDER grid' if grid.get('placeholder') else ''}.\n"
-        "# A plan arm named by a key runs as its selection; every selection's knobs apply together.\n"
+        "# A plan arm named by a key runs as its selection, under exactly its own selection's knobs (D-042).\n"
     )
     text = header + yaml.safe_dump(selected, sort_keys=False)
     for path in (tdir / "selected.yaml", run.selected_path):
@@ -1489,8 +1720,12 @@ def _pilot(run: StudyRun, record: dict) -> None:
             g["s7_targets"] = targets
             g["dir"] = f"{g['cell']}/s7-{rg._digest({k: v for k, v in g.items() if k not in ('primary', 'skipped', 'plan_phase', 'dir')})}"
         logs += run_phase_groups(run, record, "pilot", s7)
-    # B0 for the cells the micro-pilot did not measure (its caps stand where it did).
     summary: dict[str, Any] = {"run_id": run.run_id, "offline": run.offline, "study": run.study, "skipped_arms": record["skipped_arms"], "s7_targets": targets, "success": _summary(logs)}
+    # D-039: the cap-hit gate (may re-run arms under a larger multiple); the calibration reads every arm's latest logs.
+    if run.spec.caps:
+        summary["cap_gate"], latest = _cap_gate(run, record, groups)
+        logs = latest + [f for f in logs if f not in set(agent_logs(groups))]
+    # B0 for the cells the micro-pilot did not measure (its caps stand where it did).
     measured = set(json.loads(run.token_caps_path.read_text()).get("cells") or {}) if run.token_caps_path.is_file() else set()
     b0 = {c: v for c, v in b0_from_logs(agent_logs(groups)).items() if c not in measured}
     caps = write_caps(run.pilot_caps_path, b0, "pilot")
@@ -1504,8 +1739,14 @@ def _pilot(run: StudyRun, record: dict) -> None:
         calibrate(logs, out_path=run.measured_out_path)  # the run's later projections use it (`run_gate._cost_kwargs`)
         record["outputs"] |= {"measured": _show(run.measured_out_path)}
     summary["harness"] = _harness(run, record, groups, "pilot")
+    multiple = cap_multiple(run)
+    gate = summary.get("cap_gate") or {}
+    raised = [f"{r['multiple']} x B0 for {', '.join(f'{a} {c}' for a, c in r['over'].items())}" for r in gate.get("rounds", []) if r.get("over")]
+    summary["power"] = _pilot_power(run, record)
     summary["prereg_items"] = {
         "token caps": ", ".join(f"{c} {v['cap']}" for c, v in token_caps(run).items()) or "none",
+        "cap multiple": f"{multiple} (D-039; " + (f"raised from {CAP_MULTIPLE}: over {CAP_HIT_MAX:.0%} cap hits at {'; '.join(raised)}" if raised else f"no arm over {CAP_HIT_MAX:.0%} cap hits on the pilot") + (f"; still over at {multiple}: {gate['over']}" if gate.get("over") else "") + "; config/cap_gate.json)",
+        "pilot σ and power": summary["power"]["summary"],
         "S7 targets per cell": ", ".join(f"{c} {t}" for c, t in targets.items()) or "none",
         "KG arm": f"{kg_resolution(run).get('arm')} ({kg_resolution(run).get('source')})",
     }
@@ -1515,23 +1756,222 @@ def _pilot(run: StudyRun, record: dict) -> None:
     record["s7_targets"] = targets
 
 
+def cap_hit_rates(log_files: Sequence[str]) -> dict[str, dict[str, dict]]:
+    """arm (as run) -> task cell -> {samples, cap_hits, token_hits, rate, token_rate} over the logs (D-039). A cap hit
+    is B4's (`analysis.main_load.cap_hit_of`): an Inspect sample limit; or, unanswered, the single agent at its turn cap
+    or any agent of a multi-agent arm stopped at its turn cap or on a limit. A token hit is a cap hit the token cap
+    decided: Inspect's `token` limit, or an agent stopped on a limit while the sample records no other limit."""
+    from .analysis.main_load import load_main
+
+    if not log_files:
+        return {}
+    df = load_main(list(log_files), require_cost=False)
+    out: dict[str, dict[str, dict]] = {}
+    for (arm, cell), sub in df.groupby(["arm", "cell"], sort=True):
+        cap = sub["cap_hit"].fillna(False).astype(bool)
+        agent_limit = sub["agent_stops"].map(lambda d: isinstance(d, dict) and int(d.get("limit", 0)) > 0).astype(bool)
+        token = cap & (sub["limit_hit"].eq("token") | (sub["limit_hit"].isna() & agent_limit))
+        n = int(len(sub))
+        out.setdefault(str(arm), {})[str(cell)] = {
+            "samples": n, "cap_hits": int(cap.sum()), "token_hits": int(token.sum()), "rate": round(float(cap.sum()) / n, 4), "token_rate": round(float(token.sum()) / n, 4),
+        }  # fmt: skip
+    return out
+
+
+def cap_gate_rule(run: StudyRun) -> str:
+    """Which rate the gate tests (D-039). Live: the cap-hit rate (B4's rule, every cap). Offline: the token-hit rate
+    only. The mocks' cap hits that are not the token cap's (a mock that never answers runs to the turn cap) are mock
+    artefacts a larger token cap cannot change, so the rehearsal reports them and loops only on real token-cap hits."""
+    return "token_rate" if run.offline else "rate"
+
+
+def arms_over_cap(rates: dict[str, dict[str, dict]], rule: str) -> dict[str, list[str]]:
+    """arm -> the task cells where its `rule` rate exceeds CAP_HIT_MAX (only arms with one)."""
+    over = {arm: sorted(c for c, r in cells.items() if r[rule] > CAP_HIT_MAX) for arm, cells in sorted(rates.items())}
+    return {arm: cells for arm, cells in over.items() if cells}
+
+
+def cap_rerun_groups(run: StudyRun, groups: list[dict], arms: Sequence[str], multiple: int) -> list[dict]:
+    """The pilot's agent groups again for `arms` only (by the arm as run), under `multiple` x B0 caps (the pilot's B0
+    sources, `token_caps(run, "pilot", multiple)`), each in a log dir of its own (`<name>-x<multiple>-<digest>`)."""
+    caps = {c: v["cap"] for c, v in token_caps(run, "pilot", multiple).items()}
+    out = []
+    for g in groups:
+        mine = [a for a in g["arms"] if a["run"] in arms]
+        if g["kind"] != "agent" or not mine:
+            continue
+        r = {k: v for k, v in g.items() if k not in ("log_files", "dir")} | {"arms": mine, "skipped": [], "caps": {tc: caps[tc] for tc in g["cells"] if tc in caps}, "cap_multiple": multiple}
+        r["dir"] = f"{g['cell']}/{g['name']}-x{multiple}-{rg._digest({k: v for k, v in r.items() if k not in ('primary', 'skipped', 'plan_phase')})}"
+        out.append(r)
+    return out
+
+
+def _log_arm(path: str) -> str | None:
+    from inspect_ai.log import read_eval_log
+
+    head = read_eval_log(str(path), header_only=True)
+    return (head.eval.task_args or {}).get("arm") or (head.eval.metadata or {}).get("arm")
+
+
+def _cap_gate(run: StudyRun, record: dict, groups: list[dict]) -> tuple[dict, list[str]]:
+    """D-039, the pilot cap-hit gate: each arm's cap-hit rate per task cell over the pilot's logs (`cap_hit_rates`);
+    while an arm exceeds CAP_HIT_MAX (`cap_gate_rule`), the multiple doubles for every arm (8 -> 16 -> 32, at most
+    CAP_DOUBLINGS times) and the arms over it re-run their pilot cells under the new caps (pilot-sized; the budget is
+    checked before each round), and the check repeats on their new logs. Writes config/cap_gate.json: the final
+    multiple (the test's, `cap_multiple`), every round's rates, the arms still over it (the freeze refuses while any
+    is) and the arms over the B4 rate that the offline rule only reports. Returns it and the latest logs of every arm."""
+    rule = cap_gate_rule(run)
+    logs = agent_logs(groups)
+    latest_logs: dict[str, list[str]] = {}
+    for f in logs:
+        latest_logs.setdefault(str(_log_arm(f)), []).append(f)
+    rates = cap_hit_rates(logs)
+    latest = {arm: dict(cells) for arm, cells in rates.items()}
+    multiple, top = CAP_MULTIPLE, CAP_MULTIPLE * 2**CAP_DOUBLINGS
+    over = arms_over_cap(latest, rule)
+    rounds: list[dict] = [{"multiple": multiple, "rerun": [], "rates": rates, "over": over}]
+    while over and multiple < top:
+        multiple *= 2
+        rerun = cap_rerun_groups(run, groups, list(over), multiple)
+        what = f"pilot cap re-run at {multiple} x B0 (D-039: {', '.join(f'{a} {cells}' for a, cells in over.items())} over {CAP_HIT_MAX:.0%})"
+        print(f"[pilot] {what}", flush=True)
+        require_affordable(sum(group_projected(run, g) for g in rerun), guard_remaining(run), what)
+        new_logs = run_phase_groups(run, record, "pilot", rerun)
+        new = cap_hit_rates(new_logs)
+        for arm in over:
+            latest[arm] = dict(new.get(arm) or {})
+            latest_logs[arm] = [f for f in new_logs if _log_arm(f) == arm]
+        rounds.append({"multiple": multiple, "rerun": sorted(over), "dirs": [_show(run.phase_dir("pilot") / g["dir"]) for g in rerun], "rates": new, "over": (over := arms_over_cap(latest, rule))})
+    informational = {a: c for a, c in arms_over_cap(latest, "rate").items() if a not in over} if rule != "rate" else {}
+    gate = {
+        "decision": "D-039",
+        "multiple": multiple,
+        "base": CAP_MULTIPLE,
+        "max": top,
+        "threshold": CAP_HIT_MAX,
+        "rule": rule,
+        "rule_note": "cap-hit rate (B4's cap_hit_of)" if rule == "rate" else "offline: token-cap hits only; other cap hits are reported (`reported`), not looped on",
+        "passed": not over,
+        "over": over,
+        "reported": informational,
+        "rates": latest,
+        "rounds": rounds,
+    }
+    rg._write_json(run.cap_gate_path, gate)
+    record["outputs"] |= {"cap_gate": _show(run.cap_gate_path)}
+    record["cap_gate"] = {k: gate[k] for k in ("multiple", "rule", "passed", "over", "reported")} | {"rounds": [{k: r[k] for k in ("multiple", "rerun", "over")} for r in rounds]}
+    if multiple != CAP_MULTIPLE:
+        record["warnings"].append(f"D-039: the token caps' multiple is {multiple} x B0 for every arm (raised from {CAP_MULTIPLE}); the test applies it")
+    if over:
+        record["warnings"].append(f"D-039: {over} still over {CAP_HIT_MAX:.0%} cap hits at {multiple} x B0: the freeze refuses this run")
+    if informational:
+        record["warnings"].append(f"cap hits over {CAP_HIT_MAX:.0%} that are not the token cap's (offline mock artefacts, reported only): {informational}")
+    return gate, [f for fs in latest_logs.values() for f in fs]
+
+
+def gate_pilot_sigma(run: StudyRun) -> tuple[dict | None, str, Path | None]:
+    """(variance components, where they came from, the file) for the main study's power re-simulation
+    (PREREGISTRATION_MAIN §2.6): the gate run's pilot (`runs/<gate run>/pilot/power.json`, `variance_components`, 8
+    worlds per F3/F7 cell, D-026), since the main pilot's 2 worlds per cell cannot estimate σ_w and σ_g. None (the
+    gate's priors) when there is no gate run, no such file, or the gate's pilot could not estimate them; the source says
+    which."""
+    kg = kg_resolution(run)
+    gid = kg.get("gate_run") or run.gate_run_id
+    if not gid:
+        return None, "the gate's priors (no gate run)", None
+    gate = rg.GateRun(gid, offline=bool(kg.get("gate_offline", run.offline)), runs_root=run.gate_runs_root)
+    path = gate.phase_dir("pilot") / "power.json"
+    if not path.is_file():
+        return None, f"the gate's priors ({_show(path)} missing)", None
+    vc = (json.loads(path.read_text()) or {}).get("variance_components")
+    if not vc or not vc.get("estimable"):
+        return vc, f"the gate's priors (gate run {gid}'s pilot could not estimate σ_w and σ_g: {(vc or {}).get('reason', 'no variance components')})", path
+    worlds = sorted(set((vc.get("worlds_per_cell") or {}).values()))
+    return vc, f"gate run {gid}'s pilot ({_show(path)}; {'/'.join(map(str, worlds)) or '?'} worlds per cell)", path
+
+
+def _pilot_power(run: StudyRun, record: dict) -> dict:
+    """The power re-simulation at the gate pilot's σ (PREREGISTRATION_MAIN §2.6; `analysis.main_power.power_table`, the
+    pre-registration's command run in-process, at the run's plan sizes) -> pilot/power.json, reused while its inputs
+    (σ, replicates, seed, sizes) stand. Offline a couple of coarse replicates check the plumbing. Returns the source,
+    the σ and a one-line summary for the pre-registration ("pilot σ and power"): each confirmatory member's power over
+    its power scenarios, and the family-wise false-claim rates at the null boundary."""
+    from dataclasses import asdict as as_dict
+
+    from .analysis import main_power as mp
+
+    vc, source, path = gate_pilot_sigma(run)
+    sig = mp.sigmas_from_pilot(vc)
+    reps, flips = (OFFLINE_POWER["reps"], OFFLINE_POWER["flip_reps"]) if run.offline else (POWER_REPS, mp.Settings().flip_reps)
+    sizes = mp.planned_sizes(run.config("run_plan.yaml"), run.models_path)
+    key = {"sigmas": as_dict(sig), "reps": reps, "flip_reps": flips, "seed": POWER_SEED, "sizes": rg._digest({str(k): v for k, v in sizes.items()})}
+    out = run.phase_dir("pilot") / "power.json"
+    old = json.loads(out.read_text()) if out.is_file() else {}
+    if old.get("key") == key:
+        table = old["power"]
+    else:
+        print(f"[pilot] power re-simulation: {reps} replicates at σ_w {sig.w:.3f}, σ_g {sig.g:.3f} ({source})", flush=True)
+        table = mp.power_table(reps, POWER_SEED, sig, mp.Settings(flip_reps=flips), sizes=sizes)
+        rg._write_json(out, {"key": key, "source": source, "variance_components": vc, "power": table})
+    record["outputs"] |= {"power": _show(out)}
+    members: dict[str, list[float]] = {}
+    false_claims = {}
+    for fam, f in table["families"].items():
+        for r in f["scenarios"]:
+            for m, p_ in r["members"].items():
+                if m not in r["nulls"]:
+                    members.setdefault(m, []).append(float(p_))
+            if r["nulls"] and r.get("false_claims") is not None:
+                false_claims[fam] = max(false_claims.get(fam, 0.0), float(r["false_claims"]))
+    power = "; ".join(f"{m} {min(v):.2f}-{max(v):.2f}" for m, v in members.items())
+    text = (
+        f"σ_w {sig.w:.3f}, σ_g {sig.g:.3f} from {source}. Power over each member's planned effects ({reps} replicates"
+        f"{', OFFLINE: coarse' if run.offline else ''}): {power or 'none'}. Largest false-claim rate per family at the null "
+        f"boundary: {', '.join(f'{k} {v:.3f}' for k, v in false_claims.items()) or 'none'}. Full table: {_show(out)}"
+    )
+    return {"source": source, "file": _show(path) if path else None, "sigmas": as_dict(sig), "reps": reps, "summary": text}
+
+
 def _pilot_params(run: StudyRun) -> dict:
-    return _build_params(run, "pilot") | {"groups": group_params(run_groups(run, "pilot")), "caps": _caps_params(run, "pilot"), "s7_env": s7_env(run) if kg_resolution(run).get("needed") else None}
+    gate = {"base": CAP_MULTIPLE, "doublings": CAP_DOUBLINGS, "threshold": CAP_HIT_MAX, "rule": cap_gate_rule(run)} if run.spec.caps else None
+    return _build_params(run, "pilot") | {"groups": group_params(run_groups(run, "pilot")), "caps": _caps_params(run, "pilot"), "s7_env": s7_env(run) if kg_resolution(run).get("needed") else None, "cap_gate": gate}
+
+
+def _gate_power_input(run: StudyRun) -> dict[str, Path]:
+    """The gate run's pilot power file, whose σ the power re-simulation uses (`gate_pilot_sigma`), when there is one."""
+    _, _, path = gate_pilot_sigma(run)
+    return {"gate/pilot/power.json": path} if path is not None else {}
 
 
 def _pilot_projected(run: StudyRun) -> float:
-    return project(run, [group_cell(run, g) for g in run_groups(run, "pilot", offline=False) if g["arms"]])
+    """The pilot at live sizes and, for a capped study, D-039's worst case on top: every pilot arm re-run once per
+    doubling (pilot-sized: the pilot's own tasks and epochs per cell)."""
+    once = project(run, [group_cell(run, g) for g in run_groups(run, "pilot", offline=False) if g["arms"]])
+    return once * (1 + (CAP_DOUBLINGS if run.spec.caps else 0))
 
 
 # freeze ----------------------------------------------------------------------------------------------
 
 
+def read_cap_gate(run: StudyRun) -> tuple[dict | None, list[str]]:
+    """(the pilot's cap-hit gate record, the freeze's problems with it): a capped study with a pilot freezes only with
+    the gate run and no arm still over CAP_HIT_MAX at the largest multiple (D-039)."""
+    if not (run.spec.caps and "pilot" in run.spec.phases):
+        return None, []
+    if not run.cap_gate_path.is_file():
+        return None, [f"{_show(run.cap_gate_path)} missing: the pilot's cap-hit gate (D-039) has not run; re-run the pilot"]
+    gate = json.loads(run.cap_gate_path.read_text())
+    if gate.get("over"):
+        return gate, [f"D-039: {gate['over']} still over {CAP_HIT_MAX:.0%} cap hits at {gate['multiple']} x B0 (the largest multiple): the caps cannot be frozen"]
+    return gate, []
+
+
 def frozen_outputs(run: StudyRun) -> list[str]:
-    """The run's outputs the freeze hashes: selected.yaml; main also its token caps and, when the pilot runs S7, the S7
-    targets."""
+    """The run's outputs the freeze hashes: selected.yaml; main also its token caps (B0 files and the pilot's cap-hit
+    gate, whose multiple the test applies) and, when the pilot runs S7, the S7 targets."""
     out = ["selected.yaml"]
     if run.spec.caps:
-        out += ["token_caps.json", "token_caps_pilot.json"]
+        out += ["token_caps.json", "token_caps_pilot.json"] + (["cap_gate.json"] if "pilot" in run.spec.phases else [])
     if "pilot" in run.spec.phases and any(a == "S7" for c in phase_cells(run, "pilot") for a in rg._arm_names(c.spec["arms"])):
         out.append("s7_targets.json")
     return out
@@ -1550,7 +1990,7 @@ def frozen_files(run: StudyRun, prereg: Path) -> dict[str, Path]:
     kg = kg_resolution(run)
     return (
         {run.spec.prereg: prereg}
-        | {f"config/{n}": run.config(n) for n in (*FROZEN_CONFIG, run.grid_name)}
+        | {f"config/{n}": config_input(run.config(n), run.study) for n in (*FROZEN_CONFIG, run.grid_name)}
         | {f"config/{n}": run.out_config_dir / n for n in frozen_outputs(run)}
         | {f: ROOT / f for f in frozen_code(run)}
         | {k: rg._resolve(p) for k, p in (kg.get("files") or {}).items()}
@@ -1656,9 +2096,10 @@ def _write_freeze_provenance(run: StudyRun, freeze: dict) -> Path:
         f"\n{_freeze_heading(run, freeze)}{' (OFFLINE REHEARSAL)' if run.offline else ''}\n",
         f"- **Commit:** `{freeze['git']['commit']}`; apg-core `{freeze['apg_core']['installed_commit']}` (pin `{rg.APG_PIN}`).",
         "- **Frozen files** (sha256):",
-        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}: `{f['sha256']}`" for k, f in freeze["files"].items()],
+        *[f"  - `{f['path']}`{'' if f['path'] == k else f' ({k})'}{f' (the {run.study} slice)' if f.get('slice') else ''}: `{f['sha256']}`" for k, f in freeze["files"].items()],
         f"- **Design knobs** (APE_* set when the frozen phases ran; build-test and test refuse others): {rg._fmt_env(freeze.get('design_env'))}.",
         f"- **KG arm:** {kg.get('arm')} ({kg.get('source')}{', verdict ' + kg['verdict'] if kg.get('verdict') else ''}); knobs {rg._fmt_env(kg.get('env'))}." if kg.get("needed") else "- **KG arm:** none (no cell reads the KG).",
+        *[f"- **{a} (inherited from the gate run's `{x['key']}`):** candidate {x.get('candidate')}; knobs {rg._fmt_env(x['env'])}." for a, x in (kg.get("inherited") or {}).items()],
         *([f"- **Role:** the extension of run `{freeze['role']['of']}`."] if freeze["role"]["kind"] == "extension" else []),
         f"- **Test seeds:** {seeds_['base']}-{seeds_['last']} ({run.study}'s block base {seeds_['base']}). A later {run.study} run freezes a fresh block. "
         f"<!-- ape:test-seeds study={run.study} run={run.run_id} base={seeds_['base']} count={seeds_['count']} -->",
@@ -1728,6 +2169,8 @@ def _freeze(run: StudyRun, record: dict) -> None:
         (record["warnings"] if run.offline else problems).append("not current, so the frozen design would not be what ran: " + "; ".join(stale))
     if uncapped := uncapped_cells(run):
         record["warnings"].append(f"cells without a token cap (no B0 in their family): {uncapped}")
+    gate, gate_problems = read_cap_gate(run)
+    problems += gate_problems
     seed_base, seed_problems = choose_test_seed_base(run)
     problems += seed_problems
     role = run_role(run)
@@ -1744,7 +2187,7 @@ def _freeze(run: StudyRun, record: dict) -> None:
         "offline": run.offline,
         "rehearsal": rehearsal is not None,
         "placeholders_replaced": rehearsal or [],
-        "files": {k: {"path": _show(p), "sha256": rg._sha256(p)} for k, p in files.items()},
+        "files": {k: rg._file_entry(p) for k, p in files.items()},
         "git": git,
         "code_commit": git["commit"],
         "analysis": {"module": run.spec.analysis, "implemented": analysis_ready, "code": code, "commit": rg._git("log", "-1", "--format=%H", "--", *code) if code else None},
@@ -1755,6 +2198,8 @@ def _freeze(run: StudyRun, record: dict) -> None:
         "role": role,
         "kg": kg_resolution(run),
         "token_caps": _caps_params(run),
+        "cap_multiple": cap_multiple(run) if run.spec.caps else None,
+        "cap_gate": {k: gate.get(k) for k in ("multiple", "base", "max", "threshold", "rule", "passed", "rates", "rounds")} if gate else None,
         "design_env": env_knobs(run),
     }
     if rehearsal is not None:
@@ -1774,7 +2219,7 @@ def _freeze_inputs(run: StudyRun) -> dict[str, Path]:
 
 
 def _frozen_inputs(run: StudyRun) -> dict[str, Path]:
-    return {k: rg._resolve(f["path"]) for k, f in ((read_freeze(run) or {}).get("files") or {}).items()}
+    return {k: rg._entry_path(f) for k, f in ((read_freeze(run) or {}).get("files") or {}).items()}
 
 
 def design_env_changes(run: StudyRun) -> list[str]:
@@ -1787,7 +2232,7 @@ def design_env_changes(run: StudyRun) -> list[str]:
 
 def _refuse_unless_frozen(name: str) -> Callable[[StudyRun], str | None]:
     """build-test and test: frozen, every frozen file unchanged; live also the freeze commit's code, the frozen design
-    knobs and KG resolution, and (Study G) an f8_session that selects the run's own seed block."""
+    knobs and the frozen KG resolution."""
 
     def refuse(run: StudyRun) -> str | None:
         try:
@@ -1805,9 +2250,6 @@ def _refuse_unless_frozen(name: str) -> Callable[[StudyRun], str | None]:
             return f"{name}: design knob(s) differ from the frozen ones: {'; '.join(knobs)}"
         if kg_params(run) != kg_params_of(freeze.get("kg")):
             return f"{name}: the KG resolution differs from the frozen one ({(freeze.get('kg') or {}).get('arm')} from {(freeze.get('kg') or {}).get('source')}): pass the frozen --gate-run-id"
-        sessions = any(c.kind == "session" for c in phase_cells(run, "test"))
-        if sessions and not f8_takes_seed_base() and int(freeze["test_seeds"]["base"]) != seeds(run)["test"][0]:
-            return f"{name}: this run's test block starts at {freeze['test_seeds']['base']}, but tasks.study_g.f8_session cannot select a seed block yet (BUILD_PLAN B7 adds seed_base); it would read another run's sessions"
         return None
 
     return refuse
@@ -1896,13 +2338,14 @@ def _test(run: StudyRun, record: dict) -> None:
     entries = []
     for g in groups:
         entry = {
-            "name": g["name"], "kind": g["kind"], "arms": g["arms"], "skipped": g["skipped"], "profile": g["profile"], "effort": g.get("effort"),
+            "name": g["name"], "kind": g["kind"], "arms": g["arms"], "skipped": g["skipped"], "profile": g["profile"], "effort": g.get("effort"), "models": g.get("models") or {},
             "split": g["split"], "seed_base": g["seed_base"], "epochs": g["epochs"], "env": g["env"], "log_dir": _show(tdir / g["dir"]), "log_files": [],
             "status": "pending" if g["arms"] else "skipped",
         } | ({"cells": g["cells"], "deliveries": g["deliveries"], "n_worlds": g["n_worlds"], "caps": g["caps"]} if g["kind"] == "agent" else {"level": g["level"], "variant": g["variant"], "n_worlds": g["n_worlds"]})  # fmt: skip
         cells.setdefault(g["cell"], {"status": "pending", "primary": g["primary"], "plan_phase": g["plan_phase"], "groups": []})["groups"].append(entry)
         entries.append((g, entry))
     record["cells"], record["primary_complete"] = cells, False
+    record["log_files_relative_to"] = "run_dir"  # `log_files` entries: relative to the run directory (`resolve_log`)
     record["log_dirs"] = [e["log_dir"] for g, e in entries if g["arms"]]
     stopped: BudgetError | None = None
 
@@ -1927,7 +2370,7 @@ def _test(run: StudyRun, record: dict) -> None:
             entry["status"] = "stopped"
             continue
         try:
-            entry["log_files"] = run_group(run, g, tdir, what)
+            entry["log_files"] = [run_relative(run, f) for f in run_group(run, g, tdir, what)]
             entry["status"] = "done"
         except Exception as e:  # noqa: BLE001  (recorded; the other cells still run, and the phase then fails)
             entry |= {"status": "failed", "error": f"{type(e).__name__}: {e}"}
@@ -1951,14 +2394,30 @@ def analysis_available(run: StudyRun) -> bool:
 
 
 def _analyze_inputs(run: StudyRun) -> dict[str, Path]:
+    """Every file the analysis modules read (`ape.analyze_main`, `ape.analyze_g`), so a changed one re-runs the phase:
+    the freeze, the test worlds, the selections and the tuning log, the study's slices of run_plan, models (each
+    group's tier / capability point) and model_costs, and the ledger. The test manifest's cells and the tune manifest
+    are in the params (`_analyze_params`), without the fields a skip rewrites."""
     return {
         "freeze.json": run.freeze_path,
         "build-test/worlds.json": run.phase_dir("build-test") / "worlds.json",
         "config/selected.yaml": run.selected_path,
-        "config/run_plan.yaml": run.config("run_plan.yaml"),
-        "config/model_costs.yaml": run.costs_path,
+        "tune/tuning_log.jsonl": run.phase_dir("tune") / "tuning_log.jsonl",
+        "config/run_plan.yaml": config_input(run.config("run_plan.yaml"), run.study),
+        "config/models.yaml": config_input(run.models_path, run.study),
+        "config/model_costs.yaml": config_input(run.costs_path, run.study),
         "ledger": Config().ledger_path,
     }
+
+
+SKIP_REWRITES = ("status", "skipped_at", "skip_reason", "history")  # what `run_phase` rewrites when it skips a phase
+
+
+def manifest_digest(run: StudyRun, phase: str) -> str | None:
+    """A phase manifest's digest without the fields a skip rewrites (a re-invoked `all` skips the phase and rewrites
+    them, which must not make the analysis stale)."""
+    m = rg.read_manifest(run, phase)
+    return None if m is None else rg._digest({k: v for k, v in m.items() if k not in SKIP_REWRITES})
 
 
 def _analyze_params(run: StudyRun) -> dict:
@@ -1966,6 +2425,7 @@ def _analyze_params(run: StudyRun) -> dict:
     return {
         "test_cells": rg._digest(test.get("cells")),
         "primary_complete": test.get("primary_complete"),
+        "tune_manifest": manifest_digest(run, "tune"),
         "module": run.spec.analysis,
         "implemented": analysis_available(run),
         "code": {f: rg._sha256(ROOT / f) for f in frozen_code(run) if f != "uv.lock"},
@@ -2023,7 +2483,7 @@ def phase_defs(study: str) -> dict[str, rg.Phase]:
             upstream=("build-dev", *(("micro-pilot",) if s.caps else ())), refuse=_refuse_tune,
         ),
         "pilot": rg.Phase(
-            "pilot", _pilot, inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml", "model_costs.yaml") | {"config/selected.yaml": r.selected_path, "config/token_caps.json": r.token_caps_path},
+            "pilot", _pilot, inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml", "model_costs.yaml") | {"config/selected.yaml": r.selected_path, "config/token_caps.json": r.token_caps_path} | _gate_power_input(r),
             params=_pilot_params, projected=_pilot_projected, profile=study_profile, requires=("preflight", "micro-pilot", "tune"), upstream=("micro-pilot", "tune"),
             refuse=_refuse_all(_refuse_frozen("pilot"), _refuse_unbuilt("pilot")),
         ),
@@ -2085,8 +2545,9 @@ def stray_environment(run: StudyRun) -> list[str]:
 def run_environment(run: StudyRun) -> Iterator[None]:
     """As `run_gate.run_environment`, for a study: offline every path under runs/<study>/<id>/work, fake embeddings and
     an OpenAI key that reaches nothing; the run's S7 targets; the test split locked (only build-test unlocks it, for this
-    study); the spend label `<study>/<id>`; the session checkpoint directory; and the KG arm with its knobs. A live
-    shell value for one of the KG knobs that differs from the resolution is refused, never silently overridden."""
+    study); the spend label `<study>/<id>`; the session checkpoint directory; and the KG arm with its knobs and the
+    inherited selections' (`kg_env`). A live shell value for one of those knobs that differs from the resolution is
+    refused, never silently overridden."""
     kg = kg_env(run)
     if not run.offline and (clash := [f"{k}={os.environ[k]} (the gate's verdict sets {v})" for k, v in kg.items() if os.environ.get(k) not in (None, v)]):
         raise PhaseError("the environment sets the KG arm's knobs to other values than the gate run's selection; unset: " + "; ".join(clash))
@@ -2113,7 +2574,7 @@ def _fingerprint(inputs: dict, params: dict, upstream: dict) -> str:
 
 def phase_state(run: StudyRun, name: str) -> dict:
     phase = PHASE_DEFS[run.study][name]
-    inputs = {k: {"path": _show(p), "sha256": rg._sha256(p)} for k, p in phase.inputs(run).items()}
+    inputs = {k: rg._file_entry(p) for k, p in phase.inputs(run).items()}
     params = json.loads(json.dumps(phase.params(run), default=str))
     upstream = {u: (rg.read_manifest(run, u) or {}).get("fingerprint") for u in phase.upstream}
     return {"inputs": inputs, "params": params, "upstream": upstream, "fingerprint": _fingerprint(inputs, params, upstream)}
