@@ -29,6 +29,14 @@ code on its one world.
 
 **Offline caveat:** offline builds use the scripted `perfect_author` and oracle LightRAG indices, so coverage is 1.0 by
 construction. Such a report is marked `offline: true` and is not a quality measurement.
+
+**Other studies' builds (BUILD_PLAN B6).** The main study builds one KG system only (`systems`: APG if the gate is GO,
+LightRAG otherwise), so a cell passes on the systems it built; the gate's report always measures both. Its KG cells
+include the registry families F1 and F2 (`REGISTRY_FAMILIES`), whose knowledge base declares no spec IDs: there APG is
+measured by the authoring report's `fact_coverage` (the share of the KB's facts some leaf carries), and LightRAG by the
+registry identifiers its Escalation Directory renders (escalation codes and the supplier IDs they route to;
+`registry_spec_ids`), which an F2 chain must resolve. F1's segment rules carry no identifiers, so for LightRAG F1 is
+measured on its directory only.
 """
 
 import json
@@ -52,6 +60,9 @@ _TOOL_NAME = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
 _KIND_WORD = re.compile(r"^(?:policy|exception|procedure|tool|rule|memo|sop)\b[\s:#-]*", re.I)
 OFFLINE_NOTE = "offline: scripted perfect_author and oracle LightRAG indices, so coverage is 1.0 by construction; not a quality measurement"
 VERDICTS = ("builder_passes", "fallback_needed", "incomplete")
+SYSTEMS = ("apg", "lightrag")  # the KG systems a build may make; the gate builds and measures both
+SYSTEM_LABELS = {"apg": "APG", "lightrag": "LightRAG"}
+REGISTRY_FAMILIES = ("F1", "F2")  # one supplier-registry KB (worlds/gen_registry.py): no policies, exceptions or procedures
 
 
 # --- identifiers -------------------------------------------------------------------------------------
@@ -106,6 +117,15 @@ def lightrag_entity_ids(store: dict | str) -> set[str]:
     return {normalize_ident(m) for m in SPEC_ID.findall(store if isinstance(store, str) else json.dumps(store))}
 
 
+def registry_spec_ids(world: World) -> list[str]:
+    """A registry world's identifiers in its knowledge base: the escalation codes and supplier IDs of the Escalation
+    Directory's facts (an F2 hop resolves a code to a supplier there). Empty for other families."""
+    if world.family not in REGISTRY_FAMILIES:
+        return []
+    ids = (normalize_ident(m) for f in world.facts.values() if f.kind == "directory" for m in SPEC_ID.findall(f.text))
+    return list(dict.fromkeys(ids))
+
+
 def rendered_spec_ids(world: World, ids: Sequence[str]) -> list[str]:
     """The `ids` the knowledge base actually renders (messy worlds render none: their documents carry no IDs, so an ID
     coverage would measure nothing there; fact coverage does)."""
@@ -137,8 +157,9 @@ def exception_style(world: World) -> str:
     return world.entities.get("exception_style") or "descriptive"
 
 
-def world_quality(world: World, cfg: Config, lightrag_kind: str) -> dict:
-    """Both coverages for one built world, with ID counts so cells can pool them. A missing artifact is recorded in
+def world_quality(world: World, cfg: Config, lightrag_kind: str, systems: Sequence[str] = SYSTEMS) -> dict:
+    """The coverage of each built system (`systems`, default both) for one world, with ID counts so cells can pool
+    them; registry worlds (F1, F2) are measured as the module docstring says. A missing artifact is recorded in
     `errors`, never raised: one unreadable world must not hide the others."""
     row: dict = {
         "world_id": world.id,
@@ -149,7 +170,20 @@ def world_quality(world: World, cfg: Config, lightrag_kind: str) -> dict:
         "errors": [],
     }
     apg_ids, lgr_ids = rendered_spec_ids(world, apg_spec_ids(world)), rendered_spec_ids(world, lightrag_spec_ids(world))
-    row["decisive"] = row["exception_style"] == "descriptive" and bool(apg_ids or lgr_ids)
+    registry = world.family in REGISTRY_FAMILIES and not (apg_ids or lgr_ids)
+    if registry:
+        lgr_ids = rendered_spec_ids(world, registry_spec_ids(world))
+    apg_ids = apg_ids if "apg" in systems else []
+    lgr_ids = lgr_ids if "lightrag" in systems else []
+    row["decisive"] = row["exception_style"] == "descriptive" and bool(apg_ids or lgr_ids or (registry and "apg" in systems and world.facts))
+    if registry and "apg" in systems and world.facts:
+        try:
+            report = json.loads(apg_report_path(cfg, world.id).read_text())
+            cov = float(report["fact_coverage"])
+            n = len(world.facts)
+            row["apg"] = {"ids": n, "covered": round(cov * n), "coverage": cov, "metric": "fact_coverage", "author": report.get("author")}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            row["errors"].append(f"apg: no readable authoring report with a fact_coverage ({type(e).__name__}: {e})")
     if apg_ids:
         try:
             report = json.loads(apg_report_path(cfg, world.id).read_text())
@@ -186,29 +220,33 @@ def _pool(rows: Sequence[dict], system: str) -> dict | None:
     return {"coverage": covered / ids if ids else 1.0, "min_world": min(p["coverage"] for p in parts), "ids": ids, "covered": covered, "worlds": len(parts)}
 
 
-def _cell_summary(rows: Sequence[dict], threshold: float) -> dict:
-    apg, lgr = _pool(rows, "apg"), _pool(rows, "lightrag")
+def _cell_summary(rows: Sequence[dict], threshold: float, systems: Sequence[str] = SYSTEMS) -> dict:
+    """A cell passes when every built system (`systems`) was measured cleanly at or above `threshold`."""
+    pooled = {s: _pool(rows, s) for s in SYSTEMS}
     errors = [f"{r['world_id']}: {e}" for r in rows for e in r["errors"]]
-    passes = not errors and apg is not None and lgr is not None and apg["coverage"] >= threshold and lgr["coverage"] >= threshold
+    passes = not errors and all(pooled[s] is not None and pooled[s]["coverage"] >= threshold for s in systems)
     reasons = list(errors)
+    apg, lgr = pooled["apg"], pooled["lightrag"]
     if apg is not None and apg["coverage"] < threshold:
-        reasons.append(f"APG id_coverage {apg['coverage']:.3f} < {threshold}")
+        metric = "fact_coverage" if any((r["apg"] or {}).get("metric") == "fact_coverage" for r in rows) else "id_coverage"
+        reasons.append(f"APG {metric} {apg['coverage']:.3f} < {threshold}")
     if lgr is not None and lgr["coverage"] < threshold:
         reasons.append(f"LightRAG ID coverage {lgr['coverage']:.3f} < {threshold}")
     return {"worlds": len(rows), "apg": apg, "lightrag": lgr, "pass": passes, "reasons": reasons}
 
 
-def aggregate(rows: Sequence[dict], expected_cells: Sequence[str] = GATE_CELLS, threshold: float = THRESHOLD) -> dict:
+def aggregate(rows: Sequence[dict], expected_cells: Sequence[str] = GATE_CELLS, threshold: float = THRESHOLD, systems: Sequence[str] = SYSTEMS) -> dict:
     """Decisive cells (pooled coverage, pass/fail), diagnostics (other styles and cells; reported only), and the
     verdict: `builder_passes` when every expected cell was measured cleanly and passes, `fallback_needed` when a
-    cleanly measured expected cell fails, otherwise `incomplete`."""
+    cleanly measured expected cell fails, otherwise `incomplete`. `systems`: the KG systems the build made (a cell
+    passes on those; default both, as the gate builds)."""
     decisive = [r for r in rows if r["decisive"]]
-    cells = {c: _cell_summary([r for r in decisive if r["cell"] == c], threshold) for c in dict.fromkeys(r["cell"] for r in decisive)}
+    cells = {c: _cell_summary([r for r in decisive if r["cell"] == c], threshold, systems) for c in dict.fromkeys(r["cell"] for r in decisive)}
     diagnostics: dict[str, dict] = {}
     for r in rows:
         if not r["decisive"] and (r["apg"] is not None or r["lightrag"] is not None or r["errors"]):
             diagnostics.setdefault(f"{r['cell']} ({r['exception_style']})", []).append(r)
-    diag = {k: _cell_summary(v, threshold) for k, v in diagnostics.items()}
+    diag = {k: _cell_summary(v, threshold, systems) for k, v in diagnostics.items()}
     missing = [c for c in expected_cells if c not in cells]
     unreadable = [c for c in expected_cells if c in cells and any(r["errors"] for r in decisive if r["cell"] == c)]
     failing = [c for c in expected_cells if c in cells and c not in unreadable and not cells[c]["pass"]]
@@ -227,13 +265,15 @@ def aggregate(rows: Sequence[dict], expected_cells: Sequence[str] = GATE_CELLS, 
         "unreadable_cells": unreadable,
         "failing_cells": failing,
         "verdict": verdict,
+        "systems": list(systems),
     }
 
 
 def recommendation(agg: dict, builder: str, fallback_builder: str, fallback_usd: float | None, offline: bool) -> str:
     cost = f", +${fallback_usd:,.0f} conservative" if fallback_usd is not None else ""
+    systems = agg.get("systems") or SYSTEMS
     per_cell = "; ".join(
-        f"{c} APG {s['apg']['coverage']:.2f} / LightRAG {s['lightrag']['coverage']:.2f}" for c, s in agg["cells"].items() if s["apg"] and s["lightrag"]
+        f"{c} " + " / ".join(f"{SYSTEM_LABELS[x]} {s[x]['coverage']:.2f}" for x in systems) for c, s in agg["cells"].items() if all(s[x] for x in systems)
     )
     if agg["verdict"] == "builder_passes":
         text = f"{builder} passes the D-017 dev check ({per_cell})"
@@ -258,10 +298,12 @@ def assess(
     fallback_usd: float | None = None,
     expected_cells: Sequence[str] = GATE_CELLS,
     threshold: float = THRESHOLD,
+    systems: Sequence[str] = SYSTEMS,
 ) -> dict:
-    """The full build-quality report for a set of built worlds (see the module docstring)."""
-    rows = [world_quality(w, cfg, lightrag_kind) for w in worlds]
-    agg = aggregate(rows, expected_cells, threshold)
+    """The full build-quality report for a set of built worlds (see the module docstring); `systems`: the KG systems
+    the build made (default both, the gate's)."""
+    rows = [world_quality(w, cfg, lightrag_kind, systems) for w in worlds]
+    agg = aggregate(rows, expected_cells, threshold, systems)
     return {
         "rule": RULE,
         "offline": offline,
@@ -301,29 +343,23 @@ def builder_roles(profile) -> tuple[object, object | None, bool]:
 # --- build health: every build phase (dev, pilot, test) ---------------------------------------------
 
 
-def world_health(world: World, cfg: Config, lightrag_kind: str, threshold: float = THRESHOLD) -> dict:
+def world_health(world: World, cfg: Config, lightrag_kind: str, threshold: float = THRESHOLD, systems: Sequence[str] = SYSTEMS) -> dict:
     """Degradation signals of one built world (RELIABILITY_REVIEW K2): lost chunks in authoring or extraction, and
     coverage below `threshold`. Unlike D-017's verdict (dev only) this runs after every build phase, and it only
-    warns: a degraded world is reported, never silently treated as fine."""
+    warns: a degraded world is reported, never silently treated as fine. Only the KG systems built for the world
+    (`systems`, default both) are checked; a registry world's LightRAG coverage is over `registry_spec_ids`."""
     from .lgr.common import index_dir, read_manifest
 
     row: dict = {"world_id": world.id, "cell": f"{world.family}-{world.level}", "exception_style": exception_style(world), "apg": None, "lightrag": None, "warnings": [], "errors": []}
-    try:
-        report = json.loads(apg_report_path(cfg, world.id).read_text())
-        row["apg"] = {k: report.get(k) for k in ("leaves", "chunks", "chunks_without_units", "lost_chunks", "id_coverage", "fact_coverage", "author")}
-        lost = report.get("lost_chunks") or {}
-        if lost:
-            row["warnings"].append(f"APG: {len(lost)} lost chunk(s) {sorted(lost)[:5]}")
-        for key in ("id_coverage", "fact_coverage"):
-            if report.get(key) is not None and report[key] < threshold:
-                row["warnings"].append(f"APG {key} {report[key]:.3f} < {threshold}")
-    except (OSError, ValueError) as e:
-        row["errors"].append(f"apg: no readable authoring report ({type(e).__name__}: {e})")
+    if "apg" in systems:
+        _apg_health(world, cfg, threshold, row)
+    if "lightrag" not in systems:
+        return row
     try:
         manifest = read_manifest(index_dir(cfg, world.id, lightrag_kind))
         extraction = manifest.get("extraction")
         lgr: dict = {"kind": lightrag_kind, "extraction": extraction, "id_coverage": None}
-        if lgr_ids := rendered_spec_ids(world, lightrag_spec_ids(world)):
+        if lgr_ids := rendered_spec_ids(world, lightrag_spec_ids(world)) or rendered_spec_ids(world, registry_spec_ids(world)):
             names = lightrag_entity_ids(lightrag_entity_file(cfg, world.id, lightrag_kind).read_text())
             lgr["id_coverage"] = id_coverage(lgr_ids, names)
         row["lightrag"] = lgr
@@ -336,9 +372,26 @@ def world_health(world: World, cfg: Config, lightrag_kind: str, threshold: float
     return row
 
 
-def build_health(worlds: Iterable[World], cfg: Config, lightrag_kind: str, *, offline: bool, threshold: float = THRESHOLD) -> dict:
-    """`world_health` for every world of a build phase, with the flagged worlds and their warnings."""
-    rows = [world_health(w, cfg, lightrag_kind, threshold) for w in worlds]
+def _apg_health(world: World, cfg: Config, threshold: float, row: dict) -> None:
+    try:
+        report = json.loads(apg_report_path(cfg, world.id).read_text())
+        row["apg"] = {k: report.get(k) for k in ("leaves", "chunks", "chunks_without_units", "lost_chunks", "id_coverage", "fact_coverage", "author")}
+        lost = report.get("lost_chunks") or {}
+        if lost:
+            row["warnings"].append(f"APG: {len(lost)} lost chunk(s) {sorted(lost)[:5]}")
+        for key in ("id_coverage", "fact_coverage"):
+            if report.get(key) is not None and report[key] < threshold:
+                row["warnings"].append(f"APG {key} {report[key]:.3f} < {threshold}")
+    except (OSError, ValueError) as e:
+        row["errors"].append(f"apg: no readable authoring report ({type(e).__name__}: {e})")
+
+
+def build_health(
+    worlds: Iterable[World], cfg: Config, lightrag_kind: str, *, offline: bool, threshold: float = THRESHOLD, systems: dict[str, Sequence[str]] | None = None
+) -> dict:
+    """`world_health` for every world of a build phase, with the flagged worlds and their warnings. `systems`: world id
+    -> the KG systems built for it (default: both, for every world, as the gate builds)."""
+    rows = [world_health(w, cfg, lightrag_kind, threshold, SYSTEMS if systems is None else systems.get(w.id, ())) for w in worlds]
     flagged = [r for r in rows if r["warnings"] or r["errors"]]
     return {
         "threshold": threshold,
