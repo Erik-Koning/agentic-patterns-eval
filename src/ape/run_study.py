@@ -94,9 +94,9 @@ indices/, cache/, config/, the rehearsal pre-registration and PROVENANCE.freeze.
 
 import argparse
 import contextlib
+import functools
 import importlib
 import importlib.util
-import inspect
 import json
 import math
 import os
@@ -415,17 +415,30 @@ def window(run: StudyRun) -> int:
 # --- Arms --------------------------------------------------------------------------------------------
 
 
+@functools.cache
+def single_agent_arms() -> frozenset[str]:
+    """The single-agent delivery arms `agent.arms` builds: the baselines, S5 (the KG arm), the APG and LightRAG arms."""
+    from .agent.arms import BASELINE_ARMS
+    from .apg.arm import ARMS as APG_ARMS
+    from .lgr.adapter import ARMS as LGR_ARMS
+
+    return frozenset({*BASELINE_ARMS, "S5", *APG_ARMS, *LGR_ARMS})
+
+
 def arm_built(arm: str, kind: str = "agent") -> bool:
-    """Whether `arm` has a solver now: a session arm in `agent.session.SESSION_ARMS`; a multi-agent or ensemble arm
-    registered in `agent.solvers.MULTI_AGENT_ARMS`; every single-agent delivery arm (S1, S3s, S5, S6, S7, APG/LGR arms).
-    Read at call time, so the arms other packages register flow through."""
+    """Whether `arm` has a solver now: a session arm registered as a context policy (`agent.context_policy.POLICIES`,
+    which `agent.session` fills with CM0, O-state and B8's arms) or listed in `agent.session.SESSION_ARMS`; a
+    multi-agent or ensemble arm registered in `agent.solvers.MULTI_AGENT_ARMS`; a single-agent delivery arm
+    (`single_agent_arms`). Anything else, a typo included, is not built. Read at call time, so the arms other packages
+    register flow through."""
     if kind == "session":
+        from .agent.context_policy import POLICIES
         from .agent.session import SESSION_ARMS
 
-        return arm in SESSION_ARMS
-    from .agent.solvers import MULTI_AGENT_ARMS, is_multi_agent
+        return arm in POLICIES or arm in SESSION_ARMS
+    from .agent.solvers import MULTI_AGENT_ARMS
 
-    return not is_multi_agent(arm) or arm in MULTI_AGENT_ARMS
+    return arm in MULTI_AGENT_ARMS or arm in single_agent_arms()
 
 
 def arm_kinds(run: StudyRun, arms: Sequence[str], kind: str) -> tuple[str, ...]:
@@ -812,15 +825,29 @@ def read_selected(run: StudyRun) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
-def selection_env(selected: dict) -> dict[str, str]:
-    """Every selection's knobs together; each must hold only its own arm's knobs."""
+def selection_env(selected: dict) -> dict[str, str] | None:
+    """Every selection's knobs together, as the gate applies them; None when two selections set the same knob (Study G's
+    context-management arms share APE_CM_* knobs, e.g. CM-todo's and CM-reset's todo_extract), so they cannot share
+    one environment: `env_group` then runs each tuned arm in a group of its own, under its own selection's knobs."""
     env: dict[str, str] = {}
-    for key, entry in selected.items():
+    for entry in selected.values():
         knobs = {k: str(v) for k, v in (entry.get("env") or {}).items()}
-        if clash := sorted(set(knobs) & set(env)):
-            raise PhaseError(f"selected.yaml: {key} sets {clash}, which another selection also sets")
+        if set(knobs) & set(env) and any(env[k] != knobs[k] for k in set(knobs) & set(env)):
+            return None
         env |= knobs
     return env
+
+
+def env_group(declared: str, run_arm: str, selected: dict, together: dict[str, str] | None) -> tuple[str, dict[str, str]]:
+    """(group name, env) an arm runs in: S7 apart (`s7`; its schedule knob is added by the caller); with every
+    selection's knobs together when they agree (`selected`, the gate's convention); otherwise a tuned arm alone under
+    its selection's knobs (`sel-<arm>`), and the untuned arms with none (`selected`)."""
+    if run_arm == "S7":
+        return "s7", dict(together or {})
+    if together is not None:
+        return "selected", together
+    own = {k: str(v) for k, v in ((selected.get(declared) or {}).get("env") or {}).items()}
+    return (f"sel-{re.sub(r'[^A-Za-z0-9._-]', '_', declared)}", own) if own else ("selected", {})
 
 
 def b0_from_logs(log_files: Sequence[str], arm: str = CAP_ARM) -> dict[str, dict]:
@@ -905,13 +932,14 @@ def _caps_params(run: StudyRun, phase: str = "test") -> dict:
 
 def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[dict]:
     """Every eval set a run phase runs, in order: per plan cell, the `selected` group (its arms under every selection's
-    knobs together) and, apart, the `s7` group (S7 under the KG arm's schedule). Each group carries its arms (declared
-    and as run), the arms skipped because they are not built, its profile, split, seed block, worlds, epochs and, for
-    agent cells of a capped study, each task cell's token cap. Knobs are not part of Inspect's task identity, so each
-    group has its own log dir, keyed by everything that shapes it."""
+    knobs together), the `s7` group (S7 under the KG arm's schedule) and, where two selections set the same knob, one
+    `sel-<arm>` group per tuned arm (`env_group`). Each group carries its arms (declared and as run), the arms skipped
+    because they are not built, its profile, split, seed block, worlds, epochs and, for agent cells of a capped study,
+    each task cell's token cap. Knobs are not part of Inspect's task identity, so each group has its own log dir, keyed
+    by everything that shapes it."""
     offline = run.offline if offline is None else offline
     selected = read_selected(run) if phase != "micro-pilot" and run.selected_path.is_file() else {}
-    sel_env = selection_env(selected)
+    together = selection_env(selected)
     caps = _caps_params(run, phase)
     split = SPLITS[phase]
     seed_base = split_seed_base(run, split)
@@ -920,10 +948,13 @@ def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[d
     for cell in phase_cells(run, phase):
         s = cell.spec
         by_name: dict[str, list[dict]] = {}
+        envs: dict[str, dict[str, str]] = {}
         for a in rg._arm_names(s["arms"]):
             run_arm = _resolved(a, selected)
-            by_name.setdefault("s7" if run_arm == "S7" else "selected", []).append({"declared": a, "run": run_arm, "built": arm_built(run_arm, cell.kind)})
-        for name in sorted(by_name, key=("selected", "s7").index):
+            name, envs_ = env_group(a, run_arm, selected, together)
+            envs[name] = envs_
+            by_name.setdefault(name, []).append({"declared": a, "run": run_arm, "built": arm_built(run_arm, cell.kind)})
+        for name in sorted(by_name, key=lambda n: (("selected", "s7").index(n) if n in ("selected", "s7") else 2, n)):
             members = by_name[name]
             g: dict[str, Any] = {
                 "cell": cell.id,
@@ -933,7 +964,7 @@ def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[d
                 "primary": cell.phase in run.spec.primary,
                 "arms": [{"declared": a["declared"], "run": a["run"]} for a in members if a["built"]],
                 "skipped": [{"declared": a["declared"], "run": a["run"], "reason": "not built yet"} for a in members if not a["built"]],
-                "env": sel_env | (s7_env(run) if name == "s7" else {}),
+                "env": envs[name] | (s7_env(run) if name == "s7" else {}),
                 "profile": s["profile"],
                 "effort": s.get("effort"),
                 "models": dict(s.get("models") or {}),
@@ -973,17 +1004,37 @@ def group_profile(run: StudyRun, g: dict) -> Profile:
     return cell_profile(run, {"profile": g["profile"], "effort": g.get("effort"), "models": g.get("models")})
 
 
+_GOLD: dict[tuple, Any] = {}
+
+
+def offline_gold(run: StudyRun) -> Any:
+    """The offline agent of agent cells: `llm.mock_multi.GoldMulti` over the run's worlds. It plays every role of every
+    main-study arm from the worlds' gold (single agent, planner, orchestrator, worker, specialist, council member, chair,
+    aggregator; `GoldMulti.kg` the APG classify), so the multi-agent arms run their real plumbing; the naive
+    `mock_agent` would answer at once and never plan or delegate. Offline success is therefore about 100% by
+    construction: a plumbing check, never a result. One instance per world set (the worlds' files and mtimes)."""
+    from .llm.mock_multi import GoldMulti
+
+    root = Config().worlds_dir
+    key = (str(root), tuple(sorted((str(p), p.stat().st_mtime_ns) for p in root.rglob("*.json"))))
+    if key not in _GOLD:
+        _GOLD.clear()
+        _GOLD[key] = GoldMulti(root)
+    return _GOLD[key]
+
+
 def group_models(run: StudyRun, profile: Profile, kind: str) -> tuple[Any, dict[str, Any]]:
-    """Offline: the mock scripts under the profile's settings (`mock_agent` with `mock_kg`, or `mock_session_agent`);
-    live: the profile's models, after the FX-2 preflight (sessions: the `probe` role when the profile sets one)."""
+    """Offline: the mocks under the profile's settings: `offline_gold` (agent cells; its `kg` for the kg role) or the
+    naive `mock_session_agent` (sessions: it also answers management calls, todo extractions, CM-native's mock
+    compaction and probes). Live: the profile's models, after the FX-2 preflight (sessions: the `probe` role when the
+    profile sets one; management calls use the agent's model)."""
     if run.offline:
         if kind == "session":
             from .llm.mock_session import mock_session_agent
 
             return rg._mock_models(profile, {"agent": mock_session_agent})
-        from .llm.mock_agent import mock_agent, mock_kg
-
-        return rg._mock_models(profile, {"agent": mock_agent, "kg": mock_kg})
+        gold = offline_gold(run)
+        return rg._mock_models(profile, {"agent": gold, "kg": gold.kg})
     from .models import agent_model, require_preflight, role_models
 
     require_preflight(profile, live=True, costs_path=run.costs_path, env_path=run.env_path)
@@ -991,16 +1042,11 @@ def group_models(run: StudyRun, profile: Profile, kind: str) -> tuple[Any, dict[
     return agent_model(profile), role_models(profile, roles)
 
 
-def _session_options(**values: Any) -> dict:
-    """The keyword arguments f8_session takes among `values` (B7 adds plan_cell, group, seed_base and skip_worlds)."""
-    from .tasks.study_g import f8_session
+def threshold(run: StudyRun) -> int:
+    """T_abs, the sessions' compaction threshold (run_plan.yaml `study_g.threshold`), passed to every session task."""
+    from .agent.session import plan_threshold
 
-    params = inspect.signature(f8_session).parameters
-    return {k: v for k, v in values.items() if k in params and v is not None}
-
-
-def f8_takes_seed_base() -> bool:
-    return "seed_base" in _session_options(seed_base=0)
+    return int(plan(run).study_g.get("threshold") or plan_threshold())
 
 
 def agent_task(run: StudyRun, *, family: str, level: str, split: str, arm: str, delivery: str = "push", exposure: str = "retrieved", limit_worlds: int | None, seed_base: int, cap: int | None, **labels: Any):
@@ -1014,9 +1060,10 @@ def agent_task(run: StudyRun, *, family: str, level: str, split: str, arm: str, 
 
 
 def session_task(run: StudyRun, *, level: str, split: str, arm: str, limit_worlds: int, variant: str, seed_base: int, **labels: Any):
+    """One F8 session task (`tasks.study_g.f8_session`): the run's seed block, the plan's window and threshold."""
     from .tasks.study_g import f8_session
 
-    return f8_session(level=level, split=split, arm=arm, limit_worlds=limit_worlds, window=window(run), variant=variant, **_session_options(seed_base=seed_base, **labels))
+    return f8_session(level=level, split=split, arm=arm, limit_worlds=limit_worlds, window=window(run), variant=variant, threshold=threshold(run), seed_base=seed_base, **labels)
 
 
 def group_tasks(run: StudyRun, g: dict) -> list:
@@ -1130,6 +1177,37 @@ def _preflight_params(run: StudyRun) -> dict:
     return base_params(run) | {"environment": env, "smoke_checks": list(run.spec.smoke_checks)}
 
 
+NATIVE_ARM = "CM-native"
+
+
+def native_routes(run: StudyRun) -> tuple[dict[str, str], list[str]]:
+    """({where: route}, problems) for every session cell, and tuning-grid candidate, that runs CM-native: its agent
+    model's route (`agent.cm_arms.native_route`: "provider" when the support record confirms native compaction,
+    "mock" for the offline mock). A live model without a confirmed record is a problem."""
+    from .agent.cm_arms import NativeCompactionUnsupported, native_route
+
+    uses: dict[str, str] = {}
+    for phase in ("micro-pilot", "test"):
+        for cell in phase_cells(run, phase):
+            if cell.kind == "session" and NATIVE_ARM in rg._arm_names(cell.spec["arms"]):
+                uses[cell.id] = cell_profile(run, cell.spec).role("agent").model
+    if run.config(run.grid_name).is_file():
+        grid = _load_grid(run)
+        tune = phase_cells(run, "tune")
+        profile = cell_profile(run, tune[0].spec) if tune else study_profile(run)
+        for name, sdef in grid["systems"].items():
+            if any(c["arm"] == NATIVE_ARM for c in sdef["candidates"]):
+                uses[f"{run.grid_name}: {name}"] = profile.role("agent").model
+    routes, problems = {}, []
+    for where, model in uses.items():
+        try:
+            routes[where] = native_route(rg.MOCK if run.offline else model)
+        except NativeCompactionUnsupported as e:
+            routes[where] = "unsupported"
+            problems.append(f"{where}: {e}")
+    return routes, list(dict.fromkeys(problems))
+
+
 def _preflight(run: StudyRun, record: dict) -> None:
     problems: list[str] = []
     checks: dict[str, Any] = {}
@@ -1170,6 +1248,10 @@ def _preflight(run: StudyRun, record: dict) -> None:
         what = "skipped (offline)" if run.offline else "a live run refuses those phases until they are built"
         record["warnings"].append(f"arms not built yet, {what}: " + "; ".join(f"{p}: {a}" for p, a in record["unbuilt_arms"].items()))
     record["warnings"] += [f"KG arm: {n}" for n in kg_resolution(run).get("notes") or []]
+    # 4b. CM-native runs only on a model whose native compaction is confirmed (`agent.cm_arms.native_route`): checked
+    #     here for every model a CM-native cell or grid candidate uses, so a live run refuses now, not per sample.
+    checks["cm_native"], native = native_routes(run)
+    problems += native
     # 5. Live: a passing live smoke of this code (and of the study's own required checks), settled once per run.
     settlement = None
     if not run.offline:
@@ -1790,7 +1872,7 @@ def design_env_changes(run: StudyRun) -> list[str]:
 
 def _refuse_unless_frozen(name: str) -> Callable[[StudyRun], str | None]:
     """build-test and test: frozen, every frozen file unchanged; live also the freeze commit's code, the frozen design
-    knobs and KG resolution, and (Study G) an f8_session that selects the run's own seed block."""
+    knobs and the frozen KG resolution."""
 
     def refuse(run: StudyRun) -> str | None:
         try:
@@ -1808,9 +1890,6 @@ def _refuse_unless_frozen(name: str) -> Callable[[StudyRun], str | None]:
             return f"{name}: design knob(s) differ from the frozen ones: {'; '.join(knobs)}"
         if kg_params(run) != kg_params_of(freeze.get("kg")):
             return f"{name}: the KG resolution differs from the frozen one ({(freeze.get('kg') or {}).get('arm')} from {(freeze.get('kg') or {}).get('source')}): pass the frozen --gate-run-id"
-        sessions = any(c.kind == "session" for c in phase_cells(run, "test"))
-        if sessions and not f8_takes_seed_base() and int(freeze["test_seeds"]["base"]) != seeds(run)["test"][0]:
-            return f"{name}: this run's test block starts at {freeze['test_seeds']['base']}, but tasks.study_g.f8_session cannot select a seed block yet (BUILD_PLAN B7 adds seed_base); it would read another run's sessions"
         return None
 
     return refuse
