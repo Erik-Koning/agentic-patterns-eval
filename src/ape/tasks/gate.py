@@ -23,7 +23,7 @@ from ape.config import Config
 from ape.scorers.success import delivered_evidence, task_success
 from ape.scorers.taxonomy import error_analysis
 from ape.worlds.gen_f7 import EXCEPTION_STYLES
-from ape.worlds.generate import SEED_BLOCK
+from ape.worlds.generate import GATE_SEED_LIMIT, SEED_BLOCK
 from ape.worlds.spec import World
 
 # Arms with a retriever a search_kb tool can call (monolith and oracle context have none).
@@ -57,12 +57,16 @@ def gate_samples(
     """The tasks of the cell's worlds, the first `limit_worlds` by seed after skipping the first `skip_worlds` (the
     pilot's σ cell runs the pilot worlds after those the main pilot uses, D-026). `seed_base` keeps only one run's
     seed block (`seed_base` .. `seed_base` + SEED_BLOCK - 1): a later gate run's test worlds share the directory with
-    an earlier run's."""
+    an earlier run's, and every study's worlds share it too (`worlds.generate` STUDY_SEEDS). Without a block, only the
+    gate's namespace (seeds below GATE_SEED_LIMIT): another study's pilot or test worlds are never the gate's. Worlds
+    are ordered by their seed as a number (as strings, `s12000` would sort before `s2000`)."""
     cfg = Config()
     variant = _variant(family, relational, exception_style)
-    paths = sorted((cfg.worlds_dir / split).glob(f"{family}-{level}{variant}{split}-*.json"))
+    paths = sorted((cfg.worlds_dir / split).glob(f"{family}-{level}{variant}{split}-*.json"), key=lambda p: (_seed(p), str(p)))
     if seed_base is not None:
         paths = [p for p in paths if seed_base <= _seed(p) < seed_base + SEED_BLOCK]
+    else:
+        paths = [p for p in paths if _seed(p) < GATE_SEED_LIMIT]
     if skip_worlds:
         paths = paths[skip_worlds:]
     if limit_worlds:
