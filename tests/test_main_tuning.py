@@ -301,8 +301,7 @@ def test_the_static_checks_catch_what_the_tune_or_the_pilot_would_find_too_late(
 
     assert problems(_edit(grid, "M1k", 1, env={"APE_MAS_M1_PROMPT": "concise"})) == [
         "M1k: candidate m1k-concise: M1k candidates set only M1k's knobs (APE_MAS_M1K_PROMPT, APE_MAS_M1K_CLIP), not APE_MAS_M1_PROMPT",
-        "APE_MAS_M1_PROMPT is set by the candidates of M1, M1k: every selection's knobs apply together, so each system sets only its own",
-    ]
+    ]  # each arm runs under exactly its own selection's knobs (D-042): the arm's own-knob check is the rule, not a shared name
     assert problems(_edit(grid, "M7", 2, env={"APE_MAS_M7_PROMPT": "fancy"})) == ["M7: candidate m7-structured: APE_MAS_M7_PROMPT='fancy' is not a prompt variant (default, concise, structured, verify)"]
     assert problems(_edit(grid, "M2", 0, arm="M1k")) == ["M2: candidate m2-default runs M1k, not M2 (a system's candidates run as the plan arm it is named for)"]
     assert problems(_edit(grid, "S9", 3, id="s9-default")) == ["S9: candidate ids ['s9-default'] are declared more than once"]

@@ -67,10 +67,11 @@ worlds) with `plan_cell`, `group` and `seed_base`, and, in the main study, the c
 `variant` = `gen_f8.variant_tag(knobs)`, `limit_worlds` = sessions, the plan's window and compaction threshold),
 with `plan_cell`, `group` and `seed_base`, and APE_SESSION_CHECKPOINTS points at the run's session_checkpoints/
 directory for B7's mid-session resume. A cell's `profile`, `effort` (the agent's) and `models` choose its models (the
-test manifest records all three per group). A tuned arm (a selection key) runs as its selection, under every
-selection's knobs together (or alone under its own when two selections set one knob differently, `env_group`); S7
-runs in its own group (`s7`) under APE_S7_PER_STEP, mirroring the KG arm's schedule (D-024). The test manifest records
-each group's final log files relative to the run directory (`run_relative`, `resolve_log`).
+test manifest records all three per group). A tuned arm (a selection key) runs as its selection, under its own
+selection's knobs alone, in an eval set of its own (`env_group`, D-042; M1s under M1's, whose knobs it reads), never
+another selection's; S7 runs in its own group (`s7`) under APE_S7_PER_STEP, mirroring the KG arm's schedule (D-024).
+The test manifest records each group's final log files relative to the run directory (`run_relative`,
+`resolve_log`).
 
 Arms not built yet. Offline, a cell's arms without a solver (a multi-agent arm not in `agent.solvers.MULTI_AGENT_ARMS`,
 a session arm neither a context policy nor in `agent.session.SESSION_ARMS`) are skipped and every manifest lists them
@@ -200,7 +201,7 @@ STUDIES = {
         title="Study G",
         phases=("preflight", "build-dev", "micro-pilot", "tune", "freeze", "build-test", "test", "analyze"),
         cells={"micro-pilot": ("micro_pilot",), "tune": ("tuning",), "test": ("capability_anchor", "context_management", "topology")},
-        primary=("capability_anchor", "context_management"),
+        primary=("capability_anchor", "context_management", "topology"),  # G-H3 is confirmatory (D-033, D-042)
         prereg="PREREGISTRATION_G.md",
         analysis="ape.analyze_g",
         analysis_code=("src/ape/analyze_g.py", "src/ape/analysis"),
@@ -905,29 +906,27 @@ def read_selected(run: StudyRun) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
-def selection_env(selected: dict) -> dict[str, str] | None:
-    """Every selection's knobs together, as the gate applies them; None when two selections set the same knob (Study G's
-    context-management arms share APE_CM_* knobs, e.g. CM-todo's and CM-reset's todo_extract), so they cannot share
-    one environment: `env_group` then runs each tuned arm in a group of its own, under its own selection's knobs."""
-    env: dict[str, str] = {}
-    for entry in selected.values():
-        knobs = {k: str(v) for k, v in (entry.get("env") or {}).items()}
-        if set(knobs) & set(env) and any(env[k] != knobs[k] for k in set(knobs) & set(env)):
-            return None
-        env |= knobs
-    return env
+def selection_for(declared: str, selected: dict) -> str | None:
+    """The selection whose knobs a declared plan arm runs under: its own (a tuned arm, a key of selected.yaml), else
+    the selection of the arm whose knobs it reads (`agent.multi.knobs.KNOB_ARM`: M1s reads M1's, D-041), else none."""
+    if declared in selected:
+        return declared
+    from .agent.multi.knobs import KNOB_ARM
+
+    part = KNOB_ARM.get(declared)
+    return next((name for name in selected if part is not None and KNOB_ARM.get(name) == part), None)
 
 
-def env_group(declared: str, run_arm: str, selected: dict, together: dict[str, str] | None) -> tuple[str, dict[str, str]]:
-    """(group name, env) an arm runs in: S7 apart (`s7`; its schedule knob is added by the caller); with every
-    selection's knobs together when they agree (`selected`, the gate's convention); otherwise a tuned arm alone under
-    its selection's knobs (`sel-<arm>`), and the untuned arms with none (`selected`)."""
+def env_group(declared: str, run_arm: str, selected: dict) -> tuple[str, dict[str, str]]:
+    """(group name, env) an arm runs in (D-042: each tuned arm with exactly its own selection's knobs). S7 apart (`s7`;
+    its schedule knob is added by the caller); an arm with a selection that sets knobs, in a group of that selection's
+    alone (`sel-<selection>`, M1s with M1); every other arm (untuned, or a selection without knobs) in `selected`, with
+    no selection's knobs. The study-wide knobs (the KG arm's and the inherited S3s's, `kg_env`) are every phase's."""
     if run_arm == "S7":
-        return "s7", dict(together or {})
-    if together is not None:
-        return "selected", together
-    own = {k: str(v) for k, v in ((selected.get(declared) or {}).get("env") or {}).items()}
-    return (f"sel-{re.sub(r'[^A-Za-z0-9._-]', '_', declared)}", own) if own else ("selected", {})
+        return "s7", {}
+    system = selection_for(declared, selected)
+    own = {k: str(v) for k, v in ((selected.get(system) or {}).get("env") or {}).items()} if system else {}
+    return (f"sel-{re.sub(r'[^A-Za-z0-9._-]', '_', system)}", own) if own else ("selected", {})
 
 
 def b0_from_logs(log_files: Sequence[str], arm: str = CAP_ARM) -> dict[str, dict]:
@@ -1022,15 +1021,14 @@ def _caps_params(run: StudyRun, phase: str = "test") -> dict:
 
 
 def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[dict]:
-    """Every eval set a run phase runs, in order: per plan cell, the `selected` group (its arms under every selection's
-    knobs together), the `s7` group (S7 under the KG arm's schedule) and, where two selections set the same knob, one
-    `sel-<arm>` group per tuned arm (`env_group`). Each group carries its arms (declared and as run), the arms skipped
+    """Every eval set a run phase runs, in order: per plan cell, the `selected` group (its arms with no selection's
+    knobs), the `s7` group (S7 under the KG arm's schedule) and one `sel-<system>` group per selection with knobs, its
+    arm alone under exactly those knobs (`env_group`, D-042). Each group carries its arms (declared and as run), the arms skipped
     because they are not built, its profile, split, seed block, worlds, epochs and, for agent cells of a capped study,
     each task cell's token cap. Knobs are not part of Inspect's task identity, so each group has its own log dir, keyed
     by everything that shapes it."""
     offline = run.offline if offline is None else offline
     selected = read_selected(run) if phase != "micro-pilot" and run.selected_path.is_file() else {}
-    together = selection_env(selected)
     caps = _caps_params(run, phase)
     split = SPLITS[phase]
     seed_base = split_seed_base(run, split)
@@ -1042,7 +1040,7 @@ def run_groups(run: StudyRun, phase: str, offline: bool | None = None) -> list[d
         envs: dict[str, dict[str, str]] = {}
         for a in rg._arm_names(s["arms"]):
             run_arm = _resolved(a, selected)
-            name, envs_ = env_group(a, run_arm, selected, together)
+            name, envs_ = env_group(a, run_arm, selected)
             envs[name] = envs_
             by_name.setdefault(name, []).append({"declared": a, "run": run_arm, "built": arm_built(run_arm, cell.kind)})
         for name in sorted(by_name, key=lambda n: (("selected", "s7").index(n) if n in ("selected", "s7") else 2, n)):
@@ -1551,18 +1549,35 @@ def tuning_signoff_problems(grid: dict) -> list[str]:
     return problems
 
 
-def tune_plan_cells(run: StudyRun) -> list[tuple[str, dict]]:
-    """The study's tuning cells as `tuning.planned_tuning` reads them: (id, spec), a session cell's task cell its F8 cell."""
-    return [(c.id, c.spec if c.kind == "agent" else {**c.spec, "cells": [_f8_cell(c.spec)]}) for c in phase_cells(run, "tune")]
+def cm_candidate_problems(system: str, env: dict[str, str]) -> list[str]:
+    """A Study G candidate's env, for the session arm (system) it tunes: it sets only APE_CM_* knobs that arm's policy
+    reads (`KNOBS`), with values the policy takes (`resolve_knobs`, `validate`: e.g. S-CM*'s stack). Other systems may
+    set the same knob names: each tuned arm runs under exactly its own selection's knobs (D-042)."""
+    from .agent.context_policy import KNOB_ENV_PREFIX, policy_class, resolve_knobs
+
+    try:
+        cls = policy_class(system)
+    except ValueError as e:
+        return [str(e)]
+    problems = [f"{k} is not an {KNOB_ENV_PREFIX}* knob" for k in env if not k.startswith(KNOB_ENV_PREFIX)]
+    if foreign := sorted(k for k in env if k.startswith(KNOB_ENV_PREFIX) and k.removeprefix(KNOB_ENV_PREFIX).lower() not in cls.KNOBS):
+        problems.append(f"{system} reads none of {foreign} (its knobs: {sorted(cls.KNOBS)})")
+    try:
+        cls.validate(resolve_knobs(cls, {k: str(v) for k, v in env.items()}))
+    except ValueError as e:
+        problems.append(f"{system} rejects {dict(env)}: {e}")
+    return problems
 
 
 def grid_problems(run: StudyRun) -> list[str]:
     """`tuning.study_grid_problems` on the study's whole grid (as declared, not the offline cut), against what its
-    run_plan tuning cells price, with the multi-agent arms' knob check (`agent.multi.knobs.candidate_problems`)."""
+    run_plan tuning cells price, with each study's own-knob check (main: `agent.multi.knobs.candidate_problems`;
+    Study G: `cm_candidate_problems`)."""
     from .agent.multi.knobs import candidate_problems
     from .tuning import planned_tuning, study_grid_problems
 
-    return study_grid_problems(_load_grid(run), planned_tuning(tune_plan_cells(run)), candidate_problems)
+    check = cm_candidate_problems if run.study == "study_g" else candidate_problems
+    return study_grid_problems(_load_grid(run), planned_tuning((c.id, c.spec) for c in phase_cells(run, "tune")), check)
 
 
 def _refuse_tune(run: StudyRun) -> str | None:
@@ -1645,7 +1660,7 @@ def _tune(run: StudyRun, record: dict) -> None:
     header = (
         f"# Dev-tuned selections ({run.spec.title}), written by `python -m ape.run_study tune --study {run.study} --run-id {run.run_id}`"
         f"{' (OFFLINE: mock models)' if run.offline else ''}{' from a PLACEHOLDER grid' if grid.get('placeholder') else ''}.\n"
-        "# A plan arm named by a key runs as its selection; every selection's knobs apply together.\n"
+        "# A plan arm named by a key runs as its selection, under exactly its own selection's knobs (D-042).\n"
     )
     text = header + yaml.safe_dump(selected, sort_keys=False)
     for path in (tdir / "selected.yaml", run.selected_path):

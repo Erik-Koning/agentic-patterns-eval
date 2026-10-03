@@ -395,13 +395,15 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
     targets = json.loads(run.s7_targets_path.read_text())
     assert set(targets) == {"F3-5", "F3-60", "F7-10", "F7-1000"} and all(t > 0 for t in targets.values())
     seen, records = set(), {}
-    together = run_study.selection_env(selected) or {}
     for f in sorted((run.dir / "test").rglob("*.eval")):
         log = read_eval_log(str(f))
         args, md = log.eval.task_args, log.eval.metadata
         assert log.status == "success" and log.eval.model == "mockllm/model" and not any(s.error for s in log.samples)
         assert args["seed_base"] == STUDY_SEEDS["main"]["offline_test"] and args["split"] == "test" and args["plan_cell"] == md["plan_cell"]
-        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and together is not None and all(md["knobs"].get(k) == v for k, v in together.items()), "every selection's knobs"
+        own = (selected.get(run_study.selection_for(args["arm"], selected)) or {}).get("env") or {}
+        assert md["knobs"]["APE_KG_ARM"] == "APG-s" and all(md["knobs"].get(k) == v for k, v in own.items()), "its own selection's knobs"
+        others = {k for sel in selected.values() for k in sel["env"]} - set(own)
+        assert not others & set(md["knobs"]), f"{args['arm']} runs with no other selection's knobs (D-042)"
         if args["arm"] == "S7":
             assert args["group"] == "s7" and md["knobs"]["APE_S7_PER_STEP"] == "1", "S7 mirrors the per-step KG arm"
         seen.add((args["plan_cell"], args["arm"]))
@@ -462,7 +464,7 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     assert {"F8-40-test-s29000", "F8-24-o1750-test-s29000", "F8-20-o2250-test-s29000", "F7-10-rel-desc-test-s29000", "F3-5-test-s29000"} <= worlds
     assert {w["world_id"] for w in json.loads((run.phase_dir("build-dev") / "worlds.json").read_text())["worlds"]} == {"F8-40-dev-s1000"}
     assert set(yaml.safe_load(run.selected_path.read_text())) == set(run_study.study_grid(run)[0]["systems"])
-    assert "CM-trim: no run_plan.yaml tuning cell prices it" in _manifest(run, "tune")["grid_problems"], "the placeholder grid's problems, recorded offline"
+    assert _manifest(run, "tune")["grid_problems"] == run_study.grid_problems(run), "the grid's problems, recorded offline (a live tune refuses)"
     assert _manifest(run, "micro-pilot")["operational_env"]["APE_SESSION_CHECKPOINTS"] == str(run.session_checkpoints_dir)
 
 
@@ -774,27 +776,35 @@ def test_a_live_tune_refuses_a_grid_that_breaks_the_tuning_rules(clean_env, monk
     assert run_study._refuse_tune(StudyRun("main", "tune", offline=True, runs_root=clean_env / "runs")) is None
 
 
-def test_selections_that_set_the_same_knob_run_in_eval_sets_of_their_own(clean_env):
-    """Study G's CM arms share APE_CM_* knobs: when two selections set one differently they cannot share an environment
-    (knobs are not Inspect task args), so each tuned arm runs alone under its own selection; otherwise every selection's
-    knobs apply together, as in the gate."""
+def test_each_tuned_arm_runs_with_exactly_its_own_selections_knobs(clean_env):
+    """D-042: Study G's CM knobs share one namespace (APE_CM_PRUNE_KEEP is CM-prune's and S-CM*'s; CM-todo and CM-reset
+    both read todo_extract), so each tuned arm runs in an eval set of its own under its own selection's knobs alone,
+    and the untuned arms under none; two selections setting one knob name never refuse."""
     run = StudyRun("study_g", "groups", offline=True, runs_root=clean_env / "runs")
-    agree = {"CM-todo": {"arm": "CM-todo", "env": {"APE_CM_TODO_EXTRACT": "false"}}, "S-CM*": {"arm": "S-CM*", "env": {"APE_CM_STACK": "trim+todo"}}}
-    assert run_study.selection_env(agree) == {"APE_CM_TODO_EXTRACT": "false", "APE_CM_STACK": "trim+todo"}
-    clash = agree | {"CM-reset": {"arm": "CM-reset", "env": {"APE_CM_TODO_EXTRACT": "true", "APE_CM_RESET_EVERY": "3"}}}
-    assert run_study.selection_env(clash) is None
+    selected = {
+        "CM-prune": {"arm": "CM-prune", "env": {"APE_CM_PRUNE_KEEP": "5"}},
+        "CM-sum": {"arm": "CM-sum", "env": {"APE_CM_SUM_RATIO": "0.3"}},
+        "CM-todo": {"arm": "CM-todo", "env": {"APE_CM_TODO_EXTRACT": "false"}},
+        "CM-reset": {"arm": "CM-reset", "env": {"APE_CM_TODO_EXTRACT": "true", "APE_CM_RESET_EVERY": "3"}},
+        "S-CM*": {"arm": "S-CM*", "env": {"APE_CM_STACK": "trim+todo"}},
+    }
     run.out_config_dir.mkdir(parents=True)
-    run.selected_path.write_text(yaml.safe_dump(clash))
+    run.selected_path.write_text(yaml.safe_dump(selected))
     groups = {(g["cell"], g["name"]): g for g in run_study.run_groups(run, "test")}
     cm = {name: g for (cell, name), g in groups.items() if cell == "g.cm.luna-high"}
-    assert set(cm) == {"selected", "sel-CM-todo", "sel-CM-reset"}
-    assert cm["sel-CM-reset"]["env"] == {"APE_CM_TODO_EXTRACT": "true", "APE_CM_RESET_EVERY": "3"} and [a["run"] for a in cm["sel-CM-reset"]["arms"]] == ["CM-reset"]
-    assert cm["sel-CM-todo"]["env"] == {"APE_CM_TODO_EXTRACT": "false"} and cm["selected"]["env"] == {}
-    assert {a["run"] for a in cm["selected"]["arms"]} == {"CM0", "CM-prune", "CM-sum", "CM-native", "O-state"}
-    assert groups[("g.topo.luna", "sel-S-CM_")]["env"] == {"APE_CM_STACK": "trim+todo"}, "a key's odd characters stay out of the dir name"
-    run.selected_path.write_text(yaml.safe_dump(agree))
-    together = [g for g in run_study.run_groups(run, "test") if g["cell"] == "g.cm.luna-high"]
-    assert [g["name"] for g in together] == ["selected"] and together[0]["env"] == run_study.selection_env(agree)
+    assert set(cm) == {"selected", "sel-CM-prune", "sel-CM-sum", "sel-CM-todo", "sel-CM-reset"}
+    for name in ("CM-prune", "CM-sum", "CM-todo", "CM-reset"):
+        assert cm[f"sel-{name}"]["env"] == selected[name]["env"] and [a["run"] for a in cm[f"sel-{name}"]["arms"]] == [name]
+    assert cm["selected"]["env"] == {} and {a["run"] for a in cm["selected"]["arms"]} == {"CM0", "CM-native", "O-state"}, "untuned: no selection's knobs"
+    scm = groups[("g.topo.luna", "sel-S-CM_")]
+    assert scm["env"] == {"APE_CM_STACK": "trim+todo"} and "APE_CM_PRUNE_KEEP" not in scm["env"], "S-CM* sees none of CM-prune's knobs"
+    assert groups[("g.topo.luna", "selected")]["env"] == {} and {a["run"] for a in groups[("g.topo.luna", "selected")]["arms"]} == {"S1", "M1", "M2"}
+    # The main study: M1s runs under M1's selection (it reads M1's knobs, D-041), with M1, never another arm's.
+    main_sel = {"M1": {"arm": "M1", "env": {"APE_MAS_M1_PROMPT": "concise"}}, "M7": {"arm": "M7", "env": {"APE_MAS_M7_PROMPT": "verify"}}, "S9": {"arm": "S9", "env": {}}}
+    assert run_study.env_group("M1s", "M1s", main_sel) == ("sel-M1", {"APE_MAS_M1_PROMPT": "concise"})
+    assert run_study.env_group("M7", "M7", main_sel) == ("sel-M7", {"APE_MAS_M7_PROMPT": "verify"})
+    assert run_study.env_group("S9", "S9", main_sel) == ("selected", {}) and run_study.env_group("S1", "S1", main_sel) == ("selected", {})
+    assert run_study.env_group("S7", "S7", main_sel) == ("s7", {}), "S7's group carries only its schedule knob"
 
 
 def test_the_budget_guard_counts_the_studys_allocation(clean_env, monkeypatch):
