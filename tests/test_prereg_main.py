@@ -20,11 +20,10 @@ from ape.run_study import PhaseError, StudyRun, read_freeze, run_phases
 PREREG = ROOT / "PREREGISTRATION_MAIN.md"
 BEGIN = "<!-- BEGIN GENERATED: main_hypotheses.render_hypothesis_table() -->\n"
 END = "<!-- END GENERATED: main_hypotheses.render_hypothesis_table() -->"
-# Labels the pre-registration uses that `run_study`'s pilot does not put in pilot.json's `prereg_items` yet: the D-039
-# cap multiple (its cap-hit gate lands with the B1 integration) and the power re-simulation at the gate pilot's σ
-# (PREREGISTRATION_MAIN §2.6). Until the runner fills them the analyst transcribes them, and an offline rehearsal fills
-# them as "unfilled". Remove a label here once the runner writes it.
-PENDING_RUNNER_LABELS = {"cap multiple", "pilot σ and power"}
+# Labels the pre-registration uses that `run_study`'s pilot does not put in pilot.json's `prereg_items` yet (none: the
+# B1 integration writes the D-039 cap multiple and the power re-simulation at the gate pilot's σ, §2.6). A label added
+# here is transcribed by the analyst, and an offline rehearsal fills it as "unfilled".
+PENDING_RUNNER_LABELS: set[str] = set()
 # The decisions PREREGISTRATION_MAIN leaves to the user: the role names (§5; O-3). A new `[USER: …]` item is a new
 # pending decision: add it here deliberately.
 USER_DECISIONS = {"M-arm prompt author", "skeptic", "analyst"}
@@ -155,6 +154,7 @@ def test_a_live_freeze_refuses_the_draft_naming_every_marker_and_freezes_it_fill
     run_study.write_caps(run.token_caps_path, {"F1-2": {"b0": 100.0, "samples": 2}}, "micro-pilot")
     run_study.write_caps(run.pilot_caps_path, {}, "pilot")
     (run.out_config_dir / "s7_targets.json").write_text(json.dumps({"F7-10": 120}))
+    run_gate._write_json(run.cap_gate_path, {"multiple": 8, "over": {}, "passed": True, "rates": {}, "rounds": []})  # the pilot's D-039 gate passed
     run_study._check_mode(run)
     run_gate._write_json(run.manifest_path("preflight"), {"phase": "preflight", "status": "done", "fingerprint": "fake", "finished": "2026-10-01T00:00:00+00:00", "outputs": {}})
     for phase in run.spec.rests_on:  # every phase the freeze rests on, done and current

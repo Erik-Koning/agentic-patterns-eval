@@ -551,6 +551,52 @@ def test_the_pilot_cap_hit_gate_measures_every_arm_and_the_freeze_records_its_mu
     freeze = read_freeze(run)
     assert freeze["cap_multiple"] == 8 and freeze["cap_gate"]["rates"] == gate["rates"] and freeze["cap_gate"]["passed"] is True
     assert "config/cap_gate.json" in freeze["files"] and run_study.read_cap_gate(run) == (gate, [])
+    # The pre-registration's pilot items, the cap multiple and the power re-simulation (no gate run offline: priors).
+    items = json.loads((run.phase_dir("pilot") / "pilot.json").read_text())["prereg_items"]
+    assert {"token caps", "cap multiple", "S7 targets per cell", "KG arm", "pilot σ and power"} == set(items)
+    assert items["cap multiple"].startswith("8 (D-039; no arm over 10% cap hits on the pilot")
+    assert items["pilot σ and power"].startswith("σ_w 0.500, σ_g 0.300 from the gate's priors (no gate run)") and "Full table:" in items["pilot σ and power"]
+    power = json.loads((run.phase_dir("pilot") / "power.json").read_text())
+    assert power["key"]["reps"] == run_study.OFFLINE_POWER["reps"] and set(power["power"]["families"]) and pilot["outputs"]["power"]
+
+
+def test_the_power_resimulation_takes_the_gate_pilots_sigma_and_is_reused(clean_env, monkeypatch):
+    """PREREGISTRATION_MAIN §2.6: σ_w and σ_g from the gate run's pilot (`pilot/power.json`, `variance_components`),
+    the priors otherwise, saying which; the re-simulation is reused while its inputs stand."""
+    from ape.analysis import main_power
+
+    runs = clean_env / "runs"
+    gdir = _fake_gate_run(runs, "g-go", "GO")
+    run = StudyRun("main", "pw", runs_root=runs, gate_run_id="g-go")
+    vc, source, path = run_study.gate_pilot_sigma(run)
+    assert vc is None and path is None and "missing" in source and run_study._gate_power_input(run) == {}
+    run_gate._write_json(gdir / "pilot" / "power.json", {"variance_components": {"estimable": False, "reason": "too few worlds"}})
+    assert "could not estimate σ_w and σ_g: too few worlds" in run_study.gate_pilot_sigma(run)[1]
+    good = {"estimable": True, "sigma_w": 0.42, "sigma_g": 0.21, "worlds_per_cell": {"F7-10": 8, "F3-5": 8}}
+    run_gate._write_json(gdir / "pilot" / "power.json", {"variance_components": good})
+    vc, source, path = run_study.gate_pilot_sigma(run)
+    assert vc == good and source.startswith("gate run g-go's pilot (") and source.endswith("; 8 worlds per cell)") and path == gdir / "pilot" / "power.json"
+    assert run_study._gate_power_input(run) == {"gate/pilot/power.json": path}, "a pilot input: a changed σ re-runs the pilot"
+    calls = []
+
+    def fake_table(reps, seed, sigmas, settings, sizes=None):
+        calls.append((reps, sigmas.w, sigmas.g, settings.flip_reps))
+        return {"families": {"K1": {"scenarios": [
+            {"scenario": "null", "nulls": ["K1.F7-1000"], "members": {"K1.F7-1000": 0.02}, "false_claims": 0.021},
+            {"scenario": "+0.10", "nulls": [], "members": {"K1.F7-1000": 0.71}, "false_claims": None},
+            {"scenario": "+0.15", "nulls": [], "members": {"K1.F7-1000": 0.93}, "false_claims": None},
+        ]}}}  # fmt: skip
+
+    monkeypatch.setattr(main_power, "power_table", fake_table)
+    record: dict = {"outputs": {}, "warnings": []}
+    out = run_study._pilot_power(run, record)
+    assert calls == [(run_study.POWER_REPS, 0.42, 0.21, main_power.Settings().flip_reps)] and out["sigmas"]["w"] == 0.42
+    assert out["summary"].startswith("σ_w 0.420, σ_g 0.210 from gate run g-go's pilot") and "K1.F7-1000 0.71-0.93" in out["summary"] and "K1 0.021" in out["summary"]
+    run_study._pilot_power(run, record)
+    assert len(calls) == 1, "reused while σ, replicates, seed and sizes stand"
+    run_gate._write_json(gdir / "pilot" / "power.json", {"variance_components": good | {"sigma_w": 0.6}})
+    run_study._pilot_power(run, record)
+    assert len(calls) == 2 and calls[-1][1] == 0.6
 
 
 def _cap_gate_pilot(clean_env, monkeypatch, *, offline: bool, hits, remaining: float = 1e6):
@@ -889,10 +935,9 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
     _fake_current(run)
     monkeypatch.setattr(run_gate, "git_tracked_changes", lambda: [])
 
-    # 1. The placeholder pre-registration (and no analysis module, nor the pilot's cap-hit gate) blocks the live
-    #    freeze; nothing is frozen.
-    monkeypatch.setattr(run_study, "analysis_available", lambda r: False)
-    with pytest.raises(PhaseError, match=r"(?s)unfilled item\(s\).*\[USER: main-study pre-registration.*analysis not implemented.*cap-hit gate \(D-039\) has not run"):
+    # 1. The draft pre-registration (its [USER: ...] items) and the missing cap-hit gate block the live freeze;
+    #    nothing is frozen.
+    with pytest.raises(PhaseError, match=r"(?s)unfilled item\(s\).*\[USER: .*cap-hit gate \(D-039\) has not run"):
         run_phases(run, "freeze")
     assert read_freeze(run) is None and json.loads(run.manifest_path("freeze").read_text())["status"] == "failed"
 
@@ -1074,4 +1119,4 @@ def test_a_short_budget_stops_the_test_after_the_primary_cells(offline, monkeypa
     statuses = {c: x["status"] for c, x in m["cells"].items()}
     primary = ["main.A.s1-pool", "main.A.arms", "main.A.m1s", "main.B.s1-pool", "main.B.arms"]
     assert list(statuses)[:5] == primary, "the primary phases' cells first"
-    assert statuses == dict.fromkeys(primary, "done") | dict.fromkeys(["main.C.a", "main.C.b", "main.F.luna", "main.F.luna-f7-100", "main.F.sol", "main.F.sol-m2"], "stopped")
+    assert statuses == dict.fromkeys(primary, "done") | dict.fromkeys(["main.C.a", "main.C.b", "main.C.s8", "main.F.luna", "main.F.luna-f7-100", "main.F.sol", "main.F.sol-m2"], "stopped")

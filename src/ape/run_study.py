@@ -33,6 +33,9 @@ Phases (`all` runs a study's in order and stops at the first failure; a failed o
                  10% (PC5), the multiple doubles for every arm (8 -> 16 -> 32) and that arm's pilot cells re-run under
                  the new caps (its projection includes both re-runs for every arm) -> config/cap_gate.json, whose final
                  multiple the test applies. Offline, only token-cap hits count (the mocks' turn-cap runs are reported).
+                 Then the power re-simulation at the gate pilot's σ (PREREGISTRATION_MAIN §2.6, `_pilot_power`) ->
+                 pilot/power.json; pilot.json's `prereg_items` give the token caps, the cap multiple, the S7 targets,
+                 the KG arm and "pilot σ and power".
     freeze       the study's pre-registration (`Study.prereg`) has no `[PILOT` / `[USER` marker left (offline: a
                  rehearsal on a filled copy), the tree is committed, the analysis entry point exists and every phase the
                  freeze rests on is current. It hashes the pre-registration, the config inputs (the shared run_plan,
@@ -139,6 +142,9 @@ OFFLINE_SCALE = {"worlds_per_cell": 1, "tasks_per_world": 2, "sessions": 1, "epo
 CAP_MULTIPLE = 8  # ORCHESTRATOR_BRIEF_v2 §4.5: C_max = 8 x B0 total tokens, one cap for every arm
 CAP_DOUBLINGS = 2  # D-039: the pilot's cap-hit gate doubles the multiple at most twice (8 -> 16 -> 32)
 CAP_HIT_MAX = 0.10  # D-039: PC5's cap-hit threshold (`analysis.gate_stats.MAX_CAP_HIT_RATE`), per arm and task cell
+POWER_REPS = 1000  # PREREGISTRATION_MAIN §2.6: the pilot's power re-simulation (about 20 min of CPU, no API calls)
+POWER_SEED = 20261003  # main_power's default seed, as the pre-registration's command uses it
+OFFLINE_POWER = {"reps": 2, "flip_reps": 100}  # the rehearsal checks the plumbing, not the numbers
 CAP_ARM = "S1"  # B0 is S1's realized total tokens
 KG_ARMS = ("S5", "M1k", "M2")  # agent arms that read the KG (the gate-selected arm, APE_KG_ARM); session arms read none yet
 ARM_KINDS = {"S3s": ("chunks",)}  # other artifacts an arm reads (S3s embeds the shared chunks); the KG arms read the KG
@@ -1734,8 +1740,13 @@ def _pilot(run: StudyRun, record: dict) -> None:
         record["outputs"] |= {"measured": _show(run.measured_out_path)}
     summary["harness"] = _harness(run, record, groups, "pilot")
     multiple = cap_multiple(run)
+    gate = summary.get("cap_gate") or {}
+    raised = [f"{r['multiple']} x B0 for {', '.join(f'{a} {c}' for a, c in r['over'].items())}" for r in gate.get("rounds", []) if r.get("over")]
+    summary["power"] = _pilot_power(run, record)
     summary["prereg_items"] = {
-        "token caps": f"{multiple} x S1's B0{f' (D-039: raised from {CAP_MULTIPLE})' if multiple != CAP_MULTIPLE else ''}: " + (", ".join(f"{c} {v['cap']}" for c, v in token_caps(run).items()) or "none"),
+        "token caps": ", ".join(f"{c} {v['cap']}" for c, v in token_caps(run).items()) or "none",
+        "cap multiple": f"{multiple} (D-039; " + (f"raised from {CAP_MULTIPLE}: over {CAP_HIT_MAX:.0%} cap hits at {'; '.join(raised)}" if raised else f"no arm over {CAP_HIT_MAX:.0%} cap hits on the pilot") + (f"; still over at {multiple}: {gate['over']}" if gate.get("over") else "") + "; config/cap_gate.json)",
+        "pilot σ and power": summary["power"]["summary"],
         "S7 targets per cell": ", ".join(f"{c} {t}" for c, t in targets.items()) or "none",
         "KG arm": f"{kg_resolution(run).get('arm')} ({kg_resolution(run).get('source')})",
     }
@@ -1858,9 +1869,78 @@ def _cap_gate(run: StudyRun, record: dict, groups: list[dict]) -> tuple[dict, li
     return gate, [f for fs in latest_logs.values() for f in fs]
 
 
+def gate_pilot_sigma(run: StudyRun) -> tuple[dict | None, str, Path | None]:
+    """(variance components, where they came from, the file) for the main study's power re-simulation
+    (PREREGISTRATION_MAIN §2.6): the gate run's pilot (`runs/<gate run>/pilot/power.json`, `variance_components`, 8
+    worlds per F3/F7 cell, D-026), since the main pilot's 2 worlds per cell cannot estimate σ_w and σ_g. None (the
+    gate's priors) when there is no gate run, no such file, or the gate's pilot could not estimate them; the source says
+    which."""
+    kg = kg_resolution(run)
+    gid = kg.get("gate_run") or run.gate_run_id
+    if not gid:
+        return None, "the gate's priors (no gate run)", None
+    gate = rg.GateRun(gid, offline=bool(kg.get("gate_offline", run.offline)), runs_root=run.gate_runs_root)
+    path = gate.phase_dir("pilot") / "power.json"
+    if not path.is_file():
+        return None, f"the gate's priors ({_show(path)} missing)", None
+    vc = (json.loads(path.read_text()) or {}).get("variance_components")
+    if not vc or not vc.get("estimable"):
+        return vc, f"the gate's priors (gate run {gid}'s pilot could not estimate σ_w and σ_g: {(vc or {}).get('reason', 'no variance components')})", path
+    worlds = sorted(set((vc.get("worlds_per_cell") or {}).values()))
+    return vc, f"gate run {gid}'s pilot ({_show(path)}; {'/'.join(map(str, worlds)) or '?'} worlds per cell)", path
+
+
+def _pilot_power(run: StudyRun, record: dict) -> dict:
+    """The power re-simulation at the gate pilot's σ (PREREGISTRATION_MAIN §2.6; `analysis.main_power.power_table`, the
+    pre-registration's command run in-process, at the run's plan sizes) -> pilot/power.json, reused while its inputs
+    (σ, replicates, seed, sizes) stand. Offline a couple of coarse replicates check the plumbing. Returns the source,
+    the σ and a one-line summary for the pre-registration ("pilot σ and power"): each confirmatory member's power over
+    its power scenarios, and the family-wise false-claim rates at the null boundary."""
+    from dataclasses import asdict as as_dict
+
+    from .analysis import main_power as mp
+
+    vc, source, path = gate_pilot_sigma(run)
+    sig = mp.sigmas_from_pilot(vc)
+    reps, flips = (OFFLINE_POWER["reps"], OFFLINE_POWER["flip_reps"]) if run.offline else (POWER_REPS, mp.Settings().flip_reps)
+    sizes = mp.planned_sizes(run.config("run_plan.yaml"), run.models_path)
+    key = {"sigmas": as_dict(sig), "reps": reps, "flip_reps": flips, "seed": POWER_SEED, "sizes": rg._digest({str(k): v for k, v in sizes.items()})}
+    out = run.phase_dir("pilot") / "power.json"
+    old = json.loads(out.read_text()) if out.is_file() else {}
+    if old.get("key") == key:
+        table = old["power"]
+    else:
+        print(f"[pilot] power re-simulation: {reps} replicates at σ_w {sig.w:.3f}, σ_g {sig.g:.3f} ({source})", flush=True)
+        table = mp.power_table(reps, POWER_SEED, sig, mp.Settings(flip_reps=flips), sizes=sizes)
+        rg._write_json(out, {"key": key, "source": source, "variance_components": vc, "power": table})
+    record["outputs"] |= {"power": _show(out)}
+    members: dict[str, list[float]] = {}
+    false_claims = {}
+    for fam, f in table["families"].items():
+        for r in f["scenarios"]:
+            for m, p_ in r["members"].items():
+                if m not in r["nulls"]:
+                    members.setdefault(m, []).append(float(p_))
+            if r["nulls"] and r.get("false_claims") is not None:
+                false_claims[fam] = max(false_claims.get(fam, 0.0), float(r["false_claims"]))
+    power = "; ".join(f"{m} {min(v):.2f}-{max(v):.2f}" for m, v in members.items())
+    text = (
+        f"σ_w {sig.w:.3f}, σ_g {sig.g:.3f} from {source}. Power over each member's planned effects ({reps} replicates"
+        f"{', OFFLINE: coarse' if run.offline else ''}): {power or 'none'}. Largest false-claim rate per family at the null "
+        f"boundary: {', '.join(f'{k} {v:.3f}' for k, v in false_claims.items()) or 'none'}. Full table: {_show(out)}"
+    )
+    return {"source": source, "file": _show(path) if path else None, "sigmas": as_dict(sig), "reps": reps, "summary": text}
+
+
 def _pilot_params(run: StudyRun) -> dict:
     gate = {"base": CAP_MULTIPLE, "doublings": CAP_DOUBLINGS, "threshold": CAP_HIT_MAX, "rule": cap_gate_rule(run)} if run.spec.caps else None
     return _build_params(run, "pilot") | {"groups": group_params(run_groups(run, "pilot")), "caps": _caps_params(run, "pilot"), "s7_env": s7_env(run) if kg_resolution(run).get("needed") else None, "cap_gate": gate}
+
+
+def _gate_power_input(run: StudyRun) -> dict[str, Path]:
+    """The gate run's pilot power file, whose σ the power re-simulation uses (`gate_pilot_sigma`), when there is one."""
+    _, _, path = gate_pilot_sigma(run)
+    return {"gate/pilot/power.json": path} if path is not None else {}
 
 
 def _pilot_projected(run: StudyRun) -> float:
@@ -2403,7 +2483,7 @@ def phase_defs(study: str) -> dict[str, rg.Phase]:
             upstream=("build-dev", *(("micro-pilot",) if s.caps else ())), refuse=_refuse_tune,
         ),
         "pilot": rg.Phase(
-            "pilot", _pilot, inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml", "model_costs.yaml") | {"config/selected.yaml": r.selected_path, "config/token_caps.json": r.token_caps_path},
+            "pilot", _pilot, inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml", "model_costs.yaml") | {"config/selected.yaml": r.selected_path, "config/token_caps.json": r.token_caps_path} | _gate_power_input(r),
             params=_pilot_params, projected=_pilot_projected, profile=study_profile, requires=("preflight", "micro-pilot", "tune"), upstream=("micro-pilot", "tune"),
             refuse=_refuse_all(_refuse_frozen("pilot"), _refuse_unbuilt("pilot")),
         ),
