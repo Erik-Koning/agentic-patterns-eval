@@ -13,8 +13,9 @@ per-session value (a paired difference, a linear form of several arms, or a line
   a pooled mean it reproduces `gate_stats.cluster_t` (tests).
 - **Sign-flip** (`flip_test`): the wild sign-flip with null-restricted residuals: the per-point means are moved to
   the nearest values satisfying the null, residuals are flipped per world, and the studentised statistic is
-  recomputed. All 2^G sign vectors are enumerated up to G = 16 (an exact test for a single point), so the minimum
-  attainable one-sided p is 2^−G: 4 sessions cannot go below 0.0625. Random flips above that.
+  recomputed. All 2^G sign vectors are enumerated while 2^G ≤ 8 × the resamples (up to G = 16 at the report's
+  10,000; an exact test for a single point), random sign vectors above that. No sign-flip over G sessions can go
+  below 2^−G: 4 sessions cannot go below 0.0625.
 - **Bootstrap** (`bootstrap`): worlds resampled (within point when no world is shared), percentile intervals;
   reported, never decisive (the gate found it anti-conservative with few clusters).
 - **Ratios** (`ratio`): R = N / D of two linear combinations, with the delta-method interval, Fieller's interval

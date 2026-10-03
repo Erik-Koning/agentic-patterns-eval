@@ -293,6 +293,8 @@ def test_report_on_partial_data_never_raises():
     gr.render(d)
     d0 = gr.g_report(pd.DataFrame(), pd.DataFrame(), None, reps=200, boot=0)
     json.dumps(d0)
+    df = gr.g_report(None, s, {}, reps=200, boot=0, glmm=False, primary="flip")  # decided by the sign-flip instead
+    assert df["gh2"]["gap"]["points"]["luna-high"]["p_flip"] is not None
     assert all(r["decision"] in ("NOT_TESTABLE", "descriptive") for r in d0["decisions"])
     gr.render(d0)
 

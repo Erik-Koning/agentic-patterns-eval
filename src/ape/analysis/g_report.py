@@ -228,14 +228,16 @@ def g_report(
     reps: int = gs.REPS,
     boot: int = 2000,
     seed: int = gs.SEED,
+    primary: str = "t",
     glmm: bool = True,
     cells: Mapping | None = None,
     problems: Sequence[str] = (),
 ) -> dict:
-    """The Study G report as a JSON-serialisable dict (see the module docstring)."""
+    """The Study G report as a JSON-serialisable dict (see the module docstring). `primary` decides every confirmatory
+    test by the session-clustered t ("t", default) or the sign-flip ("flip"); both p-values are always reported."""
     sessions = sessions if sessions is not None else pd.DataFrame()
     items = items if items is not None else pd.DataFrame()
-    kw = {"alpha": alpha, "reps": reps, "seed": seed}
+    kw = {"alpha": alpha, "reps": reps, "seed": seed, "primary": primary}
     d: dict = {"header": header_section(items, sessions, cells, problems), "alpha": alpha}
     d["capability"] = capability_section(capability, sessions)
     d["outcomes"] = gs.outcome_table(sessions)
@@ -249,7 +251,7 @@ def g_report(
     d["gh2"] = gs.gh2(sessions, capability, estimand=tost_estimand, margin=margin, boot=boot, **kw)
     other = "gain" if tost_estimand == "R" else "R"
     d["gh2"]["tost_sensitivity"] = {s: gs.tost(sessions, capability, s, estimand=other, **kw) for s in d["gh2"]["tost"]}
-    d["gh2"]["short_control"] = gs.short_control(sessions, **kw)
+    d["gh2"]["short_control"] = gs.short_control(sessions, alpha=alpha, reps=reps, seed=seed)
     d["gh2"]["crossing_split"] = gs.crossing_split(sessions, alpha=alpha, seed=seed)
     d["gh2"]["degradation"] = gs.degradation(items) if len(items) and "block" in items else []
     d["gh3"] = gs.gh3(sessions, boot=boot, **kw)

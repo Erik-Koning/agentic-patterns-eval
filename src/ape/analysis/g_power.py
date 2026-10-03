@@ -1,6 +1,8 @@
 """Session-clustered power and type I error for Study G, through the real analysis path (BUILD_PLAN B10; D-029).
 
-    uv run python -m ape.analysis.g_power --sims 1000 [--json out.json]
+    uv run python -m ape.analysis.g_power --sims 2000 --sims-other 500 --workers 8 [--json out.json]
+
+(about 4 minutes on 8 workers; seeded, so the numbers in g_hypotheses' notes reproduce.)
 
 Each simulated study is a session table in `g_load`'s schema (the outcome columns `g_load.sessions_from_items`
 produces from item rows; a test checks the two agree), analysed by the same `g_stats` functions `g_report` calls:
@@ -35,7 +37,9 @@ calibrates them; every function takes them as arguments.
 **Outputs** (`power_report`): per confirmatory test, the rejection rate at its null (type I; ≤ nominal) and at the
 plausible effects (power), each with its Monte Carlo standard error, for the t-test and the sign-flip; the minimum
 attainable p of an exact session-level sign-flip per test and cluster count (`flip_floor`), with what would fix a
-test that cannot reach its level; and alternative designs (more Astra sessions, S-CM* at Astra).
+test that cannot reach its level; the TOST at several margins; alternative designs (a Luna-low topology cell, 16 or
+24 Luna topology sessions per point, S-CM* at Astra, 6 Astra CM sessions); and sensitivities (no capability noise,
+distinct worlds per point, σ_arm 0.6).
 """
 
 import argparse
