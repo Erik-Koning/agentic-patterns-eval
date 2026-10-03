@@ -240,12 +240,13 @@ class LongWinded(GoldMulti):
 
 @pytest.mark.parametrize("arm", ["M1", "M7"])
 def test_the_clip_knob_cuts_what_one_agent_hands_another(env, monkeypatch, arm):
+    cell = ("F1", "8") if arm == "M1" else CELL[arm]  # F1: three workers' results per round
     monkeypatch.setenv(f"APE_MAS_{arm}_CLIP", "150")
-    _, s = _run(env, arm, LongWinded(env / "worlds"), *(("F1", "8") if arm == "M1" else CELL[arm]))
+    _, s = _run(env, arm, LongWinded(env / "worlds"), *cell)
     assert s.store["mas_params"]["result_clip_tokens"] == 150 and s.scores["task_success"].value == "C"
     assert _handed(arm, s) and all("[... cut to 150 tokens]" in t for t in _handed(arm, s))
     monkeypatch.delenv(f"APE_MAS_{arm}_CLIP")
-    _, s = _run(env, arm, LongWinded(env / "worlds"), *(("F1", "8") if arm == "M1" else CELL[arm]))
+    _, s = _run(env, arm, LongWinded(env / "worlds"), *cell)
     assert s.store["mas_params"]["result_clip_tokens"] == 2000 and _handed(arm, s) and not any("[... cut to" in t for t in _handed(arm, s)), "the padding fits the default clip"
 
 
