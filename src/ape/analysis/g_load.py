@@ -25,19 +25,20 @@ solved; per arm and point `g_stats.cost_table` takes the ratio of sums instead).
 kept apart (`tokens_probe`, `tokens_cm`, `cost_usd_probe`, `cost_usd_cm`). Also the profile, model, effort and the
 sample's knobs.
 
-**Tolerance.** Package B7 is extending the session records (per-call kind agent | cm | probe, management tokens,
-usage restored after a mid-session resume). The loader reads, when present:
-- per-call records in the store under the first of `CALL_LOG_KEYS` present (today `f8_views`: {item, view_tokens}),
-  each optionally with
-  `kind` (agent | cm | probe; absent means agent), `usage` ({input_tokens, output_tokens, input_tokens_cache_read,
-  total_cost}) and `cost_usd`;
-- Inspect `role_usage` for the roles "cm" and "probe" (authoritative when present);
-- the probes' own `usage` records (`f8_probes`), when the probe ran on the agent's model without a probe role;
-- usage restored after a resume under `RESTORED_USAGE_KEYS`: a usage dict, a {model: usage} mapping, or a
-  {kind: usage} mapping keyed by agent / cm / probe; it is added to the sample's usage.
-Every field may be missing; nothing raises on a missing score (an errored sample's unscored items fail, as in the
-gate), a missing store, or unknown extra fields. Duplicate session-epochs (a retried sample in a second log) keep
-the last one without an error.
+**Usage and resumes.** Two record formats are read:
+- **B7 sessions** (`ape.agent.session` with the ContextPolicy layer): the store's `f8_usage` {by_kind, by_model}
+  (or the score metadata's `usage`) is the usage of every call the session consists of, calls restored after a
+  mid-session resume included; Inspect's own sample usage covers only the attempt that finished, so `f8_usage` is
+  authoritative. Calls are counted from the per-call records (`f8_views`: {item, view_tokens, kind agent | cm,
+  model, usage}; probes in `f8_probes`), and an item's tokens by kind come from its record's `usage`. A resumed
+  session's `f8_resume` (or the score's `resume`) gives `resumes` and the `unlogged` usage of earlier attempts that
+  no Inspect log holds (`tokens_unlogged`, `cost_usd_unlogged`: spend accounting, not an arm's cost; a resumed
+  item's discarded partial calls are not an arm's cost either).
+- **Earlier sessions:** Inspect's sample usage, with probe and management usage from `role_usage` ("probe", "cm")
+  or from per-call records with `kind` and `usage`, else from the probes' own usage records.
+Unpriced usage is priced from config/model_costs.yaml (cache reads at their price). Every field may be missing;
+nothing raises on a missing score (an errored sample's unscored items fail, as in the gate), a missing store, or
+unknown extra fields. Duplicate session-epochs (a retried sample in a second log) keep the last one without an error.
 
 **Capability** (audit §2.1): S1's success on F7-10 and F3-5 from the `g.cap.*` agent logs (`gate_stats.load_results`),
 the equal-weight mean of the two cells' task means, with a world-clustered standard error.
@@ -52,11 +53,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..worlds import env_f8
 from ..worlds.env_f8 import ITEMS, OVERFLOW, PROBES, VIEWS
 
+# B7's store keys (ape.worlds.env_f8 after B7): usage by kind and model, and resumes.
+USAGE, RESUME = getattr(env_f8, "USAGE", "f8_usage"), getattr(env_f8, "RESUME", "f8_resume")
+
 SCORER = "f8_session_score"
-CALL_LOG_KEYS = ("f8_calls", VIEWS)  # per-call records, by preference: the first key present is read
-RESTORED_USAGE_KEYS = ("f8_restored_usage", "f8_usage_restored", "restored_usage")
+CALL_LOG_KEYS = (VIEWS,)  # per-call records (agent and cm calls; probes are in f8_probes): the first key present
 CALL_KINDS = ("agent", "cm", "probe")
 PHASE_BLOCKS = {"context_management": "cm", "topology": "topo", "capability_anchor": "cap", "micro_pilot": "pilot", "tuning": "tune"}
 PREFIX_BLOCKS = {"g.cm.": "cm", "g.topo.": "topo", "g.cap.": "cap", "g.pilot.": "pilot", "g.tune.": "tune"}
@@ -159,33 +163,6 @@ def _price(model: str, u: dict, prices: Mapping | None) -> float | None:
     return (uncached * p["input"] + u["cache_read"] * p.get("input_cache_read", p["input"]) + u["output"] * p.get("output", 0.0)) / 1e6
 
 
-def _restored(store: Mapping) -> dict[str, dict]:
-    """Usage restored after a mid-session resume, by kind ("total" when the record does not say)."""
-    out: dict[str, dict] = {}
-
-    def add(kind: str, model: str | None, x: Any) -> None:
-        u = _u(x)
-        acc = out.setdefault(kind, {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cost": 0.0, "models": set()})
-        for k in ("input", "output", "cache_read"):
-            acc[k] += u[k]
-        acc["cost"] = None if acc["cost"] is None or u["cost"] is None else acc["cost"] + u["cost"]
-        if model:
-            acc["models"].add(model)
-
-    for key in RESTORED_USAGE_KEYS:
-        rec = store.get(key)
-        for r in rec if isinstance(rec, list) else [rec]:
-            if r is None:
-                continue
-            if _is_usage(r):
-                add("total", None, r)
-            elif isinstance(r, Mapping):
-                for k, v in r.items():
-                    if _is_usage(v):
-                        add(k if k in CALL_KINDS else "total", None if k in CALL_KINDS else k, v)
-    return out
-
-
 # ---------- one sample ----------
 
 
@@ -204,6 +181,15 @@ def _int_keys(d: Mapping | None) -> dict:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _item_tokens(record: Mapping, pos: int, per_call: Mapping, kinds: set) -> dict:
+    """An item's tokens by call kind: the B7 item record's usage by kind when it has one, else the per-call records;
+    NaN for a kind no record carries."""
+    if isinstance(record.get("usage"), Mapping):
+        by = {k: _u(v) for k, v in record["usage"].items() if isinstance(v, Mapping)}
+        return {f"tokens_{k}": (by[k]["input"] + by[k]["output"]) if k in by else 0.0 for k in CALL_KINDS}
+    return {f"tokens_{k}": (per_call.get((pos, k), 0.0) if k in kinds else np.nan) for k in CALL_KINDS}
 
 
 def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[list[dict], dict]:
@@ -271,56 +257,71 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
             "w_crossing_item": wc,
             "overflow_at": overflow_at,
             "labels": ",".join(labels.get(pos) or []),
-            **{f"tokens_{k}": (per_item_tok.get((pos, k), 0.0) if k in has_kind else np.nan) for k in CALL_KINDS},
+            **_item_tokens(st, pos, per_item_tok, has_kind),
             "error": errored,
         })
 
+
     # session-level usage and cost meters
-    model_usage = {m: _u(u) for m, u in (sample.model_usage or {}).items()}
-    role_usage = {r: _u(u) for r, u in (sample.role_usage or {}).items()}
-    restored = _restored(store)
     tok = lambda u: u["input"] + u["output"]  # noqa: E731
-    tokens_total = sum(tok(u) for u in model_usage.values()) + sum(tok(u) for u in restored.values())
-    costs = [_price(m, u, prices) for m, u in model_usage.items()]
-    cost_total = None if any(c is None for c in costs) else sum(costs)
-    if cost_total is not None:
-        for kind, r in restored.items():
-            rc = r["cost"] if r["cost"] is not None else _price(next(iter(r["models"]), next(iter(model_usage), "")), r, prices)
-            cost_total = None if rc is None else cost_total + rc
-    agent_model = next(iter(model_usage), "")
+    model_usage = {m: _u(u) for m, u in (sample.model_usage or {}).items()}
+    agent_model = next((c.get("model") for c in calls if (c.get("kind") or "agent") == "agent" and c.get("model")), None) or next(iter(model_usage), "")
+    usage = store.get(USAGE) if isinstance(store.get(USAGE), Mapping) else {}
+    by_kind = usage.get("by_kind") or (smd.get("usage") if isinstance(smd.get("usage"), Mapping) else None)
+    by_model = usage.get("by_model") or {}
+    if by_kind:
+        # B7: usage of every call the session consists of, restored calls included, by kind. Inspect's own sample usage
+        # covers only the attempt that finished, so this is authoritative.
+        kinds = {k: _u(v) for k, v in by_kind.items() if isinstance(v, Mapping)}
+        price_model = next(iter(by_model)) if len(by_model) == 1 else agent_model
+        t = {k: tok(u) for k, u in kinds.items()}
+        usd = {k: _price(price_model, u, prices) for k, u in kinds.items()}
+        tokens_total = sum(t.values())
+        t_probe, t_cm = t.get("probe", 0.0), t.get("cm", 0.0)
+        cost_total = None if any(v is None for v in usd.values()) else sum(usd.values())
+        usd_probe, usd_cm = usd.get("probe", 0.0), usd.get("cm", 0.0)
+        src = {"usage": "f8_usage" if usage.get("by_kind") else "score", "probe": "f8_usage", "cm": "f8_usage"}
+    else:
+        # Pre-B7 logs: Inspect's sample usage, with probe and management usage from role usage or the call records.
+        role_usage = {r: _u(u) for r, u in (sample.role_usage or {}).items()}
+        tokens_total = sum(tok(u) for u in model_usage.values())
+        costs = [_price(m, u, prices) for m, u in model_usage.items()]
+        cost_total = None if any(c is None for c in costs) else sum(costs)
 
-    def kind_usage(kind: str) -> tuple[float, float | None, str]:
-        """(tokens, $, source) of the probe or cm calls."""
-        if kind in role_usage:
-            u = role_usage[kind]
-            return tok(u), _price(agent_model, u, prices), "role_usage"
-        recs = [c for c in calls if (c.get("kind") or "agent") == kind and c.get("usage")]
-        if kind == "probe" and not recs:
-            recs = [{"usage": p["usage"]} for p in probes_rec if p.get("usage")]
-        if not recs:
-            return 0.0, 0.0, "none"
-        t, usd = 0.0, 0.0
-        for c in recs:
-            u = _u(c["usage"])
-            t += tok(u)
-            cu = c.get("cost_usd", u["cost"])
-            pu = cu if cu is not None else _price(agent_model, u, prices)
-            usd = None if usd is None or pu is None else usd + pu
-        return t, usd, "calls" if kind != "probe" or any(c.get("kind") == "probe" for c in calls) else "probes"
+        def kind_usage(kind: str) -> tuple[float, float | None, str]:
+            """(tokens, $, source) of the probe or cm calls."""
+            if kind in role_usage:
+                u = role_usage[kind]
+                return tok(u), _price(agent_model, u, prices), "role_usage"
+            recs = [c for c in calls if (c.get("kind") or "agent") == kind and c.get("usage")]
+            if kind == "probe" and not recs:
+                recs = [{"usage": p["usage"]} for p in probes_rec if p.get("usage")]
+            if not recs:
+                return 0.0, 0.0, "none"
+            t_, usd_ = 0.0, 0.0
+            for c in recs:
+                u = _u(c["usage"])
+                t_ += tok(u)
+                cu = c.get("cost_usd", u["cost"])
+                pu = cu if cu is not None else _price(agent_model, u, prices)
+                usd_ = None if usd_ is None or pu is None else usd_ + pu
+            return t_, usd_, "calls" if kind != "probe" or probe_calls else "probes"
 
-    t_probe, usd_probe, src_probe = kind_usage("probe")
-    t_cm, usd_cm, src_cm = kind_usage("cm")
-    for kind in ("probe", "cm"):
-        if kind in restored:
-            if kind == "probe":
-                t_probe += tok(restored[kind])
-            else:
-                t_cm += tok(restored[kind])
-    if usd_probe is None and cost_total is not None and tokens_total:
-        usd_probe = cost_total * t_probe / tokens_total  # proportional fallback (no price for the model)
-    if usd_cm is None and cost_total is not None and tokens_total:
-        usd_cm = cost_total * t_cm / tokens_total
+        t_probe, usd_probe, src_probe = kind_usage("probe")
+        t_cm, usd_cm, src_cm = kind_usage("cm")
+        if usd_probe is None and cost_total is not None and tokens_total:
+            usd_probe = cost_total * t_probe / tokens_total  # proportional fallback (no price for the model)
+        if usd_cm is None and cost_total is not None and tokens_total:
+            usd_cm = cost_total * t_cm / tokens_total
+        src = {"usage": "model_usage", "probe": src_probe, "cm": src_cm}
     t_agent = max(tokens_total - t_probe - t_cm, 0.0)
+    # Resumes (B7): the store's f8_resume or the score's compact `resume`. `unlogged` usage is spend no Inspect log
+    # holds (earlier attempts of a retried sample): reported for spend accounting, not an arm's cost.
+    resume = store.get(RESUME) if isinstance(store.get(RESUME), Mapping) else (smd.get("resume") if isinstance(smd.get("resume"), Mapping) else None)
+    unlogged = (resume or {}).get("unlogged") or {}
+    unlogged = unlogged.get("by_model", unlogged) if isinstance(unlogged, Mapping) else {}
+    t_unlogged = sum(tok(_u(v)) for v in unlogged.values() if isinstance(v, Mapping))
+    usd_unlogged = [_price(m, _u(v), prices) for m, v in unlogged.items() if isinstance(v, Mapping)]
     n_cm = sum(1 for c in calls if c.get("kind") == "cm")
     n_agent = sum(1 for c in calls if (c.get("kind") or "agent") == "agent")
     by_k = _int_keys(smd.get("probes_by_checkpoint"))
@@ -360,7 +361,10 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
         "cost_usd_probe": usd_probe if usd_probe is not None else np.nan,
         "cost_usd_cm": usd_cm if usd_cm is not None else np.nan,
         "cost_usd": (cost_total - (usd_probe or 0.0)) if cost_total is not None else np.nan,
-        "usage_sources": {"probe": src_probe, "cm": src_cm, "restored": sorted(restored)},
+        "usage_sources": src,
+        "resumes": int((resume or {}).get("count") or 0),
+        "tokens_unlogged": t_unlogged,
+        "cost_usd_unlogged": (sum(usd_unlogged) if all(v is not None for v in usd_unlogged) else np.nan) if usd_unlogged else 0.0,
         "wall_clock": float(sample.total_time) if sample.total_time is not None else np.nan,
         "working_time": float(sample.working_time) if sample.working_time is not None else np.nan,
         "error": errored,
