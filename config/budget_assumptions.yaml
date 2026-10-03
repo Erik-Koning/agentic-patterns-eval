@@ -81,7 +81,7 @@ arms:
   M1s: {like: M1}
   M1k: {like: APG*, multiplier: 2.5, cache: multi_agent}
   M2: {like: M1k}
-  M7: {like: S1, multiplier: 3.0, cache: multi_agent}    # council k=3, 2 critique rounds, chair
+  M7: {like: S1, multiplier: 5.0, cache: multi_agent}    # council k=3, 2 critique rounds, chair [measured, B2 gold mock: 3.4-5.8x S1 tokens; was 3.0]
 
 # Per-compile kg-role calls, at the kg role's effort (low). [given]
 kg_calls:
