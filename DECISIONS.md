@@ -476,6 +476,8 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Study G pilots its topology arms** in a short `g.pilot.topo` cell and computes session error, limit and overflow rates before the freeze.
 - **Integrity:** a study run freezes a copy of the gate resolution, not the gate's report bytes; analyze refuses live on post-freeze changes unless a deviation is recorded (gate too); paid phases re-check smoke currency; pre-freeze phases carry code identity; allocations and concurrency are not frozen; `ape.budget` prices whole worlds as the runner runs them.
 
+**D-048 (2026-10-03, user: M3 after the review's fixes).** M3 (communication ≈ 0 at matched cost: M7 − S8@M7, TOST ±6 pp) **stays confirmatory on the four Study A cells**, with its residual size documented. With the matched-cost correction (D-047) its type I is at nominal except up to 0.059 at the +6 pp boundary (κ = 0) and 0.055 at −6 pp (κ = 1) against 0.05. The cause is the two near-ceiling cells F1-2 and F2-2 (0.047 off the ceiling), not cost noise. Planned power at Δ = 0: 0.89 / 0.79 / 0.69 at κ = 0 / 1 / 3 (κ: how much more a failed run costs). The claim is worded as an equal-weight average over four cells, two near the ceiling, and read with the per-cell estimates. Rejected: testing only F1-32 and F2-10 (type I 0.030–0.041 but power 0.12–0.20) and making M3 descriptive. M2's frontier test is back at nominal (0.019–0.029) and stays confirmatory.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
