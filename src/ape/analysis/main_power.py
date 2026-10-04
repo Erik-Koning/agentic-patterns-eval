@@ -509,6 +509,25 @@ def alternatives(reps: int = 500, seed: int = 20261004, sigmas: Sigmas = Sigmas(
     return out
 
 
+def m3_pool_check(cells: tuple[str, ...] = STUDY_A_CELLS, kappa: float = 0.0, seed: int = 20261040, boundary_reps: int = 4000, power_reps: int = 1000, baselines: dict = BASELINES) -> list[dict]:
+    """M3's TOST over `cells` at κ: type I at ±TOST_MARGIN and power at Δ = 0, ±2 pp, scenario i seeded `seed + i`
+    (D-048's numbers: the four Study A cells at seeds 20261040 / 20261050 / 20261060 for κ = 0 / 1 / 3; F1-32 and F2-10
+    only, the rejected alternative, at 20261010 / 20261020 / 20261030)."""
+    from .main_hypotheses import get
+
+    m3 = get("M3")
+    hyp = replace(m3, members=(replace(m3.members[0], cells=tuple(cells)),))
+    settings = Settings(kappa=kappa)
+    sizes = planned_sizes()
+    out = []
+    for i, (d, reps) in enumerate(((TOST_MARGIN, boundary_reps), (-TOST_MARGIN, boundary_reps), (0.0, power_reps), (0.02, power_reps), (-0.02, power_reps))):
+        spec = {(PRIMARY_TIER, c): {"S1": _base(PRIMARY_TIER, c, baselines, settings), "M7": S8Target(COST["M7"], d)} for c in cells}
+        sc = Scenario(f"M7 − S8@M7 = {d:+.2f}", spec, ("M3.pooled",) if abs(d) >= TOST_MARGIN else (), kappa)
+        res = simulate_family(hyp, sc, reps, seed + i, settings=settings, sizes=sizes)
+        out.append({"delta": d, "kind": sc.kind, "reps": reps, "seed": seed + i, "rate": res["members"]["M3.pooled"]})
+    return out
+
+
 def min_p_table(settings: Settings = Settings(), hypotheses=HYPOTHESES, report_flips: int = 10_000) -> list[dict]:
     """Per confirmatory member at the planned sizes: its cluster count, the smallest p its sign flip can attain (exact:
     2^-G; Monte Carlo: 1 / (flips + 1) at the report's `report_flips`), the smallest level Holm may test it at (α over the

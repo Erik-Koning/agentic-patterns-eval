@@ -154,9 +154,9 @@ HYPOTHESES: tuple[Hypothesis, ...] = (
     Hypothesis(
         "M3", "brief H1c; D-033", "Communication adds ≈ 0 at matched cost: M7 − S8 (at M7's realised cost) within ±6 pp, averaged over Study A's four cells with equal weights (each cell's estimate is reported beside it).",
         "confirmatory",
-        (Member("M3.pooled", (Term("M7"), Term("S8", -1, match="M7")), STUDY_A_CELLS, "tost", TOST_MARGIN, power="type I at +6 / −6 pp: 0.052–0.059 / 0.044–0.049 over κ = 0–3 (3,000 studies each at +6 pp; the excess comes from the ceiling cells F1-2, F2-2: 0.047 off the ceiling); power 0.87 at Δ = 0 (κ 1: 0.78, κ 3: 0.67), 0.69 at +2 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),),
+        (Member("M3.pooled", (Term("M7"), Term("S8", -1, match="M7")), STUDY_A_CELLS, "tost", TOST_MARGIN, power="type I at nominal except up to 0.059 at the +6 pp boundary (κ 0) and 0.055 at −6 pp (κ 1), from the near-ceiling cells F1-2 and F2-2 (0.047 off the ceiling); power at Δ = 0: 0.89 / 0.79 / 0.69 at κ = 0 / 1 / 3 (4,000 studies per boundary, 1,000 for power, 108 tasks per cell, gate σ priors; main_power.m3_pool_check, seeds 20261040 / 20261050 / 20261060)"),),
         alpha=ALPHA_TOST,
-        note="Margin ±6 pp (D-033; the brief's ±3 pp had power 0.13). Not gated on M7 > S1: equivalence to the frontier is informative whether or not M7 beats S1. Cells where M7 costs more than S8(8) are left out and named.",
+        note="Margin ±6 pp (D-033; the brief's ±3 pp had power 0.13). Confirmatory on the four cells (D-048): the claim is an equal-weight average over four cells, two of them (F1-2, F2-2) near the ceiling, and is read with the per-cell estimates; those two cells push the type I to 0.059 at the +6 pp boundary (κ 0) and 0.055 at −6 pp (κ 1) against 0.05, and testing F1-32 and F2-10 alone (type I 0.030–0.041) left power 0.12–0.20. Not gated on M7 > S1: equivalence to the frontier is informative whether or not M7 beats S1. Cells where M7 costs more than S8(8) are left out and named.",
     ),
     Hypothesis(
         "M5", "brief H1e; D-033", "Role specialization adds ≈ 0: M2 − M1k within ±6 pp, averaged over Study B's four cells with equal weights (each cell's estimate is reported beside it).",
