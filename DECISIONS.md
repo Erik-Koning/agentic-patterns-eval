@@ -466,6 +466,16 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Per-run cache nonce** (`APE_CACHE_NONCE`, `agent/cache_nonce.py`): the study runner sets one seed per eval set (study, run, phase, group; per candidate in tuning); each task derives its nonce from it and its arm (main: and delivery, exposure). A `Run reference: <12 hex>` line starts every agent, multi-agent role, session, probe and management prompt; it is in each sample's metadata and in the session checkpoint key. kg-role calls carry none (their prompts belong to the gate-tuned KG arms). The gate never reads it, and without a seed every prompt is byte-identical to before (tested). Epochs of one arm share a nonce, so cache-hit claims use first epochs.
 - **Runaway guard** (`budget.sample_working_limit`): Inspect `working_limit` (working time excludes connection and rate-limit waits) of 30 minutes at a 12-turn cap, scaled with the turn cap (F1-32 110 minutes), and 30 minutes + 10 per case for F8 sessions (40 cases: 7.2 hours). Inspect's task identifier includes it, so only the study runners apply it, never the gate. A hit ends the sample with limit `working`, counted as a cap hit; the D-045 gate reports it under "other" and never escalates on it.
 
+**D-047 (2026-10-03, the independent review of a576a2c; BUILD_REVIEW.md).** Four A-level and twelve B-level findings; nothing sinks the design. Decisions taken with the fix round:
+- **M1k and M2 run under M1's selection** (as M1s does): one protocol variant for the chain M1s → M1 → M1k → M2, so its single-switch steps (ISO/CONC, DEL, SPEC) differ in nothing else; M1k and M2 are no longer tuned (`main.tune.b` = M1 alone). Separate picks were near-arbitrary anyway (tune SE ≈ 11 pp).
+- **Provider errors inside multi-agent arms propagate** (the sample errors and is retried, as S1's would and as the session team's already did) instead of becoming a scored failure or a lost vote.
+- **Cap hits are failures and cast no vote** in the main analysis, as PREREGISTRATION_MAIN states (a capped F3 sample scored a success before); in sessions, the item in progress when a limit fires fails.
+- **The frontier tests (M3, M2's frontier) must carry the matched cost's uncertainty**; if no correction restores nominal size, they become descriptive (decided when the fix reports).
+- **Study G's t gets a small-sample correction and a minimum sessions per planned point** (below it: INCOMPLETE), so G-H3 holds 0.025.
+- **The D-045 gate decides on one-sided 97.5% Clopper–Pearson lower bounds pooled per arm** (as the gate's PC5), not point estimates per arm-cell, which would escalate or refuse by chance at true rates of 2–5%; other-limit (working, cost guard) rates are gated the same way; S8k3 is projected from resampled triples of S1 samples.
+- **Study G pilots its topology arms** in a short `g.pilot.topo` cell and computes session error, limit and overflow rates before the freeze.
+- **Integrity:** a study run freezes a copy of the gate resolution, not the gate's report bytes; analyze refuses live on post-freeze changes unless a deviation is recorded (gate too); paid phases re-check smoke currency; pre-freeze phases carry code identity; allocations and concurrency are not frozen; `ape.budget` prices whole worlds as the runner runs them.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
