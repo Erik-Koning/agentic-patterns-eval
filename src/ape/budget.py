@@ -271,10 +271,12 @@ TASKS_PER_WORLD = 12  # the runners build whole worlds of 12 tasks (`run_study.T
 
 def _n_tasks(cell: PlanCell) -> int:
     """Tasks per task cell as the runners run them: an `n_tasks` cell reads whole worlds of TASKS_PER_WORLD tasks
-    (100 -> 108, 50 -> 60, 20 -> 24, 15 -> 24; R-B4), a `worlds` cell worlds x tasks_per_world."""
+    (100 -> 108, 50 -> 60, 20 -> 24, 15 -> 24; R-B4), or of its own `tasks_per_world` when it sets one (the live
+    smoke builds worlds of exactly its n_tasks); a `worlds` cell worlds x tasks_per_world."""
     s = cell.spec
     if "n_tasks" in s:
-        return math.ceil(int(s["n_tasks"]) / TASKS_PER_WORLD) * TASKS_PER_WORLD
+        per_world = int(s.get("tasks_per_world") or TASKS_PER_WORLD)
+        return math.ceil(int(s["n_tasks"]) / per_world) * per_world
     if "worlds" in s and "tasks_per_world" in s:
         return int(s["worlds"]) * int(s["tasks_per_world"])
     raise BudgetError(f"cell {cell.id}: needs n_tasks, or worlds and tasks_per_world")

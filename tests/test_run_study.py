@@ -977,6 +977,11 @@ def test_a_live_tune_refuses_a_grid_that_breaks_the_tuning_rules(clean_env, monk
     offline the tune records the problems and runs."""
     grid = yaml.safe_load((ROOT / "config" / "tuning_grid_main.yaml").read_text())
     grid |= {"owners": dict.fromkeys(grid["owners"], "Ada") | {"S1": "Sam"}, "signed_off": dict.fromkeys(grid["signed_off"], True)}
+    # The plan's tuning cells price M1 and M7 (D-047): the grid's other systems (S9 until F-arms moves it to `inherited`)
+    # are left out here, so the check meets a grid that agrees with the plan.
+    grid["systems"] = {k: v for k, v in grid["systems"].items() if k in ("M1", "M7")}
+    grid["owners"] = {k: v for k, v in grid["owners"].items() if k in ("M1", "M7", "S1")}
+    grid["signed_off"] = {k: v for k, v in grid["signed_off"].items() if k in ("M1", "M7", "S1")}
     monkeypatch.setattr(run_study, "_load_grid", lambda r: grid)
     monkeypatch.setattr(run_study, "_refuse_frozen", lambda phase: lambda r: None)
     monkeypatch.setattr(run_study, "_refuse_unbuilt", lambda phase: lambda r: None)
