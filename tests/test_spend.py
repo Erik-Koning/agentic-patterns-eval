@@ -342,3 +342,22 @@ def test_an_unpriced_run_gets_no_cost_limit(env, monkeypatch):
     monkeypatch.setattr(runner, "eval_set", lambda tasks, **kw: (seen.update({t.name: t.cost_limit for t in tasks}), (True, []))[1])
     run_evals([plain(n=2)], env["tmp"] / "u", model_override=MOCK, model_args={"custom_outputs": priced_outputs}, **FAST)
     assert seen == {"plain": None}
+
+
+def test_a_shared_build_ledger_is_attributed_per_entry_to_the_run_that_wrote_it(env, monkeypatch, tmp_path):
+    """R-C1: the gate and the studies share one cache/ledger.jsonl, which the registry knows under the label of the
+    first run that wrote to it; each entry carries its own run's label, so the main study's builds count against the
+    main study's allocation (an entry from before labels keeps the registered label)."""
+    path = tmp_path / "cache" / "ledger.jsonl"
+    monkeypatch.setenv(spend.LABEL_ENV, "gate/g1")
+    Ledger(path).append(LedgerEntry(role="build", model="gpt-6-luna", kind="chat", input_tokens=1_000_000))
+    spend._registered_ledgers.clear()  # a new process
+    monkeypatch.setenv(spend.LABEL_ENV, "main/m1")
+    Ledger(path).append(LedgerEntry(role="build", model="gpt-6-luna", kind="chat", input_tokens=10_000_000))
+    with path.open("a") as f:  # an entry from before R-C1: no label
+        f.write(json.dumps({"role": "build", "model": "gpt-6-luna", "kind": "chat", "input_tokens": 2_000_000, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0, "context": {}, "ts": time.time()}) + "\n")
+    assert [e.label for e in Ledger(path).read()] == ["gate/g1", "main/m1", None]
+    s = program_spend(Path(os.environ[spend.REGISTRY_ENV]), COSTS_PATH)
+    luna = budget.Prices.load(COSTS_PATH).entry("openai/gpt-6-luna")["input"] / 1e6
+    assert s["by_study"]["main"] == pytest.approx(10_000_000 * luna) and s["by_study"]["gate"] == pytest.approx(3_000_000 * luna)
+    assert budget.ledger_spend(path, COSTS_PATH, label="main/m1") == pytest.approx(12_000_000 * luna), "its own entries, and the unlabelled ones"

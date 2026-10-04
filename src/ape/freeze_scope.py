@@ -6,13 +6,14 @@ recalibration, a tuning grid's arms, an allocation) would break it: its build-te
 file. So each study fingerprints and freezes only the part that shapes its own runs:
 
 - **run_plan.yaml**: the study's section (`studies.<study>`: profile and every phase's cells); `budget` narrowed to
-  what the study's runs read (`total_usd` and `sample_cost_limit`; for the main study and Study G also
-  `sample_working_limit`, their wall-clock guard; plus the study's own allocation where its guard enforces one, i.e.
-  not the gate's; another study's allocation, or the program's contingency, is never an input);
-  the right-sizing cuts that edit one of the study's cells; and, for Study G, the `study_g` block (window W,
-  threshold T_abs).
+  what shapes what a sample is (`sample_cost_limit`, the per-sample runaway guard; for the main study and Study G
+  also `sample_working_limit`, their wall-clock guard); the right-sizing cuts that edit one of the study's cells; and,
+  for Study G, the `study_g` block (window W, threshold T_abs). The program total, the allocations and the
+  contingency are guard inputs, not design (R-B3): the budget guard reads them live, and a budget adjustment after a
+  freeze never blocks the test (a live freeze checks instead that the test fits what is left).
 - **models.yaml**: the profiles the study's cells name, its default profile, and those it chooses at run time
-  (`RUNTIME_PROFILES`: the gate's PC1 anchor falls back to `anchor_luna`), each as resolved (YAML merge keys applied).
+  (`RUNTIME_PROFILES`: the gate's PC1 anchor falls back to `anchor_luna`), each as resolved (YAML merge keys applied),
+  without `concurrency` (how many calls run at once changes how fast a run goes, never what it measures).
 - **model_costs.yaml**: the price entries of every model those profiles (and the cells' `models:` overrides) call,
   matched by bare model name as `ape.models.preflight` matches them.
 
@@ -30,11 +31,12 @@ import yaml
 
 SLICED = ("run_plan.yaml", "models.yaml", "model_costs.yaml")
 RUNTIME_PROFILES = {"gate": ("anchor", "anchor_luna")}  # chosen at run time (`run_gate.anchor_profile_name`)
-BUDGET_KEYS = ("total_usd", "sample_cost_limit")  # program-level budget fields every study's guard reads
+BUDGET_KEYS = ("sample_cost_limit",)  # program-level budget fields that shape a sample (the runaway guard)
 # Budget fields only some studies' runs read: the wall-clock guard (`ape.runner.working_guard`), which `ape.run_study`
 # applies and the gate never does, so a change to it never touches the gate's slice.
 STUDY_BUDGET_KEYS = {"sample_working_limit": ("main", "study_g")}
-UNALLOCATED = ("gate",)  # its guard checks the program total only (`run_gate.spend`), never budget.allocations
+GUARD_ONLY = ("total_usd", "allocations", "contingency_usd")  # budget fields the guards read live; never frozen (R-B3)
+RUNTIME_ONLY_PROFILE_KEYS = ("concurrency",)  # profile fields that change only how fast a run goes (R-B3)
 
 
 class ConfigSlice(Path):
@@ -63,7 +65,9 @@ def _slice(path: str, study: str) -> ConfigSlice:
 
 
 def _load(path: Path) -> Any:
-    return yaml.safe_load(path.read_text()) if path.is_file() else None
+    from . import yaml_cache
+
+    return yaml_cache.load(path) if path.is_file() else None
 
 
 def _bare(model: str) -> str:
@@ -79,10 +83,9 @@ def plan_slice(raw_plan: dict, study: str) -> dict:
     """The study's part of run_plan.yaml (module docstring)."""
     budget = raw_plan.get("budget") or {}
     ids = {c.get("id") for c in study_cells(raw_plan, study)}
-    allocation = {} if study in UNALLOCATED else {"allocation": (budget.get("allocations") or {}).get(study)}
     own = {k: budget.get(k) for k, studies in STUDY_BUDGET_KEYS.items() if study in studies}
     out = {
-        "budget": {k: budget.get(k) for k in BUDGET_KEYS} | own | allocation,
+        "budget": {k: budget.get(k) for k in BUDGET_KEYS} | own,
         "studies": {study: (raw_plan.get("studies") or {}).get(study)},
         "cuts": [c for c in raw_plan.get("cuts") or [] if any(e.get("cell") in ids for e in c.get("set") or [])],
     }
@@ -106,6 +109,10 @@ def study_models(raw_plan: dict, raw_models: dict, study: str) -> list[str]:
     return list(dict.fromkeys(str(m) for m in models if m))
 
 
+def _design_profile(spec: Any) -> Any:
+    return {k: v for k, v in spec.items() if k not in RUNTIME_ONLY_PROFILE_KEYS} if isinstance(spec, dict) else spec
+
+
 def config_slice(path: Path, study: str) -> Any:
     """The study's slice of a shared config file (`SLICED`; the module docstring), None when a file it needs is missing.
     The other config files are read from the same directory."""
@@ -118,7 +125,7 @@ def config_slice(path: Path, study: str) -> Any:
         return None
     if name == "models.yaml":
         profiles = raw_models.get("profiles") or {}
-        return {p: profiles.get(p) for p in study_profiles(raw_plan, study)}
+        return {p: _design_profile(profiles.get(p)) for p in study_profiles(raw_plan, study)}
     if name == "model_costs.yaml":
         raw_costs = _load(Path(path))
         if raw_costs is None:

@@ -349,7 +349,7 @@ def test_budget_prices_a_per_cell_history_override(tmp_path):
     plan.write_text(yaml.safe_dump({
         "budget": {"total_usd": 10},
         "studies": {"s": {"profile": "gate", "phases": {"p": [
-            {"id": "c", "models": {"agent": "openai/agent-x"}, "arms": ["S6"], "cells": ["F1-32", "F2-10"], "n_tasks": 1, "epochs": 1},
+            {"id": "c", "models": {"agent": "openai/agent-x"}, "arms": ["S6"], "cells": ["F1-32", "F2-10"], "n_tasks": 1, "tasks_per_world": 1, "epochs": 1},
         ]}}},
     }))  # fmt: skip
     a = load_assumptions()

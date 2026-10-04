@@ -200,12 +200,12 @@ def test_the_kg_arm_follows_the_gate_runs_verdict_and_selection(clean_env, monke
     _fake_gate_run(runs, "g-unfrozen", "GO", frozen=False)
     _fake_gate_run(runs, "g-offline", "GO", offline=True)
 
-    def kg(gid: str | None, offline: bool = False) -> dict:
-        return run_study.kg_resolution(StudyRun("main", "m", offline=offline, runs_root=runs, gate_run_id=gid))
+    def kg(gid: str | None, offline: bool = False) -> dict:  # a run per gate run: a run keeps the resolution it copied (R-A1)
+        return run_study.kg_resolution(StudyRun("main", f"m-{gid}", offline=offline, runs_root=runs, gate_run_id=gid))
 
     go = kg("g-go")
     assert (go["key"], go["arm"], go["system"], go["env"], go["verdict"]) == ("APG*", "APG-q", "apg", {"APE_APG_SHORTLIST_K": "24"}, "GO")
-    assert set(go["files"]) == {"gate/selected.yaml", "gate/decision.json", "gate/freeze.json"}
+    assert set(go["files"]) == {"config/gate_resolution.json"}, "R-A1: the run's copy of the gate resolution, never the gate's report"
     assert kg("g-pull")["arm"] == "APG-q" and kg("g-pull")["notes"], "every GO label selects APG*; pull-only is noted"
     nogo = kg("g-nogo")
     assert (nogo["key"], nogo["arm"], nogo["system"], nogo["env"]) == ("LGR*", "LGR-s", "lightrag", {"APE_LGR_MODE": "mix"})
@@ -276,13 +276,32 @@ def test_a_run_keeps_the_gate_run_its_kg_arm_came_from(clean_env):
         run_phases(StudyRun("main", "m", runs_root=clean_env / "runs", gate_run_id="g-nogo", gate_runs_root=gates), "preflight")
 
 
-def test_a_changed_gate_selection_changes_the_phases_fingerprints(clean_env):
+def test_a_run_keeps_the_gate_resolution_it_copied_and_a_gate_reanalysis_never_touches_it(clean_env):
+    """R-A1: the first resolution copies the gate's verdict, KG arm and selection entries into the run
+    (config/gate_resolution.json); fingerprints and the freeze hash that copy. A gate re-analysis (a new decision.json,
+    same verdict) changes nothing; a changed selection is refused live (a new resolution is a new run id)."""
     runs = clean_env / "runs"
     d = _fake_gate_run(runs, "g-go", "GO")
-    before = run_study.phase_state(StudyRun("main", "m", runs_root=runs, gate_run_id="g-go"), "build-dev")
+    run = StudyRun("main", "m", runs_root=runs, gate_run_id="g-go")
+    before = run_study.phase_state(run, "build-dev")
+    copy = json.loads(run.gate_resolution_path.read_text())
+    assert copy["verdict"] == "GO" and copy["arm"] == "APG-q" and copy["gate_selected"]["APG*"]["arm"] == "APG-q" and copy["gate_selected"]["S3s"]["candidate"] == "s3s-2000"
+    assert copy["inherited"]["S3s"]["env"] == {"APE_S3S_BUDGET": "2000"} and copy["gate_freeze_sha256"] == run_gate._sha256(d / "freeze.json")
+    # The gate re-analyses: decision.json is rewritten (a new generated_at), the verdict stands.
+    run_gate._write_json(d / "report" / "decision.json", {"verdict": {"label": "GO", "reasons": []}, "generated_at": "later"})
+    assert run_study.phase_state(StudyRun("main", "m", runs_root=runs, gate_run_id="g-go"), "build-dev")["fingerprint"] == before["fingerprint"]
+    # The gate's selection changes: refused live; a new run id resolves the new one.
     (d / "config" / "selected.yaml").write_text(yaml.safe_dump({**SELECTED, "APG*": {"arm": "APG-s", "env": {"APE_APG_SHORTLIST_K": "12"}}}))
-    after = run_study.phase_state(StudyRun("main", "m", runs_root=runs, gate_run_id="g-go"), "build-dev")
-    assert before["params"]["kg"]["arm"] == "APG-q" and after["params"]["kg"]["arm"] == "APG-s" and before["fingerprint"] != after["fingerprint"]
+    with pytest.raises(PhaseError, match=r"resolution changed since this run copied it at .* \(arm, candidate, declared, env, gate_selected\)"):
+        run_study.kg_resolution(StudyRun("main", "m", runs_root=runs, gate_run_id="g-go"))
+    after = run_study.phase_state(StudyRun("main", "m2", runs_root=runs, gate_run_id="g-go"), "build-dev")
+    assert after["params"]["kg"]["arm"] == "APG-s" and after["fingerprint"] != before["fingerprint"]
+    # Offline the copy follows the gate run, with a note.
+    off = run_study.kg_resolution(StudyRun("main", "m", offline=True, runs_root=runs, gate_run_id="g-go"))
+    assert off["arm"] == "APG-s" or off["arm"] == run_gate.OFFLINE_ARMS.get("APG-s", "APG-s")
+    # The gate's analyze no longer lists the shared build ledger, which the studies' builds append to.
+    gate = GateRun("g-x", offline=True, runs_root=runs)
+    assert "ledger" not in run_gate._analyze_inputs(gate) and "ledger" not in run_study._analyze_inputs(run)
 
 
 # --- Unbuilt arms --------------------------------------------------------------------------------------
@@ -385,7 +404,7 @@ def test_offline_main_runs_its_cells_on_its_worlds_with_the_kg_arm_and_the_selec
     assert set(selected) == set(grid["systems"]) == set(run_study.study_grid(run)[0]["systems"]) and all(sel["arm"] == name for name, sel in selected.items()), "each system runs as its plan arm"
     tune = _manifest(run, "tune")
     assert not any("placeholder" in w for w in tune["warnings"]) and tune["tuning_completeness"]["pass"] is True, "PC6-style"
-    assert tune["grid_problems"] == [], "B3's grid keeps the tuning rules (a live tune refuses otherwise)"
+    assert tune["grid_problems"] == run_study.grid_problems(run), "recorded (a live tune refuses on any; M1k/M2 leave the grid with F-arms, D-047)"
     assert "S3s" not in selected and tune["kg"]["inherited"] == {} and any("S3s: its defaults offline" in w for w in _manifest(run, "preflight")["warnings"]), "S3s is the gate's (D-041)"
     for name, sdef in grid["systems"].items():  # offline: each system's first candidates, one selected
         ran = [c["id"] for c in sdef["candidates"][: run_study.OFFLINE_SCALE["tune_candidates_per_system"]]]
@@ -451,6 +470,13 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     sess = read_eval_log(str(next(f for f in sorted((run.dir / "test" / "g.cm.luna-high").rglob("*.eval")) if read_eval_log(str(f), header_only=True).eval.task_args["arm"] == "CM-native")))
     assert sess.samples[0].store["f8_cm_events"] and not sess.samples[0].error, "CM-native took its mock route offline"
     assert _manifest(run, "preflight")["checks"]["cm_native"] == {"g.pilot.luna": "mock", "g.cm.luna-high": "mock", "g.cm.sol-high": "mock"}, "D-043: Sol too"
+    # R-B5 (d, e): the micro-pilot pilots the topology arms (g.pilot.topo) and measures every arm's session health.
+    mp = _manifest(run, "micro-pilot")
+    assert {g.split("/")[0] for g in mp["log_dirs"]} >= {"study_g/t1/micro-pilot/g.pilot.luna", "study_g/t1/micro-pilot/g.pilot.topo"} or any("g.pilot.topo" in d for d in mp["log_dirs"])
+    health = json.loads(run.session_health_path.read_text())["arms"]
+    assert {"S1", "M1", "M2", "S-CM*", "CM0", "CM-sum"} <= set(health) and all(h["sessions"] > 0 for h in health.values())
+    assert health["CM0"]["overflow_expected"] and not health["CM-sum"]["overflow_expected"] and run_study.read_session_health(run)[1] == []
+    assert "config/session_health.json" in read_freeze(run)["files"] and read_freeze(run)["session_health"] == health
     # APE_SESSION_CHECKPOINTS reached the sessions: each sample saved there (a finished session deletes only its file).
     assert {p.parent.name for p in run.session_checkpoints_dir.glob("*/epoch-1")} >= {"F8-40-pilot-s22000", "F8-40-dev-s1000", "F8-40-test-s29000", "F8-20-o2250-test-s29000"}
     tlog = [json.loads(line) for line in (run.phase_dir("tune") / "tuning_log.jsonl").read_text().splitlines()]
@@ -572,27 +598,34 @@ def test_the_pilot_cap_hit_gate_measures_every_arm_and_the_freeze_records_its_mu
     run = _run(offline, "main")
     gate = json.loads(run.cap_gate_path.read_text())
     assert run_study.CAP_HIT_MAX == MAX_CAP_HIT_RATE and gate["max"] == 32 and gate["threshold"] == 0.1
-    assert gate["multiple"] == 8 and gate["rule"] == "token_rate" and gate["passed"] and gate["over"] == {} and [r["multiple"] for r in gate["rounds"]] == [8]
+    assert gate["multiple"] == 8 and gate["rule"] == "token_lower_bound" and gate["passed"] and gate["over"] == {} and [r["multiple"] for r in gate["rounds"]] == [8]
     piloted = {(a, tc) for c in run_study.phase_cells(run, "pilot") for a in rg_arm_names(c) for tc in c.spec["cells"]}
     assert {(a, tc) for a, cells in gate["rates"].items() for tc in cells} == piloted, "every pilot arm, per task cell"
     assert all(r["samples"] > 0 and r["token_rate"] == r["turn_rate"] == r["rate"] == 0 for cells in gate["rates"].values() for r in cells.values())
     assert all(r["cap"] for cells in gate["rates"].values() for r in cells.values()), "at the test's caps, F2 and F3 (piloted uncapped) included"
-    # Projected: M1s (M1's), S8k3 (S1 over cap / 3) in all its cells, F7-100 (nearest level), the Sol cells (Luna's), S5 on F1-32 (the micro-pilot's).
+    # Projected: M1s (M1's), S8k3 (S1 triples) in all its cells, F7-100 (nearest level), the Sol cells (Luna's), S5 on F1-32 (the micro-pilot's).
     proj = gate["projected"]
     assert proj["M1s"]["F1-32"]["source"].startswith("M1's") and set(proj["S8k3"]) == {"F1-2", "F1-32", "F2-2", "F2-10", "F3-5", "F3-60", "F7-10", "F7-1000"}
+    # Decided per unit on the lower bound (R-B5): each measured arm pooled over its cells, M1s, S8k3, each arm's Sol cells.
+    units = gate["units"]
+    assert {"M7", "S1", "M1s", "S8k3", "S1 (main_sol)", "M1 (main_sol)", "M2 (main_sol)"} <= set(units) and units["S1"]["measured"] and not units["S8k3"]["measured"]
+    assert units["S1"]["token"]["n"] == sum(r["samples"] for r in gate["rates"]["S1"].values()) and all(u["token"]["lower_bound"] == 0 for u in units.values())
+    assert units["S5"]["cells"] == sorted([*gate["rates"]["S5"], "F1-32"]), "S5's micro-pilot F1 samples join its unit; F7-100 (nearest level) does not"
     assert {"F7-100", "F7-100 (main_sol)"} <= set(proj["S1"]) and "F1-32 (main_sol)" in proj["M1"] and "F7-100 (main_sol)" in proj["M2"]
     assert proj["S5"]["F1-32"]["source"].startswith("the micro-pilot's") and gate["unprojectable"] == []
     assert all(r["projected"] is True for cells in proj.values() for r in cells.values()) and gate["turn_over"] == {} and gate["over_projected"] == {}
     pilot = _manifest(run, "pilot")
     assert pilot["cap_gate"]["multiple"] == 8 and pilot["params"]["cap_gate"] == {"base": 8, "doublings": 2, "threshold": 0.1, "rule": "token_rate", "turn_caps": "refuse"}
+    assert gate["other_over"] == {} and gate["warnings"] == []
     assert json.loads((run.phase_dir("pilot") / "pilot.json").read_text())["cap_gate"]["rates"] == gate["rates"]
     freeze = read_freeze(run)
     assert freeze["cap_multiple"] == 8 and freeze["cap_gate"]["rates"] == gate["rates"] and freeze["cap_gate"]["projected"] == proj and freeze["cap_gate"]["passed"] is True
+    assert freeze["cap_gate"]["units"] == units and freeze["cap_gate"]["warnings"] == []
     assert "config/cap_gate.json" in freeze["files"] and run_study.read_cap_gate(run) == (gate, [])
     # The pre-registration's pilot items, the cap multiple and the power re-simulation (no gate run offline: priors).
     items = json.loads((run.phase_dir("pilot") / "pilot.json").read_text())["prereg_items"]
     assert {"token caps", "cap multiple", "S7 targets per cell", "KG arm", "pilot σ and power"} == set(items)
-    assert items["cap multiple"].startswith("8 (D-039, D-045; no arm over 10% token-cap hits on the pilot, measured or projected")
+    assert items["cap multiple"].startswith("8 (D-039, D-047; no unit shows token-cap-hit evidence over 10% on the pilot, measured or projected")
     assert items["pilot σ and power"].startswith("σ_w 0.500, σ_g 0.300 from the gate's priors (no gate run)") and "Full table:" in items["pilot σ and power"]
     power = json.loads((run.phase_dir("pilot") / "power.json").read_text())
     assert power["key"]["reps"] == run_study.OFFLINE_POWER["reps"] and set(power["power"]["families"]) and pilot["outputs"]["power"]
@@ -685,17 +718,20 @@ def _gate(run, groups):
 
 
 def test_the_cap_hit_gate_doubles_the_multiple_for_every_arm_and_reruns_only_the_arms_over(clean_env, monkeypatch):
-    """D-039/D-045: M7's token-cap hits are 25% of its F1-2 samples at 8 x B0, 15% at 16 and 5% at 32."""
-    m7 = {8: 5, 16: 3, 32: 1}
+    """D-039/D-047: M7's token-cap hits are 8 of its 20 F1-2 samples at 8 x B0 (lower bound 19%), 6 at 16 (12%) and 2
+    at 32: the multiple doubles twice, only M7 re-runs, and the bound decides (6 of 20 is over, 5 of 20 is not)."""
+    m7 = {8: 8, 16: 6, 32: 2}
     run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"token": m7[m]} if arm == "M7" else {})
     gate, latest, record = _gate(run, groups)
-    assert gate["rule"] == "token_rate" and gate["multiple"] == 32 and gate["passed"] and gate["over"] == {} and gate["turn_over"] == {}
-    assert [(r["multiple"], r["rerun"], r["over"]) for r in gate["rounds"]] == [(8, [], {"M7": ["F1-2"]}), (16, ["M7"], {"M7": ["F1-2"]}), (32, ["M7"], {})]
+    assert gate["rule"] == "token_lower_bound" and gate["multiple"] == 32 and gate["passed"] and gate["over"] == {} and gate["turn_over"] == {}
+    assert [(r["multiple"], r["rerun"], sorted(r["over"])) for r in gate["rounds"]] == [(8, [], ["M7"]), (16, ["M7"], ["M7"]), (32, ["M7"], [])]
+    assert gate["rounds"][1]["units"]["M7"]["cells"] == ["F1-2"] and gate["rounds"][1]["units"]["M7"]["token"]["k"] == 6, "its F1-32, projected from F1-2, adds no samples"
     # Each re-run: M7 alone, the pilot's cells, under the test's caps at the new multiple, in a log dir of its own.
     assert [[(a["run"], g["caps"], g["cap_multiple"]) for g in gs for a in g["arms"]] for gs in reruns] == [[("M7", {"F1-2": 16000}, 16)], [("M7", {"F1-2": 32000}, 32)]]
     assert len({g["dir"] for gs in reruns for g in gs} | {groups[0]["dir"]}) == 3 and "-x16-" in reruns[0][0]["dir"]
     assert sorted(latest) == ["x32-M7.eval", "x8-S1.eval"], "the calibration reads every arm's latest logs"
-    assert gate["rates"]["M7"]["F1-2"]["token_rate"] == 0.05 and gate["rates"]["S1"]["F1-2"]["token_rate"] == 0.0 and gate["rates"]["M7"]["F1-2"]["cap"] == 32000
+    assert gate["rates"]["M7"]["F1-2"]["token_rate"] == 0.1 and gate["rates"]["S1"]["F1-2"]["token_rate"] == 0.0 and gate["rates"]["M7"]["F1-2"]["cap"] == 32000
+    assert not any(w.startswith("M7 F1-2: token-hit") for w in gate["warnings"]), "10% is not over"
     # One cap for every arm: the test applies 32 x B0; the phases before it ran at 8.
     assert run_study.cap_multiple(run) == 32 and run_study.cap_multiple(run, "pilot") == run_study.cap_multiple(run, "tune") == 8
     assert run_study.token_caps(run)["F1-2"]["cap"] == 32000 and run_study.token_caps(run, "pilot")["F1-2"]["cap"] == 8000
@@ -706,45 +742,90 @@ def test_the_cap_hit_gate_doubles_the_multiple_for_every_arm_and_reruns_only_the
     assert run_study._pilot_projected(proj) == pytest.approx(3 * once) and once > 0
 
 
-def test_turn_cap_hits_never_raise_the_multiple_and_the_freeze_refuses_them(clean_env, monkeypatch):
-    """D-045: a bigger token cap cannot change a turn-cap hit: reported per arm and cell, never re-run, and the freeze
-    refuses while an arm's turn-cap-hit rate is over 10% (offline and live alike). Other limits are reported."""
+def test_session_health_refuses_the_freeze_on_evidence_of_errors_limits_or_unexpected_overflows():
+    """R-B5 (d): Study G's freeze applies the cap gate's rule to the micro-pilot's sessions: a lower bound over 10%
+    refuses; an arm whose overflowing W is its measured outcome (CM0, S1, M1, M2, CM-prune) never refuses on it."""
+    b = run_study._rate_bound
+    ok = {"sessions": 20, "error": b(0, 20), "limit": b(0, 20), "overflow": b(0, 20)}
+    health = {
+        "CM0": ok | {"overflow": b(20, 20), "overflow_expected": True},
+        "CM-sum": ok | {"overflow": b(8, 20), "overflow_expected": False},
+        "M1": ok | {"error": b(8, 20), "overflow_expected": True},
+        "O-state": ok | {"limit": b(3, 20), "overflow_expected": False},  # 15%: no evidence over 10%
+    }
+    problems = run_study.session_health_problems(health)
+    assert problems == [
+        "CM-sum: overflows of the window W in 8 of 20 micro-pilot sessions (lower bound 19.1% > 10%)",
+        "M1: harness errors in 8 of 20 micro-pilot sessions (lower bound 19.1% > 10%)",
+    ]
+
+
+def test_a_point_estimate_over_10_percent_without_evidence_is_a_warning_not_an_escalation(clean_env, monkeypatch):
+    """S-5: 3 of 20 (15%) is over 10% as a point estimate, but its lower bound (3.2%) is not: the reviewer's point rule
+    escalated by chance at true rates of 2-5%. Recorded as a warning, in the freeze record too."""
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"token": 3, "turn": 3, "other": 3} if arm == "M7" else {})
+    gate, _, record = _gate(run, groups)
+    assert gate["multiple"] == 8 and reruns == [] and gate["passed"] and gate["over"] == gate["turn_over"] == gate["other_over"] == {}
+    assert gate["units"]["M7"]["token"]["lower_bound"] < 0.1 < gate["units"]["M7"]["token"]["rate"]
+    assert any(w.startswith("M7 F1-2: token-hit rate 15.0% over 10% (point estimate") for w in gate["warnings"]) and run_study.read_cap_gate(run)[1] == []
+    assert any("cap gate (warning only)" in w for w in record["warnings"])
+
+
+def test_turn_and_other_limit_evidence_never_raise_the_multiple_and_the_freeze_refuses_them(clean_env, monkeypatch):
+    """D-045, R-B5 (b): a bigger token cap cannot change a turn-cap hit or a working-time / cost-guard stop: reported per
+    unit, never re-run, and the freeze refuses while either's lower bound is over 10% (offline and live alike)."""
     for offline in (False, True):
-        run, groups, reruns = _cap_gate_pilot(clean_env / str(offline), monkeypatch, offline=offline, hits=lambda arm, m: {"turn": 4, "other": 3} if arm == "M7" else {})
+        run, groups, reruns = _cap_gate_pilot(clean_env / str(offline), monkeypatch, offline=offline, hits=lambda arm, m: {"turn": 7, "other": 7} if arm == "M7" else {})
         gate, _, record = _gate(run, groups)
         assert gate["multiple"] == 8 and reruns == [] and gate["over"] == {} and not gate["passed"]
-        assert gate["turn_over"] == {"M7": ["F1-2"]} and gate["other_over"] == {"M7": ["F1-2"]} and gate["rates"]["M7"]["F1-2"]["turn_rate"] == 0.2
-        assert run_study.read_cap_gate(run)[1] == ["D-045: {'M7': ['F1-2']} over 10% turn-cap hits on the pilot: the turn caps need a decision, not a bigger token cap"]
-        assert any("turn caps are decided" in w for w in record["warnings"]) and any("other limits" in w for w in record["warnings"])
+        assert set(gate["turn_over"]) == set(gate["other_over"]) == {"M7"} and gate["rates"]["M7"]["F1-2"]["turn_rate"] == 0.35
+        problems = run_study.read_cap_gate(run)[1]
+        assert problems[0].startswith("D-045: {'M7': ") and problems[0].endswith("the turn caps need a decision, not a bigger token cap")
+        assert problems[1].startswith("R-B5: {'M7': ") and "fix the harness or the guards" in problems[1]
+        assert any("turn caps are decided" in w for w in record["warnings"]) and any("other-limit evidence" in w for w in record["warnings"])
 
 
 def test_the_cap_hit_gate_stops_at_32_and_the_freeze_refuses_an_arm_still_over(clean_env, monkeypatch):
-    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"token": 4} if arm == "M7" else {})
+    run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"token": 8} if arm == "M7" else {})
     gate, _, record = _gate(run, groups)
     assert gate["multiple"] == 32 and not gate["passed"] and len(reruns) == 2
-    assert gate["over"] == {"M7": ["F1-2", "F1-32"]} and gate["over_projected"] == {"M7": ["F1-32"]}, "M7's F1-32 (unpiloted here) projected from F1-2"
+    assert gate["over"] == {"M7": ["F1-2"]} and gate["over_projected"] == {}
     gate_, problems = run_study.read_cap_gate(run)
-    assert gate_ == gate and problems == ["D-039: {'M7': ['F1-2', 'F1-32']} still over 10% token-cap hits at 32 x B0 (the largest multiple): the caps cannot be frozen"]
+    assert gate_ == gate and problems == ["D-039: {'M7': ['F1-2']} still show token-cap-hit evidence over 10% at 32 x B0 (the largest multiple): the caps cannot be frozen"]
     assert any("the freeze refuses" in w for w in record["warnings"])
     run.cap_gate_path.unlink()
     assert "has not run" in run_study.read_cap_gate(run)[1][0]
     assert run_study.read_cap_gate(StudyRun("study_g", "cg", runs_root=clean_env / "runs")) == (None, []), "Study G has no caps"
     # A re-run the budget cannot afford stops before it runs.
-    run2, groups2, reruns2 = _cap_gate_pilot(clean_env / "b", monkeypatch, hits=lambda arm, m: {"token": 4} if arm == "M7" else {}, remaining=0.5)
+    run2, groups2, reruns2 = _cap_gate_pilot(clean_env / "b", monkeypatch, hits=lambda arm, m: {"token": 8} if arm == "M7" else {}, remaining=0.5)
     with pytest.raises(BudgetError, match="pilot cap re-run at 16 x B0"):
         _gate(run2, groups2)
     assert reruns2 == []
 
 
-def test_a_projected_rate_raises_the_multiple_without_a_rerun(clean_env, monkeypatch):
-    """D-045: S8k3 is not in the pilot. Its projection is the share of S1's samples over cap / 3 (three S1 attempts):
-    S1 at 3,000 tokens exceeds 8,000 / 3, so the multiple doubles; at 16 (cap / 3 = 5,333) it does not. Nothing re-runs."""
+def test_a_projected_unit_raises_the_multiple_without_a_rerun(clean_env, monkeypatch):
+    """S8k3 is not in the pilot. Its projection is the share of resampled triples of S1's samples whose total exceeds
+    the cap (R-B5 (c)): S1 at 3,000 tokens, three of them 9,000 > 8,000, so the multiple doubles; at 16 they fit."""
     run, groups, reruns = _cap_gate_pilot(clean_env, monkeypatch, hits=lambda arm, m: {"tokens": 3000} if arm == "S1" else {})
     gate, _, _ = _gate(run, groups)
     assert reruns == [] and gate["multiple"] == 16 and gate["passed"]
-    assert [(r["multiple"], r["rerun"], r["over_projected"].get("S8k3")) for r in gate["rounds"]] == [(8, [], ["F1-2"]), (16, [], None)]
-    assert gate["projected"]["S8k3"]["F1-2"] == {"samples": 20, "cap": 16000, "token_rate": 0.0, "turn_rate": None, "source": "S1's pilot samples over cap / 3 (three S1 attempts)", "projected": True}
-    assert gate["rounds"][1]["raised_by"] == {"measured": {}, "projected": {"S8k3": ["F1-2"]}}
+    assert [(r["multiple"], r["rerun"], sorted(r["over"])) for r in gate["rounds"]] == [(8, [], ["S8k3"]), (16, [], [])]
+    assert gate["projected"]["S8k3"]["F1-2"]["token_rate"] == 0.0 and gate["projected"]["S8k3"]["F1-2"]["source"] == "resampled triples of S1's pilot samples against the cap"
+    assert gate["rounds"][0]["units"]["S8k3"]["token"]["k"] == 20 and gate["rounds"][1]["raised_by"] == {"S8k3": ["F1-2"]}
+
+
+def test_s8k3_is_projected_from_resampled_triples_of_s1_samples():
+    """R-B5 (c): P(X1 + X2 + X3 > cap) over the S1 samples, not the share over cap / 3 (which overstates it)."""
+    import pandas as pd
+
+    def s1(tokens, hit=()):
+        return pd.DataFrame([{"error": False, "token_hit": i in hit, "total_tokens": t} for i, t in enumerate(tokens)])
+
+    n, p = run_study.s8k3_triples(s1([1000, 1000, 5000]), 8000)
+    # triples (ordered, with replacement): a sum over 8,000 needs at least two 5,000s: 3 positions x 2 choices for the third (7) / 27
+    assert n == 3 and p == pytest.approx(7 / 27)
+    assert run_study.s8k3_triples(s1([100, 100], hit=(1,)), 10**9)[1] == pytest.approx(1 - 1 / 8), "a sample its own cap stopped is unbounded"
+    assert run_study.s8k3_triples(s1([100]), None) == (1, 0.0) and run_study.s8k3_triples(pd.DataFrame(columns=["error", "token_hit", "total_tokens"]), 10) == (0, 0.0)
 
 
 def test_cap_hit_rates_split_token_turn_and_other_hits_and_project_uncapped_samples():
@@ -767,19 +848,26 @@ def test_cap_hit_rates_split_token_turn_and_other_hits_and_project_uncapped_samp
     assert run_study.arms_over(rates) == {"M7": ["F1-2"], "S1": ["F3-5"]} and run_study.arms_over({"S1": {"F1-2": {"token_rate": 0.1}}}) == {}, "over is > 10%"
     assert run_study.arms_over(rates, "turn_rate") == {"M7": ["F1-2"]}
     assert run_study.pilot_samples([]).empty
+    # The decision is the pooled unit's lower bound (R-B5): 1 of 4 is no evidence of a rate over 10%.
+    units = run_study.cap_units(rates, {})
+    assert units["M7"]["token"]["k"] == 1 and units["M7"]["token"]["n"] == 4 and units["M7"]["token"]["lower_bound"] < 0.1 and run_study.units_over(units) == {}
 
 
 def test_projections_for_m1s_unpiloted_levels_and_sol_cells(clean_env):
     import pandas as pd
 
     run = StudyRun("main", "pj", offline=True, runs_root=clean_env / "runs")
-    r = lambda rate, cap=1000: {"samples": 20, "cap": cap, "token_rate": rate, "turn_rate": 0.0}  # noqa: E731
+    r = lambda rate, cap=1000: {"samples": 20, "cap": cap, "token_hits": round(rate * 20), "token_rate": rate, "turn_rate": 0.0}  # noqa: E731
     rates = {"M1": {"F1-32": r(0.2)}, "S1": {"F7-10": r(0.0, 100), "F7-1000": r(0.15, 900)}}
     proj, missing = run_study.projected_rates(run, pd.DataFrame(columns=list(run_study.SAMPLE_COLUMNS)), rates, {})
     assert proj["M1s"]["F1-32"]["token_rate"] == 0.2 and proj["M1s"]["F1-32"]["source"].startswith("M1's (measured)")
     assert proj["S1"]["F7-100"]["token_rate"] == 0.15 and "F7-1000" in proj["S1"]["F7-100"]["source"], "equidistant levels: the higher rate"
     assert proj["M1"]["F1-32 (main_sol)"]["token_rate"] == 0.2 and proj["S1"]["F7-100 (main_sol)"]["source"].startswith("main_luna's S1 F7-100")
     assert "S8k3 F1-2" in missing and "S5 F1-32" in missing and all(x["projected"] for c in proj.values() for x in c.values())
+    # Units: a Sol unit pools its cells' Luna counts; a nearest-level projection in the study's profile adds no samples.
+    assert proj["S1"]["F7-100"]["pool"] is False and proj["S1"]["F7-100 (main_sol)"]["pool"] is True and proj["M1s"]["F1-32"]["unit"] == "M1s"
+    units = run_study.cap_units(rates, proj)
+    assert units["S1"]["token"]["n"] == 40 and units["S1 (main_sol)"]["cells"] == ["F7-100 (main_sol)"] and "S1 F1-32 (main_sol)" in missing
 
 
 def test_b0_counts_every_model_of_a_sample_and_skips_errored_ones(monkeypatch):
@@ -814,13 +902,16 @@ def test_main_builds_cover_the_kg_cells_and_share_the_gates_dev_worlds(clean_env
     assert run_study.kg_build_cell(StudyRun("main", "b6n", runs_root=clean_env / "runs", gate_run_id="g-nogo"), "test")[0].spec["systems"] == ["lightrag"]
     dev = {f"{s['family']}-{s['level']}": s for s in run_study.world_specs(live, "dev")}
     assert set(dev) == {"F1-32", "F2-10", "F3-60", "F7-1000"}
-    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == ["apg"], "M1k and M2 read the KG; S3s no longer tunes in main (D-041)"
+    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == [], "only M1 tunes on F7-1000 (D-041, D-047): no KG or chunks to build"
     assert "shared" not in dev["F1-32"] and dev["F1-32"]["kinds"] == [] and dev["F1-32"]["seed_base"] == 1000
     assert run_study.kg_worlds(live, "dev") == {}, "shared dev worlds are the gate's: not projected again"
 
 
-def test_a_live_build_dev_refuses_another_builder_than_the_gate_runs(clean_env):
+def test_a_live_build_dev_refuses_another_builder_than_the_gate_runs(clean_env, monkeypatch):
     _fake_gate_run(clean_env / "gates", "g-go", "GO")
+    # Since D-047 no main tuning cell reads an artifact on the shared dev worlds; the guard still stands for one that does.
+    real = run_study.world_specs
+    monkeypatch.setattr(run_study, "world_specs", lambda r, split: [s | ({"kinds": ["apg"]} if s.get("shared") else {}) for s in real(r, split)])
     run = StudyRun("main", "b", runs_root=clean_env / "runs", gate_run_id="g-go", gate_runs_root=clean_env / "gates")
     assert run_study._refuse_other_builder(run) is None, "no gate build-dev record: nothing to compare"
     ours = run_study.build_params(run)
@@ -886,6 +977,11 @@ def test_a_live_tune_refuses_a_grid_that_breaks_the_tuning_rules(clean_env, monk
     offline the tune records the problems and runs."""
     grid = yaml.safe_load((ROOT / "config" / "tuning_grid_main.yaml").read_text())
     grid |= {"owners": dict.fromkeys(grid["owners"], "Ada") | {"S1": "Sam"}, "signed_off": dict.fromkeys(grid["signed_off"], True)}
+    # The plan's tuning cells price M1 and M7 (D-047): the grid's other systems (S9 until F-arms moves it to `inherited`)
+    # are left out here, so the check meets a grid that agrees with the plan.
+    grid["systems"] = {k: v for k, v in grid["systems"].items() if k in ("M1", "M7")}
+    grid["owners"] = {k: v for k, v in grid["owners"].items() if k in ("M1", "M7", "S1")}
+    grid["signed_off"] = {k: v for k, v in grid["signed_off"].items() if k in ("M1", "M7", "S1")}
     monkeypatch.setattr(run_study, "_load_grid", lambda r: grid)
     monkeypatch.setattr(run_study, "_refuse_frozen", lambda phase: lambda r: None)
     monkeypatch.setattr(run_study, "_refuse_unbuilt", lambda phase: lambda r: None)
@@ -923,6 +1019,10 @@ def test_each_tuned_arm_runs_with_exactly_its_own_selections_knobs(clean_env):
     # The main study: M1s runs under M1's selection (it reads M1's knobs, D-041), with M1, never another arm's.
     main_sel = {"M1": {"arm": "M1", "env": {"APE_MAS_M1_PROMPT": "concise"}}, "M7": {"arm": "M7", "env": {"APE_MAS_M7_PROMPT": "verify"}}, "S9": {"arm": "S9", "env": {}}}
     assert run_study.env_group("M1s", "M1s", main_sel) == ("sel-M1", {"APE_MAS_M1_PROMPT": "concise"})
+    assert run_study.env_group("M1k", "M1k", main_sel) == run_study.env_group("M2", "M2", main_sel) == ("sel-M1", {"APE_MAS_M1_PROMPT": "concise"}), "D-047: the M1 chain runs M1's selection"
+    assert run_study.env_group("S9", "S9", {k: v for k, v in main_sel.items() if k != "S9"}) == ("sel-M1", {"APE_MAS_M1_PROMPT": "concise"}), "D-047: S9 too"
+    planned = __import__("ape.tuning", fromlist=["planned_tuning"]).planned_tuning((c.id, c.spec) for c in run_study.phase_cells(StudyRun("main", "p", offline=True, runs_root=clean_env / "runs"), "tune"))
+    assert planned["M1"] == {"candidates": {"main.tune.a": 4, "main.tune.b": 4}, "cells": ["F1-32", "F2-10", "F3-60", "F7-1000"]} and not {"S9", "M1k", "M2"} & set(planned)
     assert run_study.env_group("M7", "M7", main_sel) == ("sel-M7", {"APE_MAS_M7_PROMPT": "verify"})
     assert run_study.env_group("S9", "S9", main_sel) == ("selected", {}) and run_study.env_group("S1", "S1", main_sel) == ("selected", {})
     assert run_study.env_group("S7", "S7", main_sel) == ("s7", {}), "S7's group carries only its schedule knob"
@@ -963,6 +1063,17 @@ def test_study_g_grid_checks_allow_the_shared_cm_namespace_and_hold_each_arm_to_
     # Topology is a primary test plan phase (G-H3 is confirmatory, D-033 / D-042): its groups run with the primary ones.
     assert run_study.STUDIES["study_g"].primary == ("capability_anchor", "context_management", "topology")
     assert all(g["primary"] for g in run_study.run_groups(run, "test") if g["cell"].startswith(("g.cap.", "g.cm.", "g.topo.")))
+
+
+def test_each_tuning_system_runs_under_its_own_per_sample_cost_limit(clean_env):
+    """R-C4: a system's candidates get the cost model's $ per sample of that system's arms in the tuning cells, not
+    the plan's flat default: M7 (a council) costs more per sample than M1 (orchestrator and workers)."""
+    run = StudyRun("main", "tc", offline=True, runs_root=clean_env / "runs")
+    cells = run_study.phase_cells(run, "tune")
+    m7, m1 = run_gate.tune_sample_usd(run, cells, {"M7": 4}), run_gate.tune_sample_usd(run, cells, {"M1": 4})
+    assert m7 and m1 and m7 != m1 and run_gate.tune_sample_usd(run, cells, {"nope": 1}) is None
+    gate = GateRun("tc", offline=True, runs_root=clean_env / "gates")
+    assert run_gate.tune_sample_usd(gate, [run_gate.plan(gate).cell("gate.tune")], {"APG-s": 4, "APG-q": 2}) > 0
 
 
 def test_the_budget_guard_counts_the_studys_allocation(clean_env, monkeypatch):
@@ -1026,7 +1137,9 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
     assert run_phases(run, "freeze") == {"freeze": "done"}
     freeze = run_study.require_frozen(run)
     assert freeze["rehearsal"] is False and freeze["test_seeds"]["base"] == 13000 and freeze["kg"]["arm"] == "APG-q" and freeze["code_commit"]
-    assert {"PREREGISTRATION_MAIN.md", "config/tuning_grid_main.yaml", "config/token_caps.json", "config/cap_gate.json", "config/s7_targets.json", "gate/selected.yaml", "gate/decision.json", "uv.lock"} <= set(freeze["files"])
+    assert {"PREREGISTRATION_MAIN.md", "config/tuning_grid_main.yaml", "config/token_caps.json", "config/cap_gate.json", "config/s7_targets.json", "config/gate_resolution.json", "uv.lock"} <= set(freeze["files"])
+    assert not any(k.startswith("gate/") for k in freeze["files"]), "R-A1: no gate file is frozen, only the run's copy of its resolution"
+    assert freeze["test_affordability"]["projected_usd"] <= freeze["test_affordability"]["remaining_usd"] and freeze["test_cost_limits"], "R-B3, R-C6"
     assert freeze["cap_multiple"] == 16 and freeze["token_caps"]["F1-2"] == 1600 and freeze["cap_gate"]["rates"] == {"M7": {"F1-2": {"rate": 0.05}}}, "D-039: the test's multiple"
     assert "<!-- ape:test-seeds study=main run=live-freeze base=13000 count=9 -->" in provenance.read_text() and (ROOT / "PROVENANCE.md").read_bytes() == real
     assert run_study.choose_test_seed_base(StudyRun("main", "next", **kw))[0] == 13100
@@ -1037,10 +1150,13 @@ def test_a_live_freeze_refuses_placeholders_then_freezes_a_main_block_the_gate_n
     for phase in ("micro-pilot", "tune", "pilot"):
         with pytest.raises(PhaseError, match=f"{phase}: run 'live-freeze' is frozen"):
             run_phases(StudyRun("main", "live-freeze", force=True, **kw), phase)
+    # R-A1: a gate re-analysis (decision.json rewritten) leaves the frozen run intact; an allocation change too (R-B3).
+    run_gate._write_json(tmp / "gates" / "g-go" / "report" / "decision.json", {"verdict": {"label": "GO", "reasons": []}, "generated_at": "later"})
+    assert run_study.require_frozen(StudyRun("main", "live-freeze", **kw))["frozen_at"] == freeze["frozen_at"]
     gate_selected = tmp / "gates" / "g-go" / "config" / "selected.yaml"
-    gate_selected.write_text(gate_selected.read_text() + "\n# edited\n")
-    with pytest.raises(PhaseError, match=r"gate/selected.yaml \(.*\): changed"):
-        run_study.require_frozen(StudyRun("main", "live-freeze", **kw))
+    gate_selected.write_text(yaml.safe_dump({**SELECTED, "S3s": {"arm": "S3s", "env": {"APE_S3S_BUDGET": "4000"}, "candidate": "s3s-4000"}}))
+    with pytest.raises(PhaseError, match=r"resolution changed since this run copied it"):
+        run_study.kg_resolution(StudyRun("main", "live-freeze", **kw))
 
 
 def test_live_build_test_and_test_refuse_code_or_knobs_other_than_the_frozen_ones(clean_env, monkeypatch):
@@ -1163,13 +1279,145 @@ def test_the_analyze_phase_calls_the_studys_analysis_entry_point(clean_env, monk
     monkeypatch.setitem(sys.modules, "ape.analyze_main", types.SimpleNamespace(analyze=analyze))
     monkeypatch.setattr(run_study, "analysis_available", lambda r: True)
     run = StudyRun("main", "an", runs_root=clean_env / "runs", gate_run_id="g")
+    with pytest.raises(PhaseError, match=r"analyze: the report would rest on what the freeze did not fix: run 'an' is not frozen"):
+        run_study._analyze(run, {"outputs": {}, "warnings": []})
+    assert calls == []
+    run = StudyRun("main", "an", runs_root=clean_env / "runs", gate_run_id="g", deviation="a test of the entry point, no freeze")
     record: dict = {"outputs": {}, "warnings": []}
     run_study._analyze(run, record)
     assert calls == ["an"] and record["analysis"] == {"status": "done", "label": "H1 supported"} and set(record["outputs"]) == {"report.md"}
+    assert record["deviation"]["reason"] == "a test of the entry point, no freeze" and "Deviation from the freeze" in (run.dir / "report" / "report.md").read_text()
     monkeypatch.setitem(sys.modules, "ape.analyze_main", types.SimpleNamespace(analyze=lambda r: {}))
     (run.dir / "report" / "report.md").unlink()
     with pytest.raises(PhaseError, match="wrote no"):
         run_study._analyze(run, {"outputs": {}, "warnings": []})
+
+
+def test_a_live_analyze_refuses_changed_frozen_files_unless_a_deviation_is_recorded(clean_env, monkeypatch):
+    """R-A2: live, the analysis refuses while a frozen file (the config slices, the analysis code, the run's frozen
+    outputs) changed since the freeze; `--deviation` records why and is stamped into decision.json and report.md.
+    The gate's analyze applies the same check. Offline the changes are warnings."""
+    import sys
+    import types
+
+    config = clean_env / "config"
+    shutil.copytree(ROOT / "config", config)
+    run = StudyRun("main", "dv", offline=True, runs_root=clean_env / "runs", config_dir=config)
+    frozen = {"config/run_plan.yaml": run_study.config_input(config / "run_plan.yaml", "main")}
+    run_gate._write_json(run.freeze_path, {"frozen_at": "then", "files": {k: run_gate._file_entry(p) for k, p in frozen.items()}})
+    plan_path = config / "run_plan.yaml"
+    raw = yaml.safe_load(plan_path.read_text())
+    next(c for c in raw["studies"]["main"]["phases"]["study_a"] if c["id"] == "main.A.arms")["epochs"] = 4
+    plan_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    def analyze(r):
+        out = r.dir / "report"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.md").write_text("# report\nbody\n")
+        (out / "decision.json").write_text(json.dumps({"status": "done"}))
+        return {"status": "done"}
+
+    monkeypatch.setitem(sys.modules, "ape.analyze_main", types.SimpleNamespace(analyze=analyze))
+    monkeypatch.setattr(run_study, "analysis_available", lambda r: True)
+    record: dict = {"outputs": {}, "warnings": []}
+    run_study._analyze(run, record)  # offline: a warning
+    assert record["freeze_problems"] and any("does not rest on the freeze" in w for w in record["warnings"]) and "deviation" not in json.loads((run.dir / "report" / "decision.json").read_text())
+    live = StudyRun("main", "dv", runs_root=clean_env / "runs2", config_dir=ROOT / "config")
+    live_freeze = {"frozen_at": "then", "files": {"config/run_plan.yaml": run_gate._file_entry(run_study.config_input(config / "run_plan.yaml", "main")) | {"sha256": "0" * 64}}}
+    run_gate._write_json(live.freeze_path, live_freeze)
+    with pytest.raises(PhaseError, match=r"frozen file changed since the freeze at then: config/run_plan.yaml .*: changed.*--deviation"):
+        run_study._analyze(live, {"outputs": {}, "warnings": []})
+    live = StudyRun("main", "dv", runs_root=clean_env / "runs2", config_dir=ROOT / "config", deviation="epochs raised after the freeze (logged)")
+    record = {"outputs": {}, "warnings": []}
+    run_study._analyze(live, record)
+    d = json.loads((live.dir / "report" / "decision.json").read_text())
+    assert d["deviation"]["reason"] == "epochs raised after the freeze (logged)" and d["deviation"]["changes"] == record["freeze_problems"]
+    md = (live.dir / "report" / "report.md").read_text().splitlines()
+    assert md[0] == "# report" and md[2].startswith("> **Deviation from the freeze**") and md[-1] == "body"
+    # The gate: the same check (a live gate run without a freeze refuses; with a deviation it records it).
+    gate = GateRun("gd", runs_root=clean_env / "gates")
+    with pytest.raises(PhaseError, match=r"run 'gd' is not frozen"):
+        run_gate.analyze_freeze_check(gate, run_gate.read_freeze(gate), run_gate.frozen_changes)
+    assert run_gate.analyze_freeze_check(GateRun("gd", runs_root=clean_env / "gates", deviation="why"), None, run_gate.frozen_changes) == ["run 'gd' is not frozen (" + run_gate._show(gate.freeze_path) + " missing)"]
+
+
+def test_paid_phases_recheck_the_smoke_and_an_override_never_outlives_its_code(clean_env, monkeypatch):
+    """R-B1: every live paid phase re-checks that the smoke the run settled still covers the code; an override counts
+    only at the code it was recorded at, and never for build-test or test."""
+    run = StudyRun("main", "sm", runs_root=clean_env / "runs", gate_run_id="g")
+    assert run_gate.smoke_currency_problems(run, "micro-pilot") == ["no live smoke is settled for this run (run.json smoke_check)"]
+    run_gate.update_run_info(run, smoke_check={"commits": ["abc123"]})
+    monkeypatch.setattr(run_gate, "code_drift", lambda commit: ["src/ape/run_study.py"])
+    assert run_gate.smoke_currency_problems(run, "pilot")[0].startswith("src, power, uv.lock changed since the smoke this run accepted (at abc123)")
+    monkeypatch.setattr(run_gate, "code_drift", lambda commit: [])
+    assert run_gate.smoke_currency_problems(run, "test") == []
+    run_gate.update_run_info(run, smoke_check={"override": "no key yet", "at": "then", "code": run_gate.code_identity()})
+    assert run_gate.smoke_currency_problems(run, "tune") == []
+    assert "covers only the phases before the freeze" in run_gate.smoke_currency_problems(run, "test")[0]
+    monkeypatch.setattr(run_gate, "code_identity", lambda: "other")
+    assert "an override never outlives the code it was given for" in run_gate.smoke_currency_problems(run, "tune")[0]
+    # The phase refuses before it records anything (the refusal names the fix).
+    monkeypatch.setattr(run_study, "_refuse_unbuilt", lambda phase: lambda r: None)
+    monkeypatch.setattr(run_study, "_refuse_frozen", lambda phase: lambda r: None)
+    monkeypatch.setattr(run_study, "kg_resolution", lambda r: {"needed": False, "system": None})
+    monkeypatch.setattr(run_gate, "is_complete", lambda r, p: True)
+    monkeypatch.setattr(run_study, "stray_environment", lambda r: [])
+    with pytest.raises(PhaseError, match=r"micro-pilot: the live smoke this run accepted does not cover the code that would run: .*Re-run preflight"):
+        run_study.run_phase(run, "micro-pilot")
+    assert not run.manifest_path("micro-pilot").exists()
+
+
+def test_pre_freeze_phases_carry_the_code_identity_in_params_and_log_dirs(clean_env, monkeypatch):
+    """R-B2: a code change makes the micro-pilot, tune and pilot stale, and their groups write new log dirs instead of
+    resuming the old code's logs."""
+    run = StudyRun("main", "code", offline=True, runs_root=clean_env / "runs")
+    monkeypatch.setattr(run_gate, "code_identity", lambda: "aaaa")
+    before = {p: run_study.phase_state(run, p)["fingerprint"] for p in ("build-dev", "micro-pilot")}
+    dirs = [g["dir"] for g in run_study.run_groups(run, "micro-pilot")]
+    assert run_study._tune_params(run)["code_identity"] == "aaaa"
+    monkeypatch.setattr(run_gate, "code_identity", lambda: "bbbb")
+    assert all(run_study.phase_state(run, p)["fingerprint"] != f for p, f in before.items())
+    assert not set(dirs) & {g["dir"] for g in run_study.run_groups(run, "micro-pilot")}
+    # The working limit is in the group digest too (R-C2): Inspect's task identity holds it.
+    cfg = clean_env / "config"
+    shutil.copytree(ROOT / "config", cfg)
+    r1 = StudyRun("main", "wl", offline=True, runs_root=clean_env / "runs", config_dir=cfg)
+    d1 = {g["dir"] for g in run_study.run_groups(r1, "micro-pilot")}
+    raw = yaml.safe_load((cfg / "run_plan.yaml").read_text())
+    raw["budget"]["sample_working_limit"]["agent_s"] = 3600
+    (cfg / "run_plan.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert not d1 & {g["dir"] for g in run_study.run_groups(StudyRun("main", "wl", offline=True, runs_root=clean_env / "runs", config_dir=cfg), "micro-pilot")}
+
+
+def test_the_runner_index_reads_only_the_latest_runs_identities():
+    """R-C2: a log dir's index keeps every identity it ever held; the final logs are the latest run's."""
+    from ape.runner import latest_tasks
+
+    index = {"tasks": {"old": {"log": "a.eval", "status": "success"}, "new": {"log": "b.eval", "status": "success"}}, "runs": [{"tasks": ["old"]}, {"tasks": ["new"]}, {"tasks": []}]}
+    assert latest_tasks(index) == {"new": {"log": "b.eval", "status": "success"}} and latest_tasks({"tasks": {}, "runs": []}) == {}
+
+
+def test_a_live_freeze_records_the_cost_limits_checks_affordability_and_freezes_the_native_record(clean_env, monkeypatch):
+    """R-B3: the allocation is a guard input, so a live freeze checks the test fits what is left; R-C6: the freeze
+    records each test group's per-sample cost limit (the test applies it) and, live with CM-native cells, freezes the
+    support record."""
+    from ape.agent.cm_arms import NATIVE_RECORD_ENV, record_native_support
+
+    run = StudyRun("main", "aff", offline=True, runs_root=clean_env / "runs")
+    run.out_config_dir.mkdir(parents=True)
+    run.selected_path.write_text(yaml.safe_dump({}))
+    need, left = run_study.test_affordability(run)
+    assert need == pytest.approx(run_study._test_projected(run)) and left > 0
+    limits = run_study.test_cost_limits(run)
+    groups = {g["dir"]: g for g in run_study.run_groups(run, "test") if g["arms"]}
+    assert set(limits) == set(groups) and all(v["cost_limit_usd"] >= 0.5 and v["sample_usd"] > 0 for v in limits.values())
+    g = next(iter(groups.values()))
+    assert limits[g["dir"]]["sample_usd"] == pytest.approx(run_study.group_projected(run, g) / run_study.group_live_samples(run, g), rel=1e-4)
+    monkeypatch.setenv(NATIVE_RECORD_ENV, str(record_native_support("openai/gpt-6-luna", True, evidence="test", path=clean_env / "native.json")))
+    live_g = StudyRun("study_g", "nat", runs_root=clean_env / "runs")
+    monkeypatch.setattr(run_study, "native_routes", lambda r: ({"g.cm.luna-high": "provider"}, []))
+    assert run_study.frozen_files(live_g, live_g.prereg_path)["native_compaction.json"] == clean_env / "native.json"
+    assert "native_compaction.json" not in run_study.frozen_files(StudyRun("study_g", "nat", offline=True, runs_root=clean_env / "runs"), live_g.prereg_path)
 
 
 def test_an_extension_names_a_frozen_primary_run_of_the_same_study(clean_env):

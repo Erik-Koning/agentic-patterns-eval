@@ -35,6 +35,7 @@ ledger, in the program's spend registry (`ape.spend`). `sample_cost_limit` is th
 
 import argparse
 import json
+import math
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
@@ -45,6 +46,7 @@ from typing import Any
 
 import yaml
 
+from . import yaml_cache
 from .config import ROOT
 from .models import COSTS_PATH, MODELS_PATH, Profile, load_costs, load_profile
 
@@ -142,7 +144,7 @@ def uncut(plan: Plan) -> Plan:
 def load_plan(path: Path = PLAN_PATH, *, uncut_plan: bool = False) -> Plan:
     """The run plan, validated: unique cell ids, known kinds, and every cut consistent with the cells
     (an applied cut's fields hold its `to` values, an unapplied cut's its `from` values)."""
-    raw = yaml.safe_load(Path(path).read_text()) or {}
+    raw = yaml_cache.load(path) or {}
     cells: list[PlanCell] = []
     for study, sdef in (raw.get("studies") or {}).items():
         for phase, specs in (sdef.get("phases") or {}).items():
@@ -170,7 +172,7 @@ def load_plan(path: Path = PLAN_PATH, *, uncut_plan: bool = False) -> Plan:
 
 
 def load_assumptions(path: Path = ASSUMPTIONS_PATH) -> dict:
-    return yaml.safe_load(Path(path).read_text()) or {}
+    return yaml_cache.load(path) or {}
 
 
 @dataclass(frozen=True)
@@ -196,7 +198,7 @@ class Prices:
 def load_measured(path: Path | None = MEASURED_PATH) -> list[dict]:
     if path is None or not Path(path).is_file():
         return []
-    return list((yaml.safe_load(Path(path).read_text()) or {}).get("entries") or [])
+    return list((yaml_cache.load(path) or {}).get("entries") or [])
 
 
 # --- Expansion: plan cells -> line items -> call groups ------------------------------------------------
@@ -264,10 +266,17 @@ def _arm_counts(arms: Any) -> dict[str, int]:
     return dict(Counter(str(a) for a in arms))
 
 
+TASKS_PER_WORLD = 12  # the runners build whole worlds of 12 tasks (`run_study.TASKS_PER_WORLD`, the gate's tune worlds)
+
+
 def _n_tasks(cell: PlanCell) -> int:
+    """Tasks per task cell as the runners run them: an `n_tasks` cell reads whole worlds of TASKS_PER_WORLD tasks
+    (100 -> 108, 50 -> 60, 20 -> 24, 15 -> 24; R-B4), or of its own `tasks_per_world` when it sets one (the live
+    smoke builds worlds of exactly its n_tasks); a `worlds` cell worlds x tasks_per_world."""
     s = cell.spec
     if "n_tasks" in s:
-        return int(s["n_tasks"])
+        per_world = int(s.get("tasks_per_world") or TASKS_PER_WORLD)
+        return math.ceil(int(s["n_tasks"]) / per_world) * per_world
     if "worlds" in s and "tasks_per_world" in s:
         return int(s["worlds"]) * int(s["tasks_per_world"])
     raise BudgetError(f"cell {cell.id}: needs n_tasks, or worlds and tasks_per_world")
@@ -743,19 +752,30 @@ def logs_spend(log_files: Iterable[str | Path], seen: set[str] | None = None) ->
     return {"inspect_usd": usd, "samples": samples, "partial_logs": partial, "unreadable": unreadable}
 
 
-def ledger_spend(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH, since: float | None = None) -> float:
+def ledger_spend(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH, since: float | None = None, label: str | None = None) -> float:
     """$ of every entry in one build/embedding ledger, priced from the table; with `since` (a Unix time), only the
-    entries written from then on."""
+    entries written from then on; with `label`, only the entries that run made (an entry without a label, from before
+    R-C1, counts for every label)."""
+    return float(sum(ledger_spend_by_label(ledger_path, costs_path, since, label).values()))
+
+
+def ledger_spend_by_label(ledger_path: str | Path | None, costs_path: Path = COSTS_PATH, since: float | None = None, label: str | None = None) -> dict[str | None, float]:
+    """{spend label: $} of one build/embedding ledger, by the label each entry carries (R-C1; None: an entry from
+    before labels, which `program_spend` attributes to the ledger's registered label)."""
     from .analysis.cost import load_prices, price_entry
     from .llm.ledger import Ledger
 
     if ledger_path is None or not Path(ledger_path).is_file():
-        return 0.0
+        return {}
     prices = load_prices(costs_path)
+    out: dict[str | None, float] = defaultdict(float)
     try:
-        return float(sum(price_entry(e, prices) for e in Ledger(ledger_path).read() if since is None or e.ts >= since))
+        for e in Ledger(ledger_path).read():
+            if (since is None or e.ts >= since) and (label is None or e.label in (None, label)):
+                out[e.label] += price_entry(e, prices)
     except KeyError as e:
         raise BudgetError(f"ledger {ledger_path}: {e}") from None
+    return dict(out)
 
 
 def usage_ledgers(root: str | Path) -> list[Path]:
@@ -785,14 +805,14 @@ def unlogged_spend(log_files: Iterable[str | Path], ledgers: Iterable[str | Path
         raise BudgetError(str(e)) from None
 
 
-def spent(log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH, usage_ledger_files: Iterable[str | Path] = ()) -> dict:
+def spent(log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH, usage_ledger_files: Iterable[str | Path] = (), ledger_label: str | None = None) -> dict:
     """$ already spent by these logs (each sample once; `logs_spend`) plus one build/embedding ledger, both priced
     from the one table, plus what the logs' usage ledgers hold that the logs do not (`unlogged_usd`: errored attempts,
     killed runs' in-flight samples). Pass every log of the tasks, failed attempts included: a sample shared with a
     retry's log is counted once."""
     log_files = list(log_files)
     logs = logs_spend(log_files)
-    ledger_usd = ledger_spend(ledger_path, costs_path)
+    ledger_usd = ledger_spend(ledger_path, costs_path, label=ledger_label)
     u = unlogged_spend(log_files, usage_ledger_files)
     return {
         "inspect_usd": logs["inspect_usd"], "ledger_usd": ledger_usd, "unlogged_usd": u["unlogged_usd"],
@@ -800,9 +820,10 @@ def spent(log_files: Iterable[str | Path] = (), ledger_path: Path | None = None,
     }  # fmt: skip
 
 
-def remaining(budget_usd: float, log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH, usage_ledger_files: Iterable[str | Path] = ()) -> dict:
-    """What is left of `budget_usd` after the logs', their usage ledgers' and the build ledger's spend."""
-    s = spent(log_files, ledger_path, costs_path, usage_ledger_files)
+def remaining(budget_usd: float, log_files: Iterable[str | Path] = (), ledger_path: Path | None = None, costs_path: Path = COSTS_PATH, usage_ledger_files: Iterable[str | Path] = (), ledger_label: str | None = None) -> dict:
+    """What is left of `budget_usd` after the logs', their usage ledgers' and the build ledger's spend (with
+    `ledger_label`, only that run's ledger entries)."""
+    s = spent(log_files, ledger_path, costs_path, usage_ledger_files, ledger_label)
     return {"budget_usd": float(budget_usd), **s, "remaining_usd": float(budget_usd) - s["spent_usd"]}
 
 
@@ -842,9 +863,12 @@ def program_spend(registry: Path | None = None, costs_path: Path = COSTS_PATH) -
         if not Path(f).is_file():
             missing.append(f)
             continue
-        usd = ledger_spend(f, costs_path)
-        ledger_rows.append({"path": f, "label": info["label"], "study": info["study"], "usd": usd})
-        by_study[info["study"]] += usd
+        # Per entry (R-C1): every study's builds append to one cache/ledger.jsonl, which the registry knows under the
+        # label of the first run that wrote to it; an entry carries its own run's label (older entries: that first one).
+        for lab, usd in sorted(ledger_spend_by_label(f, costs_path).items(), key=lambda kv: str(kv[0])):
+            lab = lab or info["label"]
+            ledger_rows.append({"path": f, "label": lab, "study": reg.study_of(lab), "usd": usd})
+            by_study[reg.study_of(lab)] += usd
     inspect_usd = sum(r["usd"] for r in rows)
     unlogged_usd = sum(r["unlogged_usd"] for r in rows)
     ledger_usd = sum(r["usd"] for r in ledger_rows)

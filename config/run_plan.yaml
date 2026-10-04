@@ -24,8 +24,10 @@ budget:
   total_usd: 5000
   # Per-study ceilings the orchestrators' budget guards enforce (with the program total). D-035 (2026-10-03): set to the
   # right-sized plan's conservative projection plus headroom (gate 214, main 1,013, study_g 3,483 -> 4,710); were the
-  # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells.
-  allocations: {gate: 300, main: 1100, study_g: 3600}
+  # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells. R-B4
+  # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,126.8 + the D-039 pilot re-runs the
+  # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225).
+  allocations: {gate: 300, main: 1225, study_g: 3600}
   contingency_usd: 270
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
@@ -114,9 +116,10 @@ studies:
         - {id: main.micro-pilot, arms: [S1, S5, M1], cells: [F1-2, F1-32, F7-10, F7-1000], n_tasks: 20, epochs: 2,
            note: "brief §7.1; S5 on F1 as the KG-on-F1 probe"}
       tuning:
-        - {id: main.tune.a, arms: {S9: 4, M1: 4, M7: 4}, cells: [F1-32, F2-10], n_tasks: 20, epochs: 1}
-        - {id: main.tune.b, arms: {M1: 4, M1k: 4, M2: 4}, cells: [F3-60, F7-1000], n_tasks: 20, epochs: 1,
-           note: "D-041: S3s and S5 inherit the gate's selections (same profile and dev worlds); not re-tuned"}
+        - {id: main.tune.a, arms: {M1: 4, M7: 4}, cells: [F1-32, F2-10], n_tasks: 20, epochs: 1,
+           note: "D-047: S9 runs under M1's selection (one protocol variant for S9 and the M1 chain), so it is not tuned"}
+        - {id: main.tune.b, arms: {M1: 4}, cells: [F3-60, F7-1000], n_tasks: 20, epochs: 1,
+           note: "D-041: S3s and S5 inherit the gate's selections (same profile and dev worlds); not re-tuned. D-047: M1k and M2 run under M1's selection, so M1 alone tunes here"}
       pilot:
         - {id: main.pilot.a, arms: [S1, S9, M1, M7], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 20, epochs: 1}
         - {id: main.pilot.b, arms: [S1, S3s, S5, S7, M1, M1k, M2], cells: [F3-5, F3-60, F7-10, F7-1000],
@@ -153,6 +156,8 @@ studies:
       micro_pilot:
         - {id: g.pilot.luna, kind: session, arms: [CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state],
            N: 40, sessions: 3, epochs: 1, note: "~3 sessions per arm at one tier (audit §8)"}
+        - {id: g.pilot.topo, kind: session, arms: [S1, M1, M2, S-CM*], N: 20, knobs: {output_tokens: 2250}, sessions: 2, epochs: 1,
+           note: "D-047: the topology arms (the largest cost) piloted before the freeze, as g.topo.luna runs them; S-CM* at its default stack (before tuning)"}
       tuning:
         - {id: g.tune.luna, kind: session, arms: {CM-prune: 3, CM-sum: 2, CM-todo: 2, CM-reset: 3, S-CM*: 3},
            N: 40, sessions: 3, epochs: 1, note: "equal dev budget per strategy (audit §6.3)"}

@@ -104,7 +104,9 @@ def _effort(value: Any, where: str) -> Effort | None:
 def load_profile(name: str | None = None, path: Path = MODELS_PATH) -> Profile:
     """The named profile (default: $APE_MODEL_PROFILE, else "gate"), validated so a typo fails before any spend."""
     name = name or os.environ.get("APE_MODEL_PROFILE") or DEFAULT_PROFILE
-    profiles = (yaml.safe_load(path.read_text()) or {}).get("profiles") or {}
+    from . import yaml_cache
+
+    profiles = (yaml_cache.load(path) or {}).get("profiles") or {}
     if name not in profiles:
         raise ValueError(f"unknown model profile {name!r} in {path}; known: {sorted(profiles)}")
     raw = dict(profiles[name] or {})
@@ -241,7 +243,9 @@ def storage_warnings(root: Path = ROOT, min_free_gb: float = MIN_FREE_GB, disk_u
 def load_costs(path: Path = COSTS_PATH) -> dict[str, dict]:
     """The price table as Inspect reads it: {"provider/model": {input, output, input_cache_write, input_cache_read}},
     USD per 1M tokens. The ledger's view of the same file (bare model names) is `ape.analysis.cost.load_prices`."""
-    raw = yaml.safe_load(path.read_text()) or {}
+    from . import yaml_cache
+
+    raw = yaml_cache.load(path) or {}
     if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
         raise ValueError(f"{path}: expected a mapping of model -> {{{', '.join(COST_FIELDS)}}}")
     return raw

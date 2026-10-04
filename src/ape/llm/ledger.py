@@ -25,6 +25,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from ..spend import label as spend_label
 from ..spend import register_ledger
 
 
@@ -39,6 +40,7 @@ class LedgerEntry:
     reasoning_tokens: int = 0
     context: dict = field(default_factory=dict)  # e.g. {"world": "...", "system": "apg" | "lightrag"}
     ts: float = field(default_factory=time.time)
+    label: str | None = None  # the spend label (APE_SPEND_LABEL) of the run that made the call, set on append (R-C1)
 
 
 class Ledger:
@@ -56,6 +58,8 @@ class Ledger:
         # Entries are a few hundred bytes, well under the 4 KB that stays whole on any filesystem.
         # The program-wide spend registry learns of this file before its first entry (once per process).
         register_ledger(self.path)
+        if entry.label is None:  # attributed per entry: one cache/ledger.jsonl serves every study's builds (R-C1)
+            entry.label = spend_label()
         data = (json.dumps(asdict(entry), sort_keys=True) + "\n").encode()
         with self._lock:
             fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)

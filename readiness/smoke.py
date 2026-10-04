@@ -314,7 +314,9 @@ def _cell(step: str, profile: str, **spec) -> "object":
 def step_cells(profile: str) -> dict[str, list]:
     """The checks that call models, as ad-hoc plan cells for `ape.budget` (F7-100 is priced at its measured
     chunk count). effort reads the probe and retrieval embeds a few queries: both ~$0."""
-    agent = lambda step, arms, cell, n, **kw: _cell(step, profile, arms=arms, cells=[cell], n_tasks=n, epochs=kw.pop("epochs", 1), **kw)  # noqa: E731
+    # Each check builds one world of exactly its n tasks (tasks_per_world n: ape.budget prices the plan's cells as
+    # whole worlds of 12, R-B4).
+    agent = lambda step, arms, cell, n, **kw: _cell(step, profile, arms=arms, cells=[cell], n_tasks=n, tasks_per_world=n, epochs=kw.pop("epochs", 1), **kw)  # noqa: E731
     return {
         "L2": [_cell("L2", profile, kind="build", systems=["lightrag"], worlds={"F7-100": 1})],
         "D017": [_cell("D017", profile, kind="build", systems=["apg"], worlds={"F7-100": 1})],

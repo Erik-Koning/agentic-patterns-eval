@@ -175,4 +175,4 @@ def test_a_live_freeze_refuses_the_draft_naming_every_marker_and_freezes_it_fill
     freeze = run_study.require_frozen(run)
     assert freeze["rehearsal"] is False and freeze["test_seeds"]["base"] == 13000 and freeze["kg"]["arm"] == "APG-q"
     assert freeze["files"]["PREREGISTRATION_MAIN.md"]["sha256"] == run_gate._sha256(prereg)
-    assert {"src/ape/analyze_main.py", "src/ape/analysis/main_hypotheses.py", "uv.lock", "gate/decision.json"} <= set(freeze["files"]), "the freeze guards the analysis code"
+    assert {"src/ape/analyze_main.py", "src/ape/analysis/main_hypotheses.py", "uv.lock", "config/gate_resolution.json"} <= set(freeze["files"]), "the freeze guards the analysis code"

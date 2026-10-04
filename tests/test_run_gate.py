@@ -744,8 +744,8 @@ def test_test_groups_at_live_sizes_follow_the_plan():
     missed = {**calibration, "matched": False, "not_converged": ["S3s"], "arms": {**calibration["arms"], "S3s": {"converged": False, "env": {"APE_S3S_BUDGET": "9"}}}}
     m300 = {(g["cell"], g["name"]): g for g in run_gate.test_groups(run, selected, missed, offline=False)}[("gate.sec.matched-300", "matched")]
     assert m300["env"]["APE_S3S_BUDGET"] == "9" and m300["calibration"] == {"matched": False, "not_converged": ["S3s"]}
-    # The projection prices what runs: n_tasks-cells as whole worlds (108 tasks for 100).
-    assert run_gate._test_projected(run) > run_gate.project(run, [c for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES])
+    # The projection prices what runs: n_tasks-cells as whole worlds (108 tasks for 100), as ape.budget now does (R-B4).
+    assert run_gate._test_projected(run) == pytest.approx(run_gate.project(run, [c for c in p.cells if c.study == "gate" and c.phase in run_gate.TEST_RUN_PHASES]))
 
 
 def test_a_budget_override_only_lowers_the_plans_budget(clean_env):
@@ -884,7 +884,7 @@ def test_a_resume_is_guarded_on_the_work_that_is_left(clean_env, monkeypatch):
         seen["logs"] = sorted(Path(p).name for p in logs)
         return {"inspect_usd": 4.0}
 
-    def ledger_spend(path, costs, since=None):
+    def ledger_spend(path, costs, since=None, label=None):
         seen["since"] = since
         return 1.5
 
@@ -907,7 +907,7 @@ def test_a_resume_is_guarded_on_the_work_that_is_left(clean_env, monkeypatch):
     monkeypatch.setattr(run_gate, "group_spent", lambda d: 3.0)
     assert run_gate.group_remaining(run, g, 10.0) == 7.0
     gdir.mkdir(parents=True)
-    (gdir / INDEX_NAME).write_text(json.dumps({"runs": [{"status": "done"}], "tasks": {"a": {"status": "success"}, "b": {"status": "success"}}}))
+    (gdir / INDEX_NAME).write_text(json.dumps({"runs": [{"status": "done", "tasks": ["a", "b"]}], "tasks": {"a": {"status": "success"}, "b": {"status": "success"}}}))
     assert run_gate.group_remaining(run, g, 10.0) == 0.0
 
 
@@ -1193,3 +1193,17 @@ def test_a_runs_role_is_checked_at_its_freeze_and_one_extension_is_allowed(clean
     with pytest.raises(PhaseError, match="not both"):
         run_gate.run_role(GateRun("x", runs_root=root, extension_of="g1", fix_cycle_of="g3"))
     assert run_gate.frozen_role({"run_id": "old"}) == {"kind": "primary", "of": None}, "a freeze from before roles is primary"
+
+
+def test_the_gate_never_runs_with_a_shell_cache_nonce(tmp_path, monkeypatch):
+    """R-C5: the studies' per-eval-set cache nonce seed (APE_CACHE_NONCE, D-046) is cleared in the gate's environment
+    and is not one of its recorded knobs: a stray shell value would change every gate prompt."""
+    import os
+
+    from ape import run_gate
+
+    monkeypatch.setenv("APE_CACHE_NONCE", "from-shell")
+    run = run_gate.GateRun("nonce", offline=True, runs_root=tmp_path / "runs")
+    with run_gate.run_environment(run):
+        assert "APE_CACHE_NONCE" not in os.environ and "APE_CACHE_NONCE" not in run_gate._env_knobs()
+    assert os.environ["APE_CACHE_NONCE"] == "from-shell"
