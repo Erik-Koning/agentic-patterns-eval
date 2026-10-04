@@ -274,6 +274,17 @@ def read_index(log_dir: str | Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {"log_dir": str(log_dir), "runs": [], "tasks": {}}
 
 
+def latest_tasks(index: dict) -> dict:
+    """The index's task entries of its latest run that logged any (R-C2): `tasks` keeps every identity a log dir ever
+    held, so a re-run under a new identity (another working limit, cost limit or knob outside the task args) leaves the
+    superseded entries beside the current ones; each run records the identities it ended with."""
+    for run in reversed(index.get("runs") or []):
+        if run.get("tasks"):
+            keep = set(run["tasks"])
+            return {k: v for k, v in (index.get("tasks") or {}).items() if k in keep}
+    return {}
+
+
 def write_index(log_dir: str | Path, logs: list[EvalLog], run: dict) -> Path:
     """Upsert one entry per log (keyed by task identifier) and `run` into `<log_dir>/runner_index.json`: a run with
     a `key` replaces its earlier entry (the `running` one written at the start), otherwise it is appended."""

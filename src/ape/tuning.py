@@ -188,8 +188,10 @@ def run_candidate(
     costs_path: Path | None = None,
     make_task: Callable[[str, dict, int | None], Any] | None = None,
     sample_success: Callable[[Any], float] | None = None,
+    sample_cost_usd: float | None = None,
 ) -> dict:
-    """One candidate on every dev cell. `make_task(cell, cand, limit_worlds)` builds a cell's task (default: the gate
+    """One candidate on every dev cell. `sample_cost_usd` is the cost model's $ per sample of this system's candidates,
+    the base of the runner's per-sample `cost_limit` (R-C4; None: the plan's default limit). `make_task(cell, cand, limit_worlds)` builds a cell's task (default: the gate
     task on the dev split; a study orchestrator passes its own, e.g. the main study's task or an F8 session);
     `sample_success(sample)` scores one sample in [0, 1] (default: 1 when `task_success` is C)."""
     from inspect_ai.log import read_eval_log
@@ -203,8 +205,9 @@ def run_candidate(
         # allow_dirty: logs of an earlier run with other models or --limit-worlds may share the dir.
         prices = {"costs_path": costs_path} if costs_path is not None else {}
         success, logs = run_evals(
-            tasks, candidate_dir(log_dir, cand), profile=profile, model=model, model_roles=model_roles, epochs=epochs, display="none", log_dir_allow_dirty=True, **prices
-        )
+            tasks, candidate_dir(log_dir, cand), profile=profile, model=model, model_roles=model_roles, epochs=epochs, display="none", log_dir_allow_dirty=True,
+            sample_cost_usd=sample_cost_usd, **prices,
+        )  # fmt: skip
     if not success:
         failed = [f"{_cell(h)}: {h.error.message if h.error else h.status}" for h in logs if h.status != "success"]
         raise RuntimeError(f"{cand['id']}: " + "; ".join(failed))
@@ -243,6 +246,7 @@ def tune(
     costs_path: Path | None = None,
     make_task: Callable[[str, dict, int | None], Any] | None = None,
     sample_success: Callable[[Any], float] | None = None,
+    sample_cost_usd: float | None = None,
 ) -> dict:
     """Run every candidate of `system`, log each to `log_path` (default cache/tuning_log.jsonl), and return
     the selected record. Eval logs go to `<log_dir>/<system>/...` (default cache/tuning_logs); `costs_path`
@@ -258,7 +262,7 @@ def tune(
     for cand in candidates(grid, system):
         try:
             cells = grid["systems"][system].get("dev_cells") or grid["dev_cells"]
-            result = {"status": "ok", **run_candidate(cand, cells, model, model_roles, limit_worlds, epochs, system_dir, profile, costs_path, make_task, sample_success)}
+            result = {"status": "ok", **run_candidate(cand, cells, model, model_roles, limit_worlds, epochs, system_dir, profile, costs_path, make_task, sample_success, sample_cost_usd)}
         except RuntimeError as e:  # run failure: logged (PC6 evidence) and unselectable; config errors still raise
             result = {"status": "failed", "error": str(e)[:500], "mean_success": None, "cost_usd": None}
         rec = {"system": system, "candidate": cand, **result, "ts": time.time()}

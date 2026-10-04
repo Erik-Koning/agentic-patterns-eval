@@ -216,6 +216,7 @@ import re
 import subprocess
 import sys
 import traceback
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -313,8 +314,9 @@ TEST_SEED_MARKER = re.compile(r"<!-- ape:test-seeds run=(\S+) base=(\d+) count=(
 # Environment variables the orchestrator manages itself; every other APE_* knob is recorded in params.
 MANAGED_ENV = (
     "APE_WORLDS", "APE_INDICES", "APE_CACHE", "APE_EMBEDDINGS", "APE_EMBEDDING_MODEL", "APE_MODEL_PROFILE", "APE_S7_TARGETS",
-    TEST_SPLIT_ENV, TEST_SEED_BASE_ENV, REGISTRY_ENV, LABEL_ENV,
+    TEST_SPLIT_ENV, TEST_SEED_BASE_ENV, REGISTRY_ENV, LABEL_ENV, "APE_CACHE_NONCE",
 )  # fmt: skip
+CLEARED_ENV = ("APE_CACHE_NONCE",)  # the studies' per-eval-set cache nonce seed (D-046): the gate never runs with one
 # Operational settings change how a run executes (backups, build concurrency), never what it measures. They stay out
 # of phase fingerprints (toggling a backup must not re-run, or after a freeze block, a phase) and the knob warning.
 OPERATIONAL_ENV = ("APE_BACKUP_DIR", "APE_BUILD_LLM_CONCURRENCY", "APE_BUILD_PARALLEL_INSERT", "APE_BUILD_EMBED_CONCURRENCY", "APE_BUILD_WORKERS")
@@ -365,6 +367,7 @@ class GateRun:
     smoke_dir: Path = SMOKE_ROOT / "live"  # live preflight: the live smoke's report.json and checks.json (`check_live_smoke`)
     smoke_max_age_days: float = SMOKE_MAX_AGE_DAYS
     skip_smoke_check: str | None = None  # live preflight: the recorded reason for running without a fresh live smoke
+    deviation: str | None = None  # analyze only: a recorded reason to analyse although frozen files changed (R-A2)
 
     def __post_init__(self) -> None:
         if not _RUN_ID.match(self.run_id):
@@ -560,6 +563,43 @@ def code_state() -> dict | None:
     return {"head": head, "uncommitted": _digest(diff) if diff else None, "untracked": h.hexdigest()[:16] if untracked.strip() else None}
 
 
+_CODE_IDENTITY: dict[tuple, str | None] = {}
+
+
+def _code_signature() -> tuple:
+    """A cheap stand-in for asking git: every file under CODE_PATHS (path, size, mtime) and git's HEAD and index. Any
+    edit, commit, checkout or staging changes it, so `code_identity` asks git again only then."""
+    out = []
+    for name in CODE_PATHS:
+        p = ROOT / name
+        if p.is_file():
+            st = p.stat()
+            out.append((name, st.st_size, st.st_mtime_ns))
+        elif p.is_dir():
+            for f in sorted(p.rglob("*")):
+                if f.is_file() and "__pycache__" not in f.parts:
+                    st = f.stat()
+                    out.append((str(f.relative_to(ROOT)), st.st_size, st.st_mtime_ns))
+    dot = ROOT / ".git"  # a worktree's .git is a file naming its git dir
+    gitdir = Path(dot.read_text().split(":", 1)[1].strip()) if dot.is_file() and dot.read_text().startswith("gitdir:") else dot
+    for g in (gitdir / "HEAD", gitdir / "index"):
+        out.append((str(g), g.stat().st_mtime_ns if g.exists() else None, g.read_text().strip() if g.name == "HEAD" and g.is_file() else None))
+    return tuple(out)
+
+
+def code_identity() -> str | None:
+    """A short digest of `code_state()` (CODE_PATHS as committed, plus uncommitted and untracked changes); None when git
+    cannot tell. Paid pre-freeze phases carry it in their params and log-dir digests (R-B2), so a code change makes
+    them stale and a re-run writes new logs instead of resuming the old code's; overrides record it (R-B1). Cached
+    while `_code_signature` stands (git takes ~0.2 s; phases ask often)."""
+    sig = _code_signature()
+    if sig not in _CODE_IDENTITY:
+        state = code_state()
+        _CODE_IDENTITY.clear()
+        _CODE_IDENTITY[sig] = None if state is None else _digest(state)
+    return _CODE_IDENTITY[sig]
+
+
 @contextlib.contextmanager
 def _environ(updates: dict[str, str | Path | None]) -> Iterator[None]:
     """Set (or, for None, remove) environment variables for the duration; restore them after."""
@@ -609,6 +649,7 @@ def run_environment(run: GateRun) -> Iterator[None]:
     updates["APE_S7_TARGETS"] = run.s7_targets_path  # S7 reads the targets this run's pilot writes
     updates[TEST_SPLIT_ENV] = None
     updates[TEST_SEED_BASE_ENV] = None
+    updates |= dict.fromkeys(CLEARED_ENV)  # a shell APE_CACHE_NONCE would change every gate prompt (R-C5)
     # Spend registry (ape.spend): every log dir and ledger this run writes is labelled with the run; an offline run
     # has its own registry, so its guard exercises the program-wide count without touching the real one.
     updates[LABEL_ENV] = f"gate{'-offline' if run.offline else '-smoke' if run.smoke else ''}/{run.run_id}"
@@ -807,7 +848,7 @@ def spend(run: GateRun) -> dict:
     if run.budget_usd is not None:
         budget = min(budget, run.budget_usd)  # an override may only lower the plan's budget, never raise it
     program = program_remaining(budget, None, run.costs_path)
-    mine = remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path, usage_ledgers(run.dir))
+    mine = remaining(budget, run_log_files(run), Config().ledger_path, run.costs_path, usage_ledgers(run.dir), ledger_label=os.environ.get(LABEL_ENV) or None)
     return {
         "budget_usd": program["budget_usd"],
         "spent_usd": program["spent_usd"],
@@ -839,7 +880,7 @@ def prior_attempt_spend(run: GateRun, name: str, old: dict | None, fingerprint: 
     t0 = datetime.fromisoformat(since).timestamp()
     logs = [p for p in run.phase_dir(name).rglob("*.eval") if p.stat().st_mtime >= t0]
     unlogged = unlogged_spend(logs, usage_ledgers(run.phase_dir(name)), since=t0)["unlogged_usd"]
-    return logs_spend(logs)["inspect_usd"] + unlogged + ledger_spend(Config().ledger_path, run.costs_path, since=t0)
+    return logs_spend(logs)["inspect_usd"] + unlogged + ledger_spend(Config().ledger_path, run.costs_path, since=t0, label=os.environ.get(LABEL_ENV) or None)
 
 
 def verify_offline(run: GateRun) -> dict:
@@ -946,6 +987,25 @@ def sample_usd(projected_usd: float | None, groups: Sequence[tuple[list, int]]) 
 
     n = sum(planned_samples(t, epochs) for tasks, epochs in groups for t in tasks)
     return projected_usd / n if projected_usd and n else None
+
+
+def tune_sample_usd(run: Any, cells: Sequence[PlanCell], arms: dict[str, int]) -> float | None:
+    """The cost model's conservative $ per sample of one tuning system (R-C4): the tuning cells restricted to that
+    system's candidate arms (with their candidate counts), projected at live sizes, over the samples they run; the
+    base of its candidates' per-sample `cost_limit`, instead of the plan's flat default."""
+    from .budget import _arm_counts, _n_tasks
+
+    mine = []
+    for c in cells:
+        counts = {a: n for a, n in arms.items() if a in _arm_counts(c.spec["arms"])}
+        if counts:
+            mine.append(PlanCell(c.id, c.study, c.phase, dict(c.spec) | {"arms": counts}))
+    samples = 0
+    for c in mine:
+        k, epochs = sum(c.spec["arms"].values()), int(c.spec.get("epochs", 1))
+        samples += k * epochs * (int(c.spec["sessions"]) if c.kind == "session" else _n_tasks(c) * len(c.spec.get("cells") or []))
+    usd = project(run, mine) if mine else 0.0
+    return usd / samples if samples and usd else None
 
 
 def run_gate_tasks(run: GateRun, gp: Profile, models: tuple[Any, dict], tasks: list, log_dir: Path, epochs: int, what: str, sample_cost_usd: float | None = None) -> list[str]:
@@ -1144,6 +1204,26 @@ def _smoke_code_changed(settled: dict) -> list[str]:
     return out
 
 
+TEST_PHASES = ("build-test", "test")  # after the freeze: they need a passing smoke of the frozen code, never an override
+
+
+def smoke_currency_problems(run: Any, phase: str) -> list[str]:
+    """Live, paid phases (R-B1): the smoke this run settled at preflight (run.json `smoke_check`) must still cover the
+    code that would run. A smoke's commits must match CODE_PATHS now (`_smoke_code_changed`); an override counts only
+    at the code it was recorded at, and never for build-test or test, which need a passing live smoke of the frozen
+    code (the test phases already refuse code other than the freeze commit's). Empty when it does; else what to do."""
+    settled = read_run_info(run).get("smoke_check") or {}
+    if settled.get("commits"):
+        return _smoke_code_changed(settled)
+    if settled.get("override"):
+        if phase in TEST_PHASES:
+            return [f"{phase} needs a passing live smoke of the frozen code; this run's smoke override ({settled['override']!r}) covers only the phases before the freeze"]
+        if settled.get("code") is None or settled.get("code") != code_identity():
+            return [f"{', '.join(CODE_PATHS)} changed since the smoke override was recorded ({settled.get('at')}): an override never outlives the code it was given for"]
+        return []
+    return ["no live smoke is settled for this run (run.json smoke_check)"]
+
+
 def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict, extra_required: Sequence[str] = ()) -> tuple[list[str], dict | None]:
     """Live runs: the live smoke, settled once per run in run.json (`smoke_check`), so a later preflight (after the
     pre-registration's commit, a freeze, a resume) neither re-checks the smoke's age nor fails on it. Returns
@@ -1152,7 +1232,9 @@ def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict, extra_r
     - `--skip-smoke-check "<reason>"` on this invocation: recorded as the run's override.
     - Settled by an earlier preflight on a smoke: reused while CODE_PATHS still match the smoke's commits. Once the
       code changes, only a smoke of this code will do: `check_live_smoke` again, as at a first preflight.
-    - Settled by an override: a passing smoke now replaces it; otherwise the override stands (a warning).
+    - Settled by an override: a passing smoke now replaces it; otherwise the override stands (a warning) while the code
+      is the one it was recorded at (`code_identity`); after a code change only a smoke of this code, or a new
+      --skip-smoke-check, will do (R-B1).
     - Not settled: `check_live_smoke` (with `extra_required`, another study's own required checks)."""
     settled = read_run_info(run).get("smoke_check") or {}
     if run.skip_smoke_check is not None:
@@ -1162,7 +1244,7 @@ def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict, extra_r
         record["warnings"].append(f"the live smoke check was skipped: {reason!r}")
         if not reason:
             return ["--skip-smoke-check needs a reason: why this live run may go without a fresh passing live smoke"], None
-        return [], {"override": reason, "at": _now()}
+        return [], {"override": reason, "at": _now(), "code": code_identity()}
     changed: list[str] = []
     if settled.get("commits"):
         if not (changed := _smoke_code_changed(settled)):
@@ -1170,7 +1252,7 @@ def _settle_smoke(run: GateRun, gp: Profile, record: dict, checks: dict, extra_r
             record["smoke_check"] = settled | {"reused": True}
             return [], None
     smoke_problems, info = check_live_smoke(run, gp, extra_required=extra_required)
-    if smoke_problems and settled.get("override"):
+    if smoke_problems and settled.get("override") and settled.get("code") is not None and settled.get("code") == code_identity():
         checks["smoke"] = {"skipped": settled["override"], "reused": True}
         record["smoke_check"] = settled | {"reused": True, "smoke_now": info | {"problems": smoke_problems}}
         record["warnings"].append(f"the live smoke check was skipped at this run's first preflight: {settled['override']!r}")
@@ -1497,6 +1579,7 @@ def _tune_params(run: GateRun) -> dict:
     sc = scale(run)
     return {
         "scale": sc,
+        "code_identity": code_identity(),
         "systems": [s for s, _ in TUNED_SYSTEMS],
         "limit_worlds": sc["worlds_per_cell"] if run.tiny else sc["tune_worlds"],
         "epochs": sc["epochs"],
@@ -1513,7 +1596,7 @@ def _tune(run: GateRun, record: dict) -> None:
     gp = gate_profile(run)
     agent, roles = gate_models(run, gp)
     tdir = run.phase_dir("tune")
-    log_dir, tlog = tdir / "logs", tdir / "tuning_log.jsonl"
+    log_dir, tlog = tdir / "logs" / f"code-{code_identity()}", tdir / "tuning_log.jsonl"  # a code change runs afresh (R-B2)
     if tlog.exists():  # a re-run rewrites the log from the (reused) candidate runs; the old one is kept
         tlog.rename(tdir / f"tuning_log.{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}.jsonl")
     record["outputs"] = {"tuning_log": _show(tlog)}
@@ -1521,7 +1604,9 @@ def _tune(run: GateRun, record: dict) -> None:
     selected: dict[str, dict] = {}
     for system, key in TUNED_SYSTEMS:
         print(f"[tune] {system}: {len(grid['systems'][system]['candidates'])} candidate(s) x {grid['dev_cells']}", flush=True)
-        chosen = tune(system, agent, dict(roles), params["limit_worlds"], params["epochs"], grid, tlog, gp, log_dir=log_dir, costs_path=run.costs_path)
+        arms = dict(Counter(c["arm"] for c in grid["systems"][system]["candidates"]))
+        per = tune_sample_usd(run, [plan(run).cell("gate.tune")], {a: n for a, n in arms.items()})
+        chosen = tune(system, agent, dict(roles), params["limit_worlds"], params["epochs"], grid, tlog, gp, log_dir=log_dir, costs_path=run.costs_path, sample_cost_usd=per)
         cand = chosen["candidate"]
         entry = {"arm": cand["arm"], "env": {k: str(v) for k, v in (cand.get("env") or {}).items()}}
         entry |= {k: cand[k] for k in ("delivery", "declared_arm") if k in cand}
@@ -1575,7 +1660,7 @@ def _anchor_params(run: GateRun) -> dict:
     data = "fixture" if run.offline else _show(run.anchor_data_dir) if run.anchor_data_dir else "cache/graphragbench"
     # The anchor always builds with the paper's builder (D-009), never D-017's fallback: APE_BUILD_FALLBACK is not its knob.
     knobs = {k: v for k, v in _env_knobs().items() if k != "APE_BUILD_FALLBACK"}
-    return {"scale": scale(run), "profile": name, "modes": list(ANCHOR_MODES), "data": data, "code": anchor_code_hash(), "env_knobs": knobs}
+    return {"scale": scale(run), "profile": name, "modes": list(ANCHOR_MODES), "data": data, "code": anchor_code_hash(), "code_identity": code_identity(), "env_knobs": knobs}
 
 
 def _anchor(run: GateRun, record: dict) -> None:
@@ -1858,6 +1943,7 @@ def _matched_apg_env(selected: dict, context: int) -> dict[str, str]:
 def _pilot_params(run: GateRun) -> dict:
     return {
         "scale": scale(run),
+        "code_identity": code_identity(),
         "worlds": pilot_world_specs(run),
         "cells": _pilot_cells(run),
         "sigma_cell": _pilot_sigma_cell(run),
@@ -1906,7 +1992,8 @@ def _pilot(run: GateRun, record: dict) -> None:
     models = gate_models(run, gp)
     # 2. The selected arms and the diagnostics except S7, push and pull, with every selection's knobs. Knobs
     #    are not part of Inspect's task identity, so the log dir is keyed by them.
-    main_dir = pdir / "logs" / f"main-{_digest({'env': env, 'arms': arms})}"
+    code = code_identity()  # in every pilot log dir's key: a code change runs afresh, never resumes the old code's logs (R-B2)
+    main_dir = pdir / "logs" / f"main-{_digest({'env': env, 'arms': arms, 'code': code})}"
     record["log_dirs"] = [_show(main_dir)]
     logs: list[str] = []
     with _environ(env):  # tasks are created under the knobs they run with (they record them)
@@ -1930,7 +2017,7 @@ def _pilot(run: GateRun, record: dict) -> None:
     record["outputs"] |= {"s7_targets": _show(run.s7_targets_path)}
     if "S7" in main["arms"]:
         s7_knobs = env | s7_env(selected)
-        s7_dir = pdir / "logs" / f"s7-{_digest({'env': s7_knobs, 'targets': targets})}"
+        s7_dir = pdir / "logs" / f"s7-{_digest({'env': s7_knobs, 'targets': targets, 'code': code})}"
         record["log_dirs"].append(_show(s7_dir))
         with _environ(s7_knobs):
             s7_logs = run_gate_tasks(run, gp, models, _gate_tasks(main, arms, "pilot", ["S7"]), s7_dir, int(main["epochs"]), "pilot S7 runs", per_sample)
@@ -1940,7 +2027,7 @@ def _pilot(run: GateRun, record: dict) -> None:
     #     and the calibration starts above come from the main pilot's worlds, unchanged.
     sigma_logs: list[str] = []
     if sigma := _pilot_sigma_cell(run):
-        sigma_dir = pdir / "logs" / f"sigma-{_digest({'env': env, 'arms': arms})}"
+        sigma_dir = pdir / "logs" / f"sigma-{_digest({'env': env, 'arms': arms, 'code': code})}"
         record["log_dirs"].append(_show(sigma_dir))
         with _environ(env):
             tasks = _gate_tasks(sigma, arms, "pilot")
@@ -1957,7 +2044,7 @@ def _pilot(run: GateRun, record: dict) -> None:
     record["log_dirs"].append(_show(cal_dir))
 
     def measure(iteration: int, knobs: dict[str, dict[str, str]]) -> dict[str, dict]:
-        d = cal_dir / f"iter{iteration}-{_digest({'env': env, 'knobs': knobs})}"
+        d = cal_dir / f"iter{iteration}-{_digest({'env': env, 'knobs': knobs, 'code': code})}"
         print(f"[pilot] budget calibration {iteration}: " + "; ".join(f"{a} {_fmt_env(k)}" for a, k in knobs.items()), flush=True)
         with _environ(env | {k: v for kn in knobs.values() for k, v in kn.items()}):
             tasks = _gate_tasks(cal, arms, "pilot", list(knobs))
@@ -2760,11 +2847,11 @@ def _group_expected_tasks(g: dict) -> int:
 def group_done(log_dir: Path, g: dict) -> bool:
     """Whether a test group's eval set already finished: its runner index's last run is `done` and every one of its
     tasks has a successful log (a resume reuses them all, so nothing is left to pay for)."""
-    from .runner import read_index
+    from .runner import latest_tasks, read_index
 
     index = read_index(log_dir)
     runs = index.get("runs") or []
-    ok = [t for t in (index.get("tasks") or {}).values() if t.get("status") == "success"]
+    ok = [t for t in latest_tasks(index).values() if t.get("status") == "success"]  # the latest run's identities (R-C2)
     return bool(runs) and runs[-1].get("status") == "done" and len(ok) >= _group_expected_tasks(g)
 
 
@@ -2926,7 +3013,9 @@ ANALYSIS_CODE = ("src/ape/analyze_gate.py", "src/ape/analysis/gate_stats.py", "s
 
 def _analyze_inputs(run: GateRun) -> dict[str, Path]:
     """The files the report reads that a phase writes only when it runs (manifests are rewritten on every skip,
-    so the test results enter through `_analyze_params` instead)."""
+    so the test results enter through `_analyze_params` instead). Not the shared build ledger (R-A1): the studies'
+    builds append to it after the gate's test, which would re-run this analysis and rewrite its report; the entries
+    the report reads (the test window's embeddings, the test worlds' builds) are all written before it runs."""
     return {
         "anchor/pc1.json": run.phase_dir("anchor") / "pc1.json",
         "tune/tuning_log.jsonl": run.phase_dir("tune") / "tuning_log.jsonl",
@@ -2936,7 +3025,6 @@ def _analyze_inputs(run: GateRun) -> dict[str, Path]:
         "config/tuning_grid.yaml": run.config("tuning_grid.yaml"),
         "config/run_plan.yaml": config_input(run.config("run_plan.yaml"), STUDY),
         "config/model_costs.yaml": config_input(run.costs_path, STUDY),
-        "ledger": Config().ledger_path,
     }
 
 
@@ -2950,11 +3038,54 @@ def _analyze_params(run: GateRun) -> dict:
     }
 
 
+def analyze_freeze_problems(run: Any, freeze: dict | None, changes: Any) -> list[str]:
+    """What the analysis would rest on that the freeze did not fix (R-A2): no freeze at all, or frozen files changed
+    since (the pre-registration, the config slices, the run's frozen outputs, the analysis code and uv.lock)."""
+    if freeze is None:
+        return [f"run {run.run_id!r} is not frozen ({_show(run.freeze_path)} missing)"]
+    return [f"frozen file changed since the freeze at {freeze.get('frozen_at')}: {c}" for c in changes(freeze)]
+
+
+def analyze_freeze_check(run: Any, freeze: dict | None, changes: Any) -> list[str]:
+    """Live: refuse the analysis while `analyze_freeze_problems` finds anything, unless the run passes a recorded
+    deviation (`--deviation "<reason>"`); offline the problems are only returned. Returns the problems."""
+    problems = analyze_freeze_problems(run, freeze, changes)
+    if problems and not run.offline and not getattr(run, "smoke", False) and not (getattr(run, "deviation", None) or "").strip():
+        raise PhaseError(
+            "analyze: the report would rest on what the freeze did not fix: " + "; ".join(problems) + '. Restore the frozen files, or record the deviation: --deviation "<what changed and why>" (it is stamped into the report)'
+        )
+    return problems
+
+
+def stamp_deviation(record: dict, problems: list[str], deviation: str | None, decision_path: Path, report_path: Path) -> None:
+    """Record the analysis's departures from the freeze in the manifest and, when a deviation was passed, stamp it into
+    decision.json (`deviation`) and the top of report.md, so the report never hides that it is not the frozen one."""
+    if not problems:
+        return
+    record["freeze_problems"] = problems
+    reason = (deviation or "").strip()
+    if not reason:
+        record["warnings"].append("the analysis does not rest on the freeze (offline): " + "; ".join(problems))
+        return
+    dev = {"reason": reason, "changes": problems, "at": _now()}
+    record["deviation"] = dev
+    if decision_path.is_file():
+        d = json.loads(decision_path.read_text())
+        decision_path.write_text(json.dumps(d | {"deviation": dev}, indent=1, default=str) + "\n")
+    if report_path.is_file():
+        lines = report_path.read_text().splitlines()
+        note = ["", f"> **Deviation from the freeze** (recorded {dev['at']}): {reason}", *(f"> - {c}" for c in problems), ""]
+        report_path.write_text("\n".join(lines[:1] + note + lines[1:]) + "\n")
+    record["warnings"].append(f"analysed with a recorded deviation from the freeze: {reason!r}")
+
+
 def _analyze(run: GateRun, record: dict) -> None:
     from .analyze_gate import REPORT_DIR, analyze
 
+    problems = analyze_freeze_check(run, read_freeze(run), frozen_changes)
     decision = analyze(run)
     out = run.dir / REPORT_DIR
+    stamp_deviation(record, problems, run.deviation, out / "decision.json", out / "report.md")
     record["outputs"] = {"decision": _show(out / "decision.json"), "report": _show(out / "report.md")}
     record["verdict"] = decision["verdict"]["label"]
     record["verdict_reasons"] = decision["verdict"]["reasons"]
@@ -2976,7 +3107,7 @@ PHASE_DEFS: dict[str, Phase] = {
         "build-dev",
         _build_dev,
         inputs=lambda r: _cfg_inputs(r, "run_plan.yaml", "models.yaml"),
-        params=lambda r: {"scale": scale(r), "worlds": dev_world_specs(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline, "builder": build_params(r)},
+        params=lambda r: {"scale": scale(r), "worlds": dev_world_specs(r), "lightrag_kind": "oracle" if r.offline else "extract", "fake_author": r.offline, "builder": build_params(r), "code_identity": code_identity()},
         projected=_build_dev_projected,
         profile=gate_profile,
         requires=("preflight",),
@@ -3104,6 +3235,10 @@ def run_phase(run: GateRun, name: str) -> str:
             raise PhaseError(f"{name} needs {req} first: python -m ape.run_gate {req} --run-id {run.run_id}{' --offline' if run.offline else ''}{' --smoke' if run.smoke else ''}")
     if name in PAID_PHASES and (stray := stray_environment(run)):
         raise PhaseError(f"{name}: the environment would move this live run off the gate's design or directories; unset: " + "; ".join(stray))
+    if name in PAID_PHASES and not run.isolated and (stale := smoke_currency_problems(run, name)):
+        raise PhaseError(f"{name}: the live smoke this run accepted does not cover the code that would run: {'; '.join(stale)}. Re-run preflight (it settles the smoke on this code)")
+    if name == "analyze":
+        analyze_freeze_check(run, read_freeze(run), frozen_changes)
     profile = phase.profile(run)
     record: dict[str, Any] = {
         "phase": name,
@@ -3234,7 +3369,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="live runs: run without a fresh passing live smoke (readiness/smoke.py), recording why in the preflight manifest",
     )  # fmt: skip
     ap.add_argument("--smoke-max-age-days", type=float, default=SMOKE_MAX_AGE_DAYS, metavar="DAYS", help=f"live preflight: the oldest live smoke result accepted (default {SMOKE_MAX_AGE_DAYS:g})")
+    ap.add_argument("--deviation", metavar="REASON", help="analyze only: analyse although frozen files changed since the freeze, recording why (stamped into the report)")
     a = ap.parse_args(argv)
+    if a.deviation is not None and a.phase not in ("analyze", "all"):
+        ap.error("--deviation applies to the analyze phase")
     if a.skip_smoke_check is not None and (a.offline or a.smoke):
         ap.error("--skip-smoke-check applies to live gate runs (offline and smoke runs never check the live smoke)")
     if a.accept_pc1_failure and a.phase not in ("freeze", "all"):
@@ -3248,7 +3386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run = GateRun(
             a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, smoke=a.smoke, budget_usd=a.budget_usd,
             accept_pc1_failure=a.accept_pc1_failure, test_seed_base=a.test_seed_base, extension_of=a.extension_of, fix_cycle_of=a.fix_cycle_of,
-            skip_smoke_check=a.skip_smoke_check, smoke_max_age_days=a.smoke_max_age_days,
+            skip_smoke_check=a.skip_smoke_check, smoke_max_age_days=a.smoke_max_age_days, deviation=a.deviation,
         )  # fmt: skip
         statuses = run_phases(run, a.phase)
     except (PhaseError, PreflightError, BudgetError) as e:

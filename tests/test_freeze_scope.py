@@ -1,6 +1,7 @@
 """Freeze scope (`ape.freeze_scope`): the gate and each study fingerprint and freeze their own slice of the shared
 config files, so a frozen gate run survives later edits to the main study's or Study G's cells, profiles, prices and
-allocations, and a frozen study survives the others'. Offline: config copies only."""
+allocations, and a frozen study survives the others'. Budget totals, allocations and concurrency are never frozen (R-B3).
+Offline: config copies only."""
 
 import shutil
 
@@ -70,7 +71,8 @@ def test_each_study_freezes_its_own_slice(tmp_path, config):
     before = {s: {n: config_slice(config / n, s) for n in ("run_plan.yaml", "models.yaml", "model_costs.yaml")} for s in ("gate", "main", "study_g")}
     assert set(before["main"]["models.yaml"]) == {"main_luna", "main_sol"} and set(before["study_g"]["models.yaml"]) == {"study_g_luna", "study_g_sol", "study_g_astra"}
     assert "openai/gpt-6-astra" in before["study_g"]["model_costs.yaml"] and "openai/gpt-6-astra" not in before["main"]["model_costs.yaml"]
-    assert before["main"]["run_plan.yaml"]["budget"]["allocation"] == 1100 and "allocation" not in before["gate"]["run_plan.yaml"]["budget"]
+    assert all(set(before[x]["run_plan.yaml"]["budget"]) <= {"sample_cost_limit", "sample_working_limit"} for x in before), "R-B3: no allocation or total"
+    assert all("concurrency" not in (p or {}) for x in before for p in before[x]["models.yaml"].values()), "R-B3: concurrency is not design"
     assert "study_g" in before["study_g"]["run_plan.yaml"] and "study_g" not in before["main"]["run_plan.yaml"]
     assert study_profiles(yaml.safe_load((config / "run_plan.yaml").read_text()), "gate") == ["gate", "anchor", "anchor_luna"]
     main_inputs = run_study._cfg_inputs(main, "run_plan.yaml", "models.yaml", main.grid_name)
@@ -82,6 +84,11 @@ def test_each_study_freezes_its_own_slice(tmp_path, config):
     assert run_gate.frozen_changes(main_record) == [], "Study G's edits leave the main study frozen"
     changed = run_gate.frozen_changes(g_record)
     assert [c.split(" (", 1)[0] for c in changed] == ["config/run_plan.yaml", "config/model_costs.yaml"] and all(c.endswith(", study_g slice): changed") for c in changed)
-    _edit(config / "run_plan.yaml", lambda p: p["budget"]["allocations"].update(main=900))
+    # R-B3: the budget guard's inputs (the total, the allocations) and the profiles' concurrency are not design: a
+    # budget or rate-limit adjustment after the freeze never blocks the test. The per-sample runaway guard is.
+    _edit(config / "run_plan.yaml", lambda p: (p["budget"]["allocations"].update(main=900), p["budget"].update(total_usd=4000)))
+    _edit(config / "models.yaml", lambda m: m["profiles"]["main_luna"].update(concurrency={"max_connections": 4, "max_samples": 8, "max_tasks": 1}))
+    assert run_gate.frozen_changes(main_record) == [], "allocations, the total and concurrency are guard inputs"
+    _edit(config / "run_plan.yaml", lambda p: p["budget"]["sample_cost_limit"].update(multiple=30))
     changed = run_gate.frozen_changes(main_record)
-    assert len(changed) == 1 and changed[0].startswith("config/run_plan.yaml (") and changed[0].endswith(", main slice): changed"), "its guard reads the study's own allocation"
+    assert len(changed) == 1 and changed[0].startswith("config/run_plan.yaml (") and changed[0].endswith(", main slice): changed"), "the runaway guard is frozen"
