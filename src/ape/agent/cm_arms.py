@@ -7,7 +7,11 @@ harness's token meter); it adds only its mechanism. The managed arms are presets
 - **prune**: Inspect's `CompactionEdit` (keep_tool_uses = `prune_keep`, tool calls kept, memory off): the results
   of all but the last k tool uses become "(Tool result removed)". No model call.
 - **trim**: Inspect's `CompactionTrim` (preserve = `trim_preserve`): the oldest messages are dropped, keeping that
-  fraction (the system and start messages always stay). No model call.
+  fraction (the system and start messages always stay), and the window then starts at a case message, so a case is
+  never left with its assistant turn but without its message. No model call. CM-trim is a naive control that no
+  run_plan.yaml cell runs. Unverified (review): whether the Responses API accepts every message sequence trimming
+  leaves (e.g. an assistant turn that carries only reasoning); starting the window at a case message rules out an
+  orphaned turn at its head, not elsewhere (where CM0's history has the same turns).
 - **sum**: our own summary call (`cm_prompts.SUMMARY_PROMPTS[sum_prompt]` through `cm_generate`): earlier notes
   plus the shown transcript become new notes, and the summarised messages leave the view.
 - **reset**: a fresh context with rehydration: when it fires, the completed messages leave the view and, with
@@ -16,8 +20,9 @@ harness's token meter); it adds only its mechanism. The managed arms are presets
 - **todo**: external task state: Inspect's `todo_write()` and a short addendum; the list is parsed from the
   agent's `todo_write` calls (and from an extraction call, `cm_prompts.TODO_EXTRACT_PROMPT`, at the start of the
   shift and on every case message that announces or withdraws a memo, with `todo_extract`) and kept as policy
-  state, so it is checkpointed. Without sum or reset in the stack, todo also drops the completed messages at
-  T_abs: the list stands in for them.
+  state, so it is checkpointed. A case ends with its answer, so the addendum (the same for every arm with todo)
+  asks for the update at the start of each case: the previous case completed, this one in_progress (review A-3).
+  Without sum or reset in the stack, todo also drops the completed messages at T_abs: the list stands in for them.
 
 The view is always: system, start message (the task spec), the notes (summary or handoff) if any, the shown
 completed messages (a compacted window of them after prune or trim, then the uncompacted rest), the todo list,
@@ -49,11 +54,15 @@ case kept verbatim) goes to the provider; its compacted window replaces it. Gate
 model unless the support record (`native_support`; written by the B11 probe with `record_native_support`) says
 the model supports native compaction; mockllm models take a mock path (one model call whose answer becomes an
 opaque block) so the plumbing is tested offline. W over an opaque block: the meter cannot read it, so the block
-counts the tokens of everything it replaced (no credit) until the first agent call after the compaction reports
-the provider's input tokens; from then on it counts that input minus the meter's tokens for the rest of the view.
-That includes the tool schemas and per-message overhead, so it over-counts the block (conservative). A compact
+counts the tokens of everything it replaced (no credit) until the first call of a case after the compaction (no
+assistant turn yet after the case's message) reports the provider's input tokens; from then on it counts that input
+minus the meter's tokens for the rest of the view. That includes the tool schemas and per-message overhead, so it
+over-counts the block (conservative); a call within a case would add the case's re-read turns and their encrypted
+reasoning too, which is why calibration waits for a case's first call. A compact
 call that fails is logged and the session continues uncompacted; after `native_max_failures` failures the arm
-stops compacting (logged).
+stops compacting (logged). Inspect's `Model.compact` counts its usage in the sample's but fires no `on_model_usage`
+hook, so the arm fires it after each provider compaction: the run's usage ledger (`ape.usage_ledger`) then holds it
+like any generate call (review R-C3).
 
 Misbehaving models never crash a session: empty notes keep the previous notes (logged), unparseable todo lists
 and malformed `todo_write` calls leave the list as it was (logged), and native compaction failures fall back as
@@ -62,10 +71,12 @@ above. Every management event is in `f8_cm_events`, with the summary and handoff
 
 import json
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
+from inspect_ai.hooks._hooks import emit_model_usage
 from inspect_ai.model import ChatMessage, ChatMessageTool, ChatMessageUser, CompactionEdit, CompactionTrim, ContentData, Model, ModelUsage
 from inspect_ai.model._call_tools import get_tools_info
 from inspect_ai.tool import todo_write
@@ -145,6 +156,11 @@ def parse_todo_reply(text: str) -> list[dict] | None:
 def render_todos(todos: list[dict]) -> str:
     lines = [f"- [{t['status']}] {t['content']}" for t in todos]
     return P.TODO_HEADER + "\n" + ("\n".join(lines) if lines else "(empty)")
+
+
+def _content(messages: list[ChatMessage]) -> str:
+    """Messages as JSON without their IDs: what a compaction changed, if anything."""
+    return json.dumps([{k: v for k, v in m.model_dump(mode="json").items() if k != "id"} for m in messages], sort_keys=True)
 
 
 def _short(e: BaseException) -> str:
@@ -236,9 +252,9 @@ class ManagedContext(ContextPolicy):
         item_start = self._item_start if self._item_start is not None else len(history)
         changed = False
         if self.compactor and self._completed(history, item_start):
-            before = json.dumps(dump_messages(self._completed(history, item_start)))
+            before = _content(self._completed(history, item_start))
             window = await self._compact(history, item_start)
-            if json.dumps(dump_messages(window)) != before:
+            if _content(window) != before:  # IDs aside: Inspect's strategies re-ID what they touch, changed or not
                 self.window, self.covered, changed = window, item_start, True
                 self.counts["compactions"] += 1
                 self.session.log(self.compactor, view_tokens=tokens, window_messages=len(window))
@@ -279,7 +295,13 @@ class ManagedContext(ContextPolicy):
             strategy = CompactionTrim(threshold=UNREACHABLE, memory=False, preserve=float(self.k["trim_preserve"]))
         out, _ = await strategy.compact(self.session.agent_model, [*prefix, *self._completed(history, item_start)], [])
         ids = {m.id for m in prefix}
-        return [m for m in out if m.id not in ids]
+        out = [m for m in out if m.id not in ids]
+        if self.compactor == "trim":
+            # Whole cases only: trim_messages cuts at a message count, which can leave a case's assistant turn (and its
+            # tool results) without the case message; the window starts at the first case message kept.
+            first_user = next((i for i, m in enumerate(out) if m.role == "user"), len(out))
+            out = out[first_user:]
+        return out
 
     async def _move(self, history: list[ChatMessage], item_start: int, trigger: str) -> None:
         """Drop the completed messages from the view, writing notes in their place (sum, reset with a summary)."""
@@ -468,13 +490,27 @@ class NativeCompaction(ContextPolicy):
     async def _compact(self, input: list[ChatMessage]) -> tuple[list[ChatMessage], ModelUsage | None]:
         model = self.session.agent_model
         if self.route == "provider":
-            return await model.compact(input, get_tools_info(self.session.tools))
-        out = await model.generate([*input, ChatMessageUser(content=P.NATIVE_MOCK_PROMPT)])
+            t0 = time.monotonic()
+            compacted, usage = await model.compact(input, get_tools_info(self.session.tools))
+            if usage is not None:
+                # Inspect's Model.compact counts the usage in the sample's but fires no on_model_usage hook, so the run's
+                # usage ledger (`ape.usage_ledger`, which spend reads for earlier attempts) would miss it: fire it, as
+                # generate does after its own call.
+                await emit_model_usage(model_name=str(model), usage=usage, call_duration=time.monotonic() - t0)
+            return compacted, usage
+        msgs = [*input, ChatMessageUser(content=P.NATIVE_MOCK_PROMPT)]
+        try:
+            out = await model.generate(msgs)
+        except LimitExceededError:
+            self.session.record_limit_call("cm", model, view_tokens(input), msgs, "native")
+            raise
         return [ChatMessageUser(content=[ContentData(data={"compaction": out.completion or ""})])], out.usage
 
     async def on_threshold(self, history, view, tokens):
         item_start = self._item_start if self._item_start is not None else len(history)
-        if self.disabled or not history[self.covered : item_start]:
+        # Nothing new to compact; or the last block is not calibrated yet (it still counts what it replaced, so the
+        # view looks over T_abs until a case's first call measures it: compacting again then would only re-pay).
+        if self.disabled or not self.calibrated or not history[self.covered : item_start]:
             return None
         input = [history[0], *self.block, *history[self.covered : item_start]]
         size = view_tokens(input)
@@ -506,9 +542,19 @@ class NativeCompaction(ContextPolicy):
         return self._assemble(history, item_start)
 
     async def after_generate(self, history, view, output, appended):
-        """Calibrate the block from the first agent call after it: the provider's input tokens minus the meter's
-        tokens for the rest of the view (tool schemas and overhead included: an over-count, conservative)."""
-        if not self.block or self.calibrated or output.usage is None:
+        """Calibrate the block from the first call of a case after it (the first call that has no assistant turn after
+        the case's message): the provider's input tokens minus the meter's tokens for the rest of the view (tool
+        schemas and overhead included: an over-count, conservative). Not from a call within a case: the provider also
+        re-reads that case's turns, with their encrypted reasoning on the Responses API, which the block does not hold
+        (review r09). Until then the block counts what it replaced."""
+        if not self.block or self.calibrated:
+            return
+        last_user = max((i for i, m in enumerate(view) if m.role == "user"), default=-1)
+        if any(m.role == "assistant" for m in view[last_user + 1 :]):
+            return
+        if output.usage is None:  # no provider count to measure with: the block keeps counting what it replaced
+            self.calibrated = True
+            self.session.log("native_uncalibrated")
             return
         u = output.usage
         provider = u.input_tokens + (u.input_tokens_cache_read or 0) + (u.input_tokens_cache_write or 0)
