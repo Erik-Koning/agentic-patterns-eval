@@ -497,6 +497,13 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Study F's Sol replication runs 60 tasks** (the first 5 of the 9 test worlds; cut C5 applied, also for `main.F.sol-m2`); −$300 / −$237. T1 is descriptive since D-033, so its intervals widen about 1.35×. `main_power.simulate` now draws a cell's tasks once at the largest size any tier runs it and gives a smaller tier the first worlds.
 - **Not taken:** dropping CM-todo at Astra (a core arm at the top tier), lowering reasoning effort (changes the capability points), a smaller window (weakens the long-context effect the study measures). The uncut plan now fits $5,000 on its own; cuts C1, C2, C3 and C5 are applied by choice. Reproduction: `scratchpad/costcut/designs.py` and `epochsens.py` (session scratchpad).
 
+**D-053 (2026-10-04, user: add M5, a ledger orchestrator, runnable on its own).** The brief's Tier B M5 ("text-ledger orchestrator", STATE = text-ledger) is built now as a Magentic-style ledger orchestrator: a task ledger (facts, guesses, plan) and a progress ledger each round (satisfied, looping, progressing, next step), with a replan after repeated stalls. Two arms, each one switch (STATE) from its team: **M5** = M1 + ledger (F1, F2: dependency chains and breadth, where a ledger should matter; M2 is undefined on F2) and **M5-spec** = M2 + ledger (F3, F7).
+- **Off by default, its own add-on study** (`studies.m5`, cells `enabled: false`): building it now freezes its code with the main study, so it can run later, while or after the main study runs, without touching the main study's frozen slice.
+- **Inherits from a frozen main run:** its test worlds (paired on the same tasks; no new worlds), token caps, gate resolution and M1's prompt selection.
+- **Runs fresh concurrent controls** (M1, M2) beside M5 rather than comparing with the main study's earlier runs, so model and provider drift cannot enter the contrast.
+- **Its own pre-registration** (`PREREGISTRATION_M5.md`) and hypothesis family (L1: M5 − M1, L2: M5-spec − M2), separate from the main study's; a short pilot checks cap hits and health first.
+- **Cost when enabled:** about $110 conservative (Luna); zero while off.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |
