@@ -34,7 +34,7 @@ RUNTIME_PROFILES = {"gate": ("anchor", "anchor_luna")}  # chosen at run time (`r
 BUDGET_KEYS = ("sample_cost_limit",)  # program-level budget fields that shape a sample (the runaway guard)
 # Budget fields only some studies' runs read: the wall-clock guard (`ape.runner.working_guard`), which `ape.run_study`
 # applies and the gate never does, so a change to it never touches the gate's slice.
-STUDY_BUDGET_KEYS = {"sample_working_limit": ("main", "study_g")}
+STUDY_BUDGET_KEYS = {"sample_working_limit": ("main", "study_g", "m5")}
 GUARD_ONLY = ("total_usd", "allocations", "contingency_usd")  # budget fields the guards read live; never frozen (R-B3)
 RUNTIME_ONLY_PROFILE_KEYS = ("concurrency",)  # profile fields that change only how fast a run goes (R-B3)
 

@@ -323,7 +323,7 @@ OPERATIONAL_ENV = ("APE_BACKUP_DIR", "APE_BUILD_LLM_CONCURRENCY", "APE_BUILD_PAR
 # Phases that call models or build artifacts: a live run refuses them in a stray environment (`stray_environment`).
 PAID_PHASES = ("build-dev", "tune", "anchor", "pilot", "build-test", "test")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
-STUDY_RUN_DIRS = ("main", "study_g")  # runs/<study>/<id>/ are the other studies' runs (`ape.run_study`): not gate run ids
+STUDY_RUN_DIRS = ("main", "study_g", "m5")  # runs/<study>/<id>/ are the other studies' runs (`ape.run_study`): not gate run ids
 
 
 class PhaseError(RuntimeError):

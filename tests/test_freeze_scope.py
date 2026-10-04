@@ -92,3 +92,15 @@ def test_each_study_freezes_its_own_slice(tmp_path, config):
     _edit(config / "run_plan.yaml", lambda p: p["budget"]["sample_cost_limit"].update(multiple=30))
     changed = run_gate.frozen_changes(main_record)
     assert len(changed) == 1 and changed[0].startswith("config/run_plan.yaml (") and changed[0].endswith(", main slice): changed"), "the runaway guard is frozen"
+
+
+def test_the_m5_add_on_study_freezes_its_own_slice(tmp_path, config):
+    """The M5 add-on study's slice is its own section (and the sample rules it inherits); main's and Study G's never see
+    it, so enabling or editing the off-by-default m5 cells leaves a frozen main run intact."""
+    main_record = _record(run_study._cfg_inputs(StudyRun("main", "m", offline=True, runs_root=tmp_path / "runs", config_dir=config), "run_plan.yaml", "models.yaml"))
+    m5_slice = config_slice(config / "run_plan.yaml", "m5")
+    assert set(m5_slice["studies"]) == {"m5"} and set(m5_slice["budget"]) == {"sample_cost_limit", "sample_working_limit"}
+    assert set(config_slice(config / "models.yaml", "m5")) == {"main_luna"}
+    m5_record = _record({"config/run_plan.yaml": run_study.config_input(config / "run_plan.yaml", "m5")})
+    _edit(config / "run_plan.yaml", lambda p: [c.update(enabled=True) for cells in p["studies"]["m5"]["phases"].values() for c in cells])
+    assert run_gate.frozen_changes(main_record) == [] and run_gate.frozen_changes(m5_record)

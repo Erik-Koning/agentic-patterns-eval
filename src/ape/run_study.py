@@ -12,6 +12,19 @@ Phases (`all` runs a study's in order and stops at the first failure; a failed o
 
     main      preflight  build-dev  micro-pilot  tune  pilot  freeze  build-test  test  analyze
     study_g   preflight  build-dev  micro-pilot  tune         freeze  build-test  test  analyze
+    m5        preflight                               pilot  freeze              test  analyze   (an add-on study)
+
+The M5 add-on study (`m5`; user-approved, every cell `enabled: false` in run_plan.yaml until it runs): M5 = M1 + a
+Magentic-style ledger and M5-spec = M2 + ledger, with fresh concurrent M1 and M2 controls. It runs on a frozen main run
+(`--main-run-id`; live: one whose test has started) and inherits that run's design (`inheritance`): its test-seed block
+(it runs on the main run's test worlds, paired on the same tasks, and builds no worlds: it has no build phases and never
+unlocks the test split, which only guards building; it reads the one block its main run froze), its frozen token caps
+and their multiple, its gate resolution (KG arm, S3s), its selections (M5 and M5-spec run under M1's, as the M1 chain
+does), its design knobs and the working- and cost-limit rules. The copy (config/main_inheritance.json, config/selected.yaml)
+is frozen with the add-on study's own pre-registration (PREREGISTRATION_M5.md) and slice; nothing is written under the
+main run's directory. Its pilot runs its arms on the main run's pilot worlds at the frozen caps and applies the pilot
+health gate (lower bounds, as D-045/D-050) without escalating: evidence of cap, turn-cap or other-limit hits refuses its
+freeze (`_addon_pilot`). Its test runs every arm with its control, all primary.
 
     preflight    FX-2 preflight for every profile the study's cells use (prices; live: the key, the readiness probe lists
                  every model, the APG pin); the arms each phase names that are not built yet; live: a passing live smoke
@@ -215,6 +228,9 @@ class Study:
     kg_build: str | None = None
     caps: bool = False
     smoke_checks: tuple[str, ...] = ()
+    # An add-on study (m5) runs on another study's frozen run: it inherits that run's design and worlds (`inheritance`)
+    # and builds none of its own.
+    depends_on: str | None = None
 
     @property
     def rests_on(self) -> tuple[str, ...]:
@@ -251,6 +267,21 @@ STUDIES = {
         # F8 session each (`smoke.STUDY_CHECKS["study_g"]`); CM0 and O-state are the gate's f8_session check.
         smoke_checks=("g_cm_sum", "g_cm_todo", "g_team_session"),
     ),
+    # The M5 add-on study (user-approved; off by default): M5 = M1 + a Magentic-style ledger, M5-spec = M2 + ledger,
+    # with fresh concurrent M1 and M2 controls, on a frozen main run's worlds and design (`inheritance`).
+    "m5": Study(
+        name="m5",
+        title="M5 add-on study",
+        phases=("preflight", "pilot", "freeze", "test", "analyze"),
+        cells={"pilot": ("pilot",), "test": ("test",)},
+        primary=("test",),
+        prereg="PREREGISTRATION_M5.md",
+        analysis="ape.analyze_m5",
+        analysis_code=("src/ape/analyze_m5.py", "src/ape/analysis"),
+        # The M1 and M2 controls' smoke checks (main's orchestrator and KG workers) and the ledger's own.
+        smoke_checks=("mas_orchestrator", "mas_kg_workers", "mas_ledger"),
+        depends_on="main",
+    ),
 }
 ALL_PHASES = tuple(dict.fromkeys(p for s in STUDIES.values() for p in s.phases))
 
@@ -281,11 +312,14 @@ class StudyRun:
     extension_of: str | None = None  # freeze only: this run extends an earlier frozen run of the study (a fresh block)
     gate_run_id: str | None = None
     gate_runs_root: Path | None = None
+    main_run_id: str | None = None  # an add-on study (m5): the frozen run of `Study.depends_on` it inherits from
+    main_runs_root: Path | None = None  # where that run lives (default: the same runs root)
     smoke_dir: Path = rg.SMOKE_ROOT / "live"
     smoke_max_age_days: float = rg.SMOKE_MAX_AGE_DAYS
     skip_smoke_check: str | None = None
     deviation: str | None = None  # analyze only: a recorded reason to analyse although frozen files changed (R-A2)
     _kg: dict | None = field(default=None, init=False, repr=False)
+    _main: dict | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.study not in STUDIES:
@@ -357,6 +391,14 @@ class StudyRun:
         return self.out_config_dir / "gate_resolution.json"
 
     @property
+    def inheritance_path(self) -> Path:
+        return self.out_config_dir / "main_inheritance.json"
+
+    @property
+    def pilot_health_path(self) -> Path:
+        return self.out_config_dir / "pilot_health.json"
+
+    @property
     def session_health_path(self) -> Path:
         return self.out_config_dir / "session_health.json"
 
@@ -420,7 +462,8 @@ def _check_mode(run: StudyRun) -> None:
             rg.update_run_info(run, gate_run_id=run.gate_run_id, gate_runs_dir=_show(run.gate_runs_root))
         return
     gate = {"gate_run_id": run.gate_run_id, "gate_runs_dir": _show(run.gate_runs_root)} if run.gate_run_id else {}
-    rg._write_json(path, {"run_id": run.run_id, "study": run.study, "offline": run.offline, "created": rg._now(), "config_dir": _show(run.config_dir), "git": rg.git_state()} | gate)
+    main = {"main_run_id": run.main_run_id, "main_runs_dir": _show(run.main_runs_root or run.runs_root)} if run.main_run_id else {}
+    rg._write_json(path, {"run_id": run.run_id, "study": run.study, "offline": run.offline, "created": rg._now(), "config_dir": _show(run.config_dir), "git": rg.git_state()} | gate | main)
 
 
 def settle_gate_run(run: StudyRun) -> None:
@@ -434,6 +477,139 @@ def settle_gate_run(run: StudyRun) -> None:
         raise PhaseError(f"run {run.run_id!r} takes its KG arm from gate run {recorded!r} (run.json), not {run.gate_run_id!r}; a new KG arm is a new --run-id")
     if not run.gate_run_id:
         run.gate_run_id, run.gate_runs_root, run._kg = recorded, rg._resolve(info.get("gate_runs_dir") or _show(run.gate_runs_root)), None
+
+
+def settle_main_run(run: StudyRun) -> None:
+    """An add-on study's main run, recorded in run.json at its first phase (as the gate run): a later invocation without
+    --main-run-id uses it, and one naming another main run is refused (another design is another run)."""
+    if not run.spec.depends_on:
+        return
+    info = rg.read_run_info(run)
+    recorded = info.get("main_run_id")
+    if not recorded:
+        return
+    if run.main_run_id and run.main_run_id != recorded:
+        raise PhaseError(f"run {run.run_id!r} inherits from {run.spec.depends_on} run {recorded!r} (run.json), not {run.main_run_id!r}; another main run is a new --run-id")
+    if not run.main_run_id:
+        run.main_run_id, run.main_runs_root, run._main, run._kg = recorded, rg._resolve(info.get("main_runs_dir") or _show(run.runs_root)), None, None
+
+
+# --- An add-on study's inheritance (m5) ---------------------------------------------------------------------------
+
+INHERITED_KEYS = ("main_run", "main_offline", "freeze_sha256", "frozen_at", "code_commit", "test_seeds", "token_caps", "cap_multiple", "kg", "selected", "design_env", "limit_rules")
+LIMIT_RULES = ("sample_working_limit", "sample_cost_limit")  # run_plan.yaml budget rules every sample runs under
+
+
+def main_run(run: StudyRun) -> StudyRun:
+    """The frozen run an add-on study inherits from (read only: nothing is ever written under its directory)."""
+    if not run.main_run_id:
+        raise PhaseError(f"the {run.study} study runs on a frozen {run.spec.depends_on} run: pass --main-run-id <its run id>")
+    return StudyRun(run.spec.depends_on, run.main_run_id, offline=run.offline, runs_root=run.main_runs_root or run.runs_root, config_dir=run.config_dir if run.offline else ROOT / "config")
+
+
+def _world_counts(worlds_file: Path) -> tuple[dict[str, int], list[str]]:
+    """{task cell: worlds on disk} of a build phase's worlds.json, and the listed worlds whose files are missing."""
+    if not worlds_file.is_file():
+        return {}, []
+    counts: dict[str, int] = {}
+    missing = []
+    for w in json.loads(worlds_file.read_text()).get("worlds") or []:
+        if rg._resolve(w["path"]).is_file():
+            cell = f"{w['family']}-{w['level']}"
+            counts[cell] = counts.get(cell, 0) + 1
+        else:
+            missing.append(w["world_id"])
+    return counts, missing
+
+
+def inheritance_problems(run: StudyRun, m: StudyRun, freeze: dict) -> list[str]:
+    """What keeps the add-on study from running on main run `m` now: the main design changed since its freeze, its test
+    has not started, or the worlds the add-on study's cells read are not on disk (it builds none)."""
+    problems = [f"{m.study} run {m.run_id!r}: frozen file changed since its freeze: {c}" for c in rg.frozen_changes(freeze)]
+    if rg.read_manifest(m, "test") is None:
+        problems.append(f"{m.study} run {m.run_id!r} has not started its test: the {run.study} study runs beside or after it, on its test worlds")
+    for split, phases in (("pilot", ("micro-pilot", "pilot")), ("test", ("build-test",))):
+        counts: dict[str, int] = {}
+        missing: list[str] = []
+        for ph in phases:
+            c, miss = _world_counts(m.phase_dir(ph) / "worlds.json")
+            missing += miss
+            for k, v in c.items():
+                counts[k] = max(counts.get(k, 0), v)
+        if missing:
+            problems.append(f"{m.study} run {m.run_id!r}: {split} world file(s) missing on disk: {missing[:10]}")
+        for cell in phase_cells(run, "pilot" if split == "pilot" else "test"):
+            need = OFFLINE_SCALE["worlds_per_cell"] if run.offline else _world_count(cell.spec) - int(cell.spec.get("world_offset", 0))
+            for tc in cell.spec.get("cells") or []:
+                if counts.get(tc, 0) < need:
+                    problems.append(f"{cell.id} reads {need} {split} world(s) of {tc}; {m.study} run {m.run_id!r} built {counts.get(tc, 0)} (the {run.study} study builds none)")
+    return problems
+
+
+def inheritance(run: StudyRun) -> dict:
+    """What an add-on study (m5) inherits from its frozen main run, cached on the run: the main run's test-seed block
+    (its test worlds, paired on the same tasks), its frozen token caps and their final multiple, its gate resolution
+    (KG arm and S3s), its selections (M1's: M5 and M5-spec run under it, as the M1 chain does), its design knobs, and
+    the working- and cost-limit rules (`LIMIT_RULES`, which main's frozen run_plan slice fixes). Copied at the first
+    resolution to config/main_inheritance.json (and the selections to config/selected.yaml), which the add-on study's
+    freeze hashes; a later resolution that differs is refused live. Raises PhaseError when the main run is not frozen
+    or is of the other mode; live also when the main design changed since its freeze, its test has not started, or the
+    worlds are not on disk (offline those are notes)."""
+    if run._main is not None:
+        return run._main
+    m = main_run(run)
+    freeze = read_freeze(m)
+    if freeze is None:
+        raise PhaseError(f"{m.study} run {m.run_id!r} is not frozen ({_show(m.freeze_path)} missing): the {run.study} study inherits a frozen design")
+    if bool(freeze.get("offline")) != run.offline:
+        raise PhaseError(f"{m.study} run {m.run_id!r} is {'an offline' if freeze.get('offline') else 'a live'} run; a{'n offline' if run.offline else ' live'} {run.study} run inherits from a run of its own mode")
+    problems = inheritance_problems(run, m, freeze)
+    # The limit rules: main's frozen run_plan slice holds them; this run's config must say the same.
+    frozen_plan = rg._entry_path((freeze.get("files") or {}).get("config/run_plan.yaml") or {"path": _show(m.config("run_plan.yaml"))})
+    theirs = ((yaml.safe_load(Path(frozen_plan).read_text()) or {}).get("budget") or {}) if Path(frozen_plan).is_file() else {}
+    ours = plan(run).budget or {}
+    rules = {k: ours.get(k) for k in LIMIT_RULES}
+    if diff := [k for k in LIMIT_RULES if theirs.get(k) != ours.get(k)]:
+        problems.append(f"budget.{', budget.'.join(diff)} differ from {m.study} run {m.run_id!r}'s frozen run_plan.yaml: every sample runs under the main study's rules")
+    if not m.selected_path.is_file():
+        problems.append(f"{m.study} run {m.run_id!r} has no selections ({_show(m.selected_path)})")
+    if problems and not run.offline:
+        raise PhaseError(f"the {run.study} study cannot run on {m.study} run {m.run_id!r} now: " + "; ".join(problems))
+    selected = (yaml.safe_load(m.selected_path.read_text()) or {}) if m.selected_path.is_file() else {}
+    resolution = {
+        "main_run": m.run_id,
+        "main_offline": m.offline,
+        "freeze_sha256": rg._sha256(m.freeze_path),
+        "frozen_at": freeze.get("frozen_at"),
+        "code_commit": freeze.get("code_commit"),
+        "test_seeds": freeze.get("test_seeds"),
+        "token_caps": freeze.get("token_caps") or {},
+        "cap_multiple": freeze.get("cap_multiple"),
+        "kg": {k: v for k, v in (freeze.get("kg") or {}).items() if k != "notes"},
+        "selected": selected,
+        "design_env": freeze.get("design_env") or {},
+        "limit_rules": rules,
+    }
+    path = run.inheritance_path
+    old = json.loads(path.read_text()) if path.is_file() else None
+    notes = list(problems)
+    if old is not None and (diff := sorted(k for k in INHERITED_KEYS if old.get(k) != resolution.get(k))):
+        msg = f"{m.study} run {m.run_id!r}'s design changed since this run copied it at {old.get('copied_at')} ({', '.join(diff)}): a {run.study} run keeps the design it started with; another is a new --run-id"
+        if not run.offline:
+            raise PhaseError(msg)
+        notes.append(f"{msg} (offline: the copy is replaced)")
+        old = None
+    if old is None:
+        rg._write_json(path, resolution | {"copied_at": rg._now()})
+        run.selected_path.parent.mkdir(parents=True, exist_ok=True)
+        run.selected_path.write_text(f"# The selections of {m.study} run {m.run_id} (inherited; {run.study} tunes nothing).\n" + yaml.safe_dump(selected, sort_keys=False))
+    run._main = resolution | {"notes": notes, "main_dir": _show(m.dir), "freeze_path": m.freeze_path, "test_status": (rg.read_manifest(m, "test") or {}).get("status")}
+    return run._main
+
+
+def inherited_summary(run: StudyRun) -> dict:
+    """The inheritance as phase params and the freeze record carry it (no notes, no paths)."""
+    return {k: inheritance(run)[k] for k in INHERITED_KEYS}
 
 
 # --- Plan, profiles, scale ---------------------------------------------------------------------------
@@ -596,6 +772,13 @@ def kg_resolution(run: StudyRun) -> dict:
         return run._kg
     if not study_needs_kg(run):
         run._kg = {"needed": False, "system": None}
+        return run._kg
+    if run.spec.depends_on:  # an add-on study takes its main run's frozen resolution (`inheritance`)
+        inh = inheritance(run)
+        kg = dict(inh["kg"])
+        if not kg.get("needed"):
+            raise PhaseError(f"{run.spec.depends_on} run {inh['main_run']!r} froze no KG arm, but the {run.study} study's cells read the KG")
+        run._kg = kg | {"source": f"{run.spec.depends_on} run {inh['main_run']} ({kg.get('source')})", "notes": []}
         return run._kg
     notes: list[str] = []
     if run.gate_run_id is None:
@@ -765,7 +948,8 @@ def s7_env(run: StudyRun) -> dict[str, str]:
 
 
 def seeds(run: StudyRun) -> dict:
-    return STUDY_SEEDS[run.study]
+    """The study's seed namespaces (`worlds.generate.STUDY_SEEDS`); an add-on study reads its main study's."""
+    return STUDY_SEEDS[run.spec.depends_on or run.study]
 
 
 def split_seed_base(run: StudyRun, split: str) -> int:
@@ -773,7 +957,10 @@ def split_seed_base(run: StudyRun, split: str) -> int:
 
 
 def test_seed_count(run: StudyRun) -> int:
-    """Seeds a run's test worlds use: the most worlds any test cell reads (world i has seed base+i)."""
+    """Seeds a run's test worlds use: the most worlds any test cell reads (world i has seed base+i); an add-on study's
+    main run's frozen count."""
+    if run.spec.depends_on:
+        return int(inheritance(run)["test_seeds"]["count"])
     count = max([int(n["count"]) for n in _world_needs(run, "test", offline=False).values()] or [1])
     if count > SEED_BLOCK:
         raise PhaseError(f"{run.study}'s test cells read {count} worlds per cell, more than a seed block ({SEED_BLOCK})")
@@ -803,6 +990,8 @@ def used_test_seed_blocks(run: StudyRun) -> list[dict]:
 def choose_test_seed_base(run: StudyRun) -> tuple[int, list[str]]:
     """(base, problems): offline the study's rehearsal base; live `--test-seed-base` if given (inside the study's test
     range, overlapping no other frozen run's block), else the first block no other frozen run of the study used."""
+    if run.spec.depends_on:  # an add-on study runs on its main run's frozen block: it never chooses one
+        return int(inheritance(run)["test_seeds"]["base"]), []
     first, end = seeds(run)["test"]
     if run.offline:
         return (run.test_seed_base if run.test_seed_base is not None else int(seeds(run)["offline_test"])), []
@@ -990,7 +1179,7 @@ def read_selected(run: StudyRun) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
-SELECTION_OF = {"S9": "M1", "M1s": "M1", "M1k": "M1", "M2": "M1"}  # D-041, D-047: one protocol variant, M1's, for S9 and the M1 chain
+SELECTION_OF = {"S9": "M1", "M1s": "M1", "M1k": "M1", "M2": "M1", "M5": "M1", "M5-spec": "M1"}  # D-041, D-047: one protocol variant, M1's, for S9 and the M1 chain
 
 
 def selection_for(declared: str, selected: dict) -> str | None:
@@ -1105,6 +1294,10 @@ def uncapped_cells(run: StudyRun) -> list[str]:
 
 
 def _caps_params(run: StudyRun, phase: str = "test") -> dict:
+    """task cell -> cap as `phase` applies it; an add-on study: its main run's frozen caps, in every phase (they are
+    frozen, so it never measures or escalates them)."""
+    if run.spec.depends_on:
+        return {c: int(v) for c, v in inheritance(run)["token_caps"].items()}
     return {c: v["cap"] for c, v in token_caps(run, phase).items()}
 
 
@@ -1471,6 +1664,11 @@ def _preflight(run: StudyRun, record: dict) -> None:
         what = "skipped (offline)" if run.offline else "a live run refuses those phases until they are built"
         record["warnings"].append(f"arms not built yet, {what}: " + "; ".join(f"{p}: {a}" for p, a in record["unbuilt_arms"].items()))
     record["warnings"] += [f"KG arm: {n}" for n in kg_resolution(run).get("notes") or []]
+    # 4a. An add-on study: its main run is frozen and its design and worlds are there (live: refused otherwise).
+    if run.spec.depends_on:
+        inh = inheritance(run)
+        checks["inheritance"] = {"main_run": inh["main_run"], "frozen_at": inh["frozen_at"], "test_status": inh["test_status"], "test_seeds": inh["test_seeds"], "cap_multiple": inh["cap_multiple"]}
+        record["warnings"] += [f"inheritance (offline): {n}" for n in inh["notes"]]
     # 4b. CM-native runs only on a model whose native compaction is confirmed (`agent.cm_arms.native_route`): checked
     #     here for every model a CM-native cell or grid candidate uses, so a live run refuses now, not per sample.
     checks["cm_native"], native = native_routes(run)
@@ -2336,6 +2534,106 @@ def _pilot_power(run: StudyRun, record: dict) -> dict:
     return {"source": source, "file": _show(path) if path else None, "sigmas": as_dict(sig), "reps": reps, "summary": text}
 
 
+def _addon_pilot(run: StudyRun, record: dict) -> None:
+    """An add-on study's pilot (m5): its `pilot` cells on the main run's pilot worlds, at the main run's frozen caps
+    (it builds no worlds and never escalates the caps), then the D-045/D-050 health gate on its own arms: token-, turn-
+    and other-hit counts at those caps, decided per arm (pooled over its cells) on the one-sided 97.5% Clopper–Pearson
+    lower bound (`cap_units`) -> config/pilot_health.json. Evidence over CAP_HIT_MAX refuses the freeze (the caps are
+    the main study's and frozen: the arms need a decision, not a larger cap); a point estimate without evidence is a
+    warning."""
+    from .budget import calibrate
+
+    inh = inheritance(run)
+    record["inheritance"] = {k: inh[k] for k in ("main_run", "frozen_at", "test_status", "cap_multiple")}
+    groups = run_groups(run, "pilot")
+    record["skipped_arms"] = skipped_arms(groups)
+    logs = run_phase_groups(run, record, "pilot", groups)
+    summary: dict[str, Any] = {"run_id": run.run_id, "offline": run.offline, "study": run.study, "skipped_arms": record["skipped_arms"], "success": _summary(logs)}
+    samples = pilot_samples(agent_logs(groups))
+    caps = _caps_params(run, "pilot")
+    rates = cap_hit_rates(samples, caps)
+    units = cap_units(rates, {})
+    health = {
+        "decision": "D-045, D-050 (as the main study's pilot gate, without escalation: the caps are the main run's, frozen)",
+        "main_run": inh["main_run"],
+        "multiple": inh["cap_multiple"],
+        "threshold": CAP_HIT_MAX,
+        "over": units_over(units),
+        "turn_over": units_over(units, "turn"),
+        "other_over": units_over(units, "other"),
+        "warnings": point_warnings(rates, {}, units),
+        "units": units,
+        "rates": rates,
+    }
+    health["passed"] = not (health["over"] or health["turn_over"] or health["other_over"])
+    rg._write_json(run.pilot_health_path, health)
+    record["outputs"] |= {"pilot_health": _show(run.pilot_health_path)}
+    record["pilot_health"] = {k: health[k] for k in ("passed", "over", "turn_over", "other_over")}
+    record["warnings"] += [f"pilot health (the freeze refuses): {p}" for p in pilot_health_problems(run, health)] + [f"pilot health (warning only): {w}" for w in health["warnings"]]
+    if logs:
+        run.out_config_dir.mkdir(parents=True, exist_ok=True)
+        calibrate(logs, out_path=run.measured_out_path)
+        record["outputs"] |= {"measured": _show(run.measured_out_path)}
+    summary["harness"] = _harness(run, record, groups, "pilot")
+    summary["pilot_health"] = health
+    summary["prereg_items"] = {
+        "main run": f"{inh['main_run']} (frozen {inh['frozen_at']}; test seeds {inh['test_seeds']['base']}+)",
+        "token caps": f"{inh['cap_multiple']} x S1's B0 (the main run's, frozen): " + (", ".join(f"{c} {v}" for c, v in caps.items()) or "none"),
+        "KG arm": f"{kg_resolution(run).get('arm')} ({kg_resolution(run).get('source')})" if kg_resolution(run).get("needed") else "none",
+    }
+    out = run.phase_dir("pilot") / "pilot.json"
+    rg._write_json(out, summary)
+    record["outputs"] |= {"pilot": _show(out)}
+
+
+def pilot_health_problems(run: StudyRun, health: dict) -> list[str]:
+    """The freeze's rules on an add-on study's pilot (`_addon_pilot`): evidence of token-, turn- or other-limit hits
+    over CAP_HIT_MAX for one of its arms."""
+    out = []
+    if health.get("over"):
+        out.append(f"{list(health['over'])} show token-cap-hit evidence over {CAP_HIT_MAX:.0%} at the main run's frozen caps ({health.get('multiple')} x B0): the caps are frozen, so the {run.study} study cannot escalate them; the arm needs a decision (its turn caps, its ledger's cost) before the freeze")
+    if health.get("turn_over"):
+        out.append(f"{list(health['turn_over'])} show turn-cap-hit evidence over {CAP_HIT_MAX:.0%}: the turn caps need a decision")
+    if health.get("other_over"):
+        out.append(f"{list(health['other_over'])} show other-limit evidence (working time, cost guard) over {CAP_HIT_MAX:.0%}: fix the harness or the guards")
+    return out
+
+
+def read_pilot_health(run: StudyRun) -> tuple[dict | None, list[str]]:
+    """(an add-on study's pilot health record, the freeze's problems with it)."""
+    if not run.spec.depends_on or not phase_cells(run, "pilot"):
+        return None, []
+    if not run.pilot_health_path.is_file():
+        return None, [f"{_show(run.pilot_health_path)} missing: run the pilot (it checks the arms at the main run's frozen caps)"]
+    health = json.loads(run.pilot_health_path.read_text())
+    return health, pilot_health_problems(run, health)
+
+
+def _addon_pilot_params(run: StudyRun) -> dict:
+    return base_params(run) | {"inherited": inherited_summary(run), "groups": group_params(run_groups(run, "pilot")), "code_identity": rg.code_identity()}
+
+
+def _addon_pilot_projected(run: StudyRun) -> float:
+    return sum(group_projected(run, g) for g in run_groups(run, "pilot", offline=False) if g["arms"])
+
+
+def _addon_inputs(run: StudyRun) -> dict[str, Path]:
+    return _cfg_inputs(run, "run_plan.yaml", "models.yaml", "model_costs.yaml") | {"config/main_inheritance.json": run.inheritance_path}
+
+
+def _refuse_addon_unless_inherited(name: str) -> Callable[[StudyRun], str | None]:
+    """An add-on study's phases: its main run still carries the design this run inherited (`inheritance`)."""
+
+    def refuse(run: StudyRun) -> str | None:
+        try:
+            inheritance(run)
+        except PhaseError as e:
+            return f"{name}: {e}"
+        return None
+
+    return refuse
+
+
 def _pilot_params(run: StudyRun) -> dict:
     gate = {"base": CAP_MULTIPLE, "doublings": CAP_DOUBLINGS, "threshold": CAP_HIT_MAX, "rule": "token_rate", "turn_caps": "refuse"} if run.spec.caps else None
     return _build_params(run, "pilot") | {"groups": group_params(run_groups(run, "pilot")), "caps": _caps_params(run, "pilot"), "s7_env": s7_env(run) if kg_resolution(run).get("needed") else None, "cap_gate": gate}
@@ -2386,6 +2684,8 @@ def frozen_outputs(run: StudyRun) -> list[str]:
     """The run's outputs the freeze hashes: selected.yaml; main also its token caps (B0 files and the pilot's cap-hit
     gate, whose multiple the test applies) and, when the pilot runs S7, the S7 targets."""
     out = ["selected.yaml"]
+    if run.spec.depends_on:  # the inherited design (selections included) and the add-on pilot's health record
+        out += ["main_inheritance.json"] + (["pilot_health.json"] if phase_cells(run, "pilot") else [])
     if run.spec.caps:
         out += ["token_caps.json", "token_caps_pilot.json"] + (["cap_gate.json"] if "pilot" in run.spec.phases else [])
     if "pilot" in run.spec.phases and any(a == "S7" for c in phase_cells(run, "pilot") for a in rg._arm_names(c.spec["arms"])):
@@ -2411,9 +2711,12 @@ def frozen_files(run: StudyRun, prereg: Path) -> dict[str, Path]:
         from .agent.cm_arms import native_record_path
 
         native = {"native_compaction.json": native_record_path()}
+    main = {f"{run.spec.depends_on}/freeze.json": inheritance(run)["freeze_path"]} if run.spec.depends_on else {}
+    grid = () if run.spec.depends_on else (run.grid_name,)  # an add-on study tunes nothing (it inherits the selections)
     return (
         {run.spec.prereg: prereg}
-        | {f"config/{n}": config_input(run.config(n), run.study) for n in (*FROZEN_CONFIG, run.grid_name)}
+        | main
+        | {f"config/{n}": config_input(run.config(n), run.study) for n in (*FROZEN_CONFIG, *grid)}
         | {f"config/{n}": run.out_config_dir / n for n in frozen_outputs(run)}
         | {f: ROOT / f for f in frozen_code(run)}
         | {k: rg._resolve(p) for k, p in (kg.get("files") or {}).items()}
@@ -2525,8 +2828,9 @@ def _write_freeze_provenance(run: StudyRun, freeze: dict) -> Path:
         f"- **KG arm:** {kg.get('arm')} ({kg.get('source')}{', verdict ' + kg['verdict'] if kg.get('verdict') else ''}); knobs {rg._fmt_env(kg.get('env'))}." if kg.get("needed") else "- **KG arm:** none (no cell reads the KG).",
         *[f"- **{a} (inherited from the gate run's `{x['key']}`):** candidate {x.get('candidate')}; knobs {rg._fmt_env(x['env'])}." for a, x in (kg.get("inherited") or {}).items()],
         *([f"- **Role:** the extension of run `{freeze['role']['of']}`."] if freeze["role"]["kind"] == "extension" else []),
-        f"- **Test seeds:** {seeds_['base']}-{seeds_['last']} ({run.study}'s block base {seeds_['base']}). A later {run.study} run freezes a fresh block. "
-        f"<!-- ape:test-seeds study={run.study} run={run.run_id} base={seeds_['base']} count={seeds_['count']} -->",
+        (f"- **Test seeds:** {seeds_['base']}-{seeds_['last']}, {run.spec.depends_on} run {(freeze.get('inherited') or {}).get('main_run')}'s frozen block (inherited: the {run.study} study builds no worlds). "
+         if run.spec.depends_on else f"- **Test seeds:** {seeds_['base']}-{seeds_['last']} ({run.study}'s block base {seeds_['base']}). A later {run.study} run freezes a fresh block. ")
+        + f"<!-- ape:test-seeds study={run.study} run={run.run_id} base={seeds_['base']} count={seeds_['count']} -->",
         f"- **Code:** build-test and test run only at `{freeze['git']['commit']}` ({', '.join(rg.CODE_PATHS)} unchanged).",
         f"- **Record:** `{_show(run.freeze_path)}`.",
         "",
@@ -2562,11 +2866,19 @@ def _freeze(run: StudyRun, record: dict) -> None:
         return
     problems: list[str] = []
     text = run.prereg_path.read_text() if run.prereg_path.is_file() else ""
+    prereg, rehearsal = run.prereg_path, None
     if not text:
-        problems.append(f"{_show(run.prereg_path)} is missing or empty (BUILD_PLAN B5 / B11 write it)")
+        msg = f"{_show(run.prereg_path)} is missing or empty (BUILD_PLAN B5 / B11 write it)"
+        if run.offline:  # a rehearsal freezes a stub, so the add-on study rehearses before its pre-registration exists
+            record["warnings"].append(msg + "; offline: a stub copy is frozen")
+            prereg = run.work_dir / run.spec.prereg
+            prereg.parent.mkdir(parents=True, exist_ok=True)
+            prereg.write_text(f"# {run.spec.title}: rehearsal stub (no pre-registration yet)\n")
+            rehearsal = []
+        else:
+            problems.append(msg)
     placeholders = rg.prereg_placeholders(text)
     record["placeholders"] = placeholders
-    prereg, rehearsal = run.prereg_path, None
     if placeholders:
         if run.offline:
             prereg, rehearsal = _rehearsal_prereg(run, text, _prereg_items(run))
@@ -2597,6 +2909,8 @@ def _freeze(run: StudyRun, record: dict) -> None:
     problems += gate_problems
     health, health_problems = read_session_health(run)
     problems += [f"R-B5: {p}" for p in health_problems]
+    addon_health, addon_problems = read_pilot_health(run)
+    problems += [f"pilot health: {p}" for p in addon_problems]
     need, left = test_affordability(run)
     if need > left:
         msg = (
@@ -2635,6 +2949,8 @@ def _freeze(run: StudyRun, record: dict) -> None:
         "test_affordability": {"projected_usd": round(need, 2), "remaining_usd": round(left, 2)},
         "test_cost_limits": test_cost_limits(run),
         "session_health": (health or {}).get("arms"),
+        "pilot_health": {k: addon_health.get(k) for k in ("passed", "multiple", "units", "over", "turn_over", "other_over", "warnings")} if addon_health else None,
+        "inherited": inherited_summary(run) if run.spec.depends_on else None,
         "cap_gate": {k: gate.get(k) for k in ("multiple", "base", "max", "threshold", "rule", "passed", "units", "rates", "projected", "unprojectable", "turn_over", "other_over", "warnings", "rounds")} if gate else None,
         "design_env": env_knobs(run),
     }
@@ -2945,6 +3261,15 @@ def phase_defs(study: str) -> dict[str, rg.Phase]:
         ),
         "analyze": rg.Phase("analyze", _analyze, inputs=_analyze_inputs, params=_analyze_params, projected=lambda r: 0.0, profile=study_profile),
     }  # fmt: skip
+    if s.depends_on:  # an add-on study: its pilot at the main run's frozen caps, its test on the main run's test worlds
+        defs["pilot"] = rg.Phase(
+            "pilot", _addon_pilot, inputs=_addon_inputs, params=_addon_pilot_params, projected=_addon_pilot_projected, profile=study_profile,
+            requires=("preflight",), refuse=_refuse_all(_refuse_addon_unless_inherited("pilot"), _refuse_frozen("pilot"), _refuse_unbuilt("pilot")),
+        )
+        defs["test"] = rg.Phase(
+            "test", _test, inputs=_frozen_inputs, params=_test_params, projected=_test_projected, profile=study_profile, requires=("freeze",),
+            upstream=("freeze",), refuse=_refuse_all(_refuse_addon_unless_inherited("test"), _refuse_unless_frozen("test"), _refuse_unbuilt("test")), remaining=_test_remaining,
+        )
     return {p: defs[p] for p in s.phases}
 
 
@@ -2997,8 +3322,11 @@ def run_environment(run: StudyRun) -> Iterator[None]:
         raise PhaseError("the environment sets the KG arm's knobs to other values than the gate run's selection; unset: " + "; ".join(clash))
     if run.offline:
         w = run.work_dir
+        # An add-on study reads its main run's worlds and indices (offline they live in that run's work/; live in the
+        # shared worlds/ and indices/), and writes only its own cache.
+        src = main_run(run).work_dir if run.spec.depends_on else w
         updates: dict[str, str | Path | None] = {
-            "APE_WORLDS": w / "worlds", "APE_INDICES": w / "indices", "APE_CACHE": w / "cache", "APE_EMBEDDINGS": "fake", "APE_MODEL_PROFILE": None,
+            "APE_WORLDS": src / "worlds", "APE_INDICES": src / "indices", "APE_CACHE": w / "cache", "APE_EMBEDDINGS": "fake", "APE_MODEL_PROFILE": None,
             "APE_BUILD_MODEL": None, "APE_BUILD_EFFORT": None, "APE_BUILD_FALLBACK": None, "OPENAI_API_KEY": rg.OFFLINE_KEY, "OPENAI_BASE_URL": rg.OFFLINE_BASE_URL,
         }  # fmt: skip
     else:
@@ -3128,6 +3456,7 @@ def run_phases(run: StudyRun, phase: str) -> dict[str, str]:
     if unknown := [n for n in names if n not in PHASE_DEFS[run.study]]:
         raise PhaseError(f"unknown phase(s) {unknown} for {run.study}; its phases are {list(run.spec.phases)} or all")
     settle_gate_run(run)
+    settle_main_run(run)
     statuses: dict[str, str] = {}
     with run_environment(run):
         for name in names:
@@ -3155,6 +3484,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--budget-usd", type=float, help="lower the guard's program budget for this run (never above the plan's)")
     ap.add_argument("--gate-run-id", metavar="RUN_ID", help="the frozen, analysed gate run whose verdict and selection fix the KG arm (S5, M1k, M2)")
     ap.add_argument("--gate-runs-dir", type=Path, help="where the gate run lives (default: --runs-dir)")
+    ap.add_argument("--main-run-id", metavar="RUN_ID", help="an add-on study (m5): the frozen main run whose design and worlds it inherits")
+    ap.add_argument("--main-runs-dir", type=Path, help="where that main run lives (default: --runs-dir)")
     ap.add_argument("--test-seed-base", type=int, metavar="SEED", help=f"freeze only: the first test seed (a block of {SEED_BLOCK}) inside the study's test range")
     ap.add_argument("--extension-of", metavar="RUN_ID", help="freeze only: this run extends an earlier frozen run of the study (fresh test worlds)")
     ap.add_argument("--skip-smoke-check", metavar="REASON", help="live runs: run without a fresh passing live smoke, recording why")
@@ -3173,6 +3504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run = StudyRun(
             a.study, a.run_id, offline=a.offline, force=a.force, runs_root=a.runs_dir, config_dir=a.config_dir, budget_usd=a.budget_usd,
             test_seed_base=a.test_seed_base, extension_of=a.extension_of, gate_run_id=a.gate_run_id, gate_runs_root=a.gate_runs_dir,
+            main_run_id=a.main_run_id, main_runs_root=a.main_runs_dir,
             skip_smoke_check=a.skip_smoke_check, smoke_max_age_days=a.smoke_max_age_days, deviation=a.deviation,
         )  # fmt: skip
         statuses = run_phases(run, a.phase)
