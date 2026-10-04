@@ -5,7 +5,8 @@ Every result in this project must be traceable to the exact code and data below.
 ## APG (Adaptive Prompt Graph)
 
 - **Source:** `~/Documents/Work/Code/EvolvingWisdomAgents`
-- **Pinned commit:** annotated tag **`apg-eval-baseline`** → `d47f7f3749dac38e9f917429810136e4ec6ebb37` (2026-09-30). This is the repo's first commit.
+- **Pinned commit:** annotated tag **`apg-eval-baseline`** → `64edf5d51f2bac6cbcf3942cd649a4146b091c11` (2026-09-30). This is the repo's first commit.
+- **Remote (2026-10-04):** https://github.com/Erik-Koning/EvolvingWisdomAgents (public). The baseline commit's message was rewritten before publishing (commit-message trailers removed); its tree, and so every file and the tree hashes below, is unchanged: the pin moved from `d47f7f3` to `64edf5d`.
   - Before committing, a scan confirmed: `.env` is ignored and unstaged; no staged file names look like secrets; there are no key-like strings in staged content; and the tree hashes below matched.
 - **Tree hashes at the pinned commit** (method: sha256 of the sorted `<sha256>  <path>` listing, excluding `__pycache__`, `.pytest_cache`, `.DS_Store`):
 

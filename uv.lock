@@ -187,7 +187,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apg-core", git = "file:///Users/erikkoning/Documents/Work/Code/EvolvingWisdomAgents?subdirectory=python%2Fpackages%2Fapg-core&tag=apg-eval-baseline" },
+    { name = "apg-core", git = "https://github.com/Erik-Koning/EvolvingWisdomAgents.git?subdirectory=python%2Fpackages%2Fapg-core&tag=apg-eval-baseline" },
     { name = "huggingface-hub", specifier = ">=1.33" },
     { name = "inspect-ai" },
     { name = "jsonschema" },
@@ -214,7 +214,7 @@ dev = [
 [[package]]
 name = "apg-core"
 version = "0.1.0"
-source = { git = "file:///Users/erikkoning/Documents/Work/Code/EvolvingWisdomAgents?subdirectory=python%2Fpackages%2Fapg-core&tag=apg-eval-baseline#d47f7f3749dac38e9f917429810136e4ec6ebb37" }
+source = { git = "https://github.com/Erik-Koning/EvolvingWisdomAgents.git?subdirectory=python%2Fpackages%2Fapg-core&tag=apg-eval-baseline#64edf5d51f2bac6cbcf3942cd649a4146b091c11" }
 
 [[package]]
 name = "ascii-colors"

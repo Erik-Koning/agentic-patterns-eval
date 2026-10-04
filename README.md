@@ -6,7 +6,7 @@ A pre-registered evaluation of agent architectures (single agents with different
 
 | Study | Question | Pre-registration | Budget (conservative) |
 |---|---|---|---|
-| **Gate** | Is APG (the in-house knowledge graph) non-inferior to LightRAG? The winner becomes the main study's KG arm. | `GATE_PREREG.md` | $220 |
+| **Gate** | Is APG (the Adaptive Prompt Graph, [EvolvingWisdomAgents](https://github.com/Erik-Koning/EvolvingWisdomAgents)) non-inferior to LightRAG? The winner becomes the main study's KG arm. | `GATE_PREREG.md` | $220 |
 | **Main** | Which mechanism drives multi-agent gains (decomposition, isolation, ensembling, communication, specialization), and does KG delivery substitute for a team? | `PREREGISTRATION_MAIN.md` | $827 |
 | **Study G** | Do context-management strategies (prune, summarise, todo, reset, native compaction) and topologies keep their value as models get stronger? | `PREREGISTRATION_G.md` | $1,950 |
 
@@ -17,10 +17,12 @@ The program costs $2,996 conservative ($2,047 expected) against a $5,000 budget 
 ## Setup
 
 ```bash
-uv sync --locked                      # Python 3.14; apg-core comes from a local git tag (pyproject.toml)
+uv sync --locked                      # Python 3.14; installs apg-core from the APG repo (below)
 echo "OPENAI_API_KEY=<key>" > .env    # gitignored; never commit it
 export APE_BACKUP_DIR=/path/to/backup # recommended: run outputs are mirrored there
 ```
+
+**APG** lives in its own repository, [Erik-Koning/EvolvingWisdomAgents](https://github.com/Erik-Koning/EvolvingWisdomAgents) (Python kernel `apg-core` plus TypeScript packages). This project installs `apg-core` from it, pinned to the tag `apg-eval-baseline` (commit `64edf5d`; `pyproject.toml`, `uv.lock`, `PROVENANCE.md`).
 
 ## Run
 

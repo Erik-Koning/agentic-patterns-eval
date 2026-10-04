@@ -237,7 +237,7 @@ from .worlds.generate import SEED_BLOCK, SPLIT_SEED_BASE, TEST_SEED_BASE_ENV, TE
 STUDY = "gate"
 PHASES = ("preflight", "build-dev", "tune", "anchor", "pilot", "freeze", "build-test", "test", "analyze")
 COMPLETE = ("done", "skipped")
-APG_PIN = "d47f7f3749dac38e9f917429810136e4ec6ebb37"  # PROVENANCE.md: tag apg-eval-baseline
+APG_PIN = "64edf5d51f2bac6cbcf3942cd649a4146b091c11"  # PROVENANCE.md: tag apg-eval-baseline
 MOCK = "mockllm/model"
 OFFLINE_KEY = "sk-ape-offline-run-no-network"
 OFFLINE_BASE_URL = "http://127.0.0.1:9/v1"  # the discard port: a stray OpenAI call fails at once, locally
