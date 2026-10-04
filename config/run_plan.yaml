@@ -28,7 +28,7 @@ budget:
   # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,126.8 + the D-039 pilot re-runs the
   # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225).
   allocations: {gate: 300, main: 1225, study_g: 3600}
-  contingency_usd: 270
+  contingency_usd: 160
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
   # ends with limit "cost" and counts as a cap hit (PC5). Only applied when every model of the run is priced.

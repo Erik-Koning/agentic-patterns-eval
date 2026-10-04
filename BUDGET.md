@@ -1,18 +1,18 @@
 # Program budget (FX-5)
 
-**Date:** 2026-10-03 (D-034). **Snapshot** of `uv run python -m ape.budget` with priors only (no calibration yet). The numbers come from `config/run_plan.yaml` (what runs) × `config/budget_assumptions.yaml` (per-call priors) × `config/model_costs.yaml` (prices). Decision: D-021.
+**Date:** 2026-10-03 (D-050). **Snapshot** of `uv run python -m ape.budget` with priors only (no calibration yet). The numbers come from `config/run_plan.yaml` (what runs) × `config/budget_assumptions.yaml` (per-call priors) × `config/model_costs.yaml` (prices). Decision: D-021.
 
 ## Totals for the right-sized plan (USD)
 
-| Study | Phases (conservative $) | Conservative | Expected | Allocation (D-035) |
+| Study | Phases (conservative $) | Conservative | Expected | Allocation (D-035, D-050) |
 |---|---|---|---|---|
-| Gate | smoke 3 · anchor 11 · builds 57 · tuning 8 · pilot 13 · test 59 · diagnostics 24 · F5 3 · secondaries 37 | **214** | 188 | ≤ 300 |
-| Main study | builds 5 · micro-pilot 10 · tuning 35 · pilot 15 · A 141 · B 136 · C 40 · F 642 | **1,025** | 783 | ≤ 1,100 |
-| Study G | micro-pilot 11 · tuning 22 · capability anchor 51 · context management 1,764 · topology 1,638 | **3,486** | 2,196 | ≤ 3,600 |
-| **Total** | | **4,725** | **3,168** | ≤ 5,000 |
-| Contingency | $5,000 − conservative total | 275 | | ≥ 270 |
+| Gate | smoke 3 · anchor 11 · builds 57 · tuning 8 · pilot 13 · test 59 · diagnostics 26 · F5 3 · secondaries 40 | **220** | 193 | ≤ 300 |
+| Main study | builds 5 · micro-pilot 12 · tuning 33 · pilot 18 · A 153 · B 147 · C 64 · F 694 | **1,127** | 857 | ≤ 1,225 |
+| Study G | micro-pilot 15 · tuning 22 · capability anchor 51 · context management 1,764 · topology 1,638 | **3,490** | 2,199 | ≤ 3,600 |
+| **Total** | | **4,836** | **3,249** | ≤ 5,000 |
+| Contingency | $5,000 − conservative total | 164 | | ≥ 160 |
 
-- **By tier** (conservative / expected): Astra-high 1,966 / 1,230 · Sol-high 1,846 / 1,280 · Luna-high 810 / 600 · Luna-low 89 / 45 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
+- **By tier** (conservative / expected): Astra-high 1,966 / 1,230 · Sol-high 1,896 / 1,320 · Luna-high 871 / 641 · Luna-low 89 / 45 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
 - **Pilot σ cell (D-026, 2026-10-02):** +$8 conservative. The pilot builds 8 worlds per cell (was 4; +$6.19) and runs APG* and LGR* on the 4 new ones (`gate.pilot.sigma`, +$2.17), so σ is estimated from 8 worlds per cell.
 - **PC1 fidelity (D-025, 2026-10-02):** the anchor grew about $5: answer contexts mapped to LightRAG 1.2.5's caps (26.5K tokens) and a second scorer's judge calls; its bge embeddings run locally ($0).
 - **The total fits.** Each study is within its allocation (D-035: allocations reset to the right-sized plan plus headroom; the FX-5 targets were 700 / 1,000 / 2,700, and Study G's topology cells would have been stopped by the guard). The gate's underspend covers part of that. The conservative scenario prices every cached token at the full input price, so expected spend is ≈ $3.2K. The orchestrator's budget check (FX-6) stops any phase whose projected cost exceeds what remains.
@@ -73,3 +73,4 @@ FX-6 calls `projected_cost()` and `remaining()` before each phase. It refuses th
 - **D-043 (2026-10-03):** +$2. CM-native replaces CM-prune at Sol (+$6); the Study G tune prices CM-sum and CM-todo at their 2 real candidates (−$4).
 - **D-044 (2026-10-03):** +$13. The live S8k3 gets all 5 Study C runs in its own cell (`main.C.s8`), as the brief's Study C specifies; it had 2. Contingency target lowered to 270.
 - **Contingent (D-039/D-045):** if the pilot's token-cap gate escalates, up to two pilot-sized re-run rounds (about $36 conservative) come out of contingency; the runner projects them before running.
+- **D-050 (2026-10-03, after the independent review):** +$111. `ape.budget` now prices what the runner runs: whole worlds of 12 tasks ("100 tasks" is 108, M1s 60, Study C 24), so main rises to $1,127 and the gate to $220; Study G gains the `g.pilot.topo` cell ($3.7). The main allocation is $1,225 (projection + the two possible cap-gate re-runs, ≈ $36, + ~5%). The allocations now add to $5,125, above the $5,000 total: each guard uses the smaller of the program's and the study's remainder, so the program total binds and a study may use another's underspend up to its own ceiling. Contingency $164.
