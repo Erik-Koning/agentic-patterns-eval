@@ -310,8 +310,9 @@ def score_session(world: World, events: list[dict], report: dict | None, overflo
 def probes_by_checkpoint(probes: list[dict], checkpoints, n_items: int) -> dict[int, dict]:
     """Every checkpoint the session should have probed (k <= N), taken or not. A checkpoint the session never
     reached (CM0 overflowed, or a sample limit ended it) is `taken: False` and scores 0: the agent holds no usable
-    state there. Averaging only the probes taken would favour arms that overflow early (survivorship)."""
-    taken = {p["k"]: p for p in probes}
+    state there. Averaging only the probes taken would favour arms that overflow early (survivorship). A probe call a
+    sample limit cut short (`limit: True`, kept for its usage) is not taken either."""
+    taken = {p["k"]: p for p in probes if not p.get("limit")}
     out = {}
     for k in sorted({int(k) for k in checkpoints if int(k) <= n_items} | set(taken)):
         p = taken.get(k)
