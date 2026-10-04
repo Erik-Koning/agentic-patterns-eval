@@ -48,7 +48,7 @@ studies:
     profile: gate   # agent Luna high, kg Luna low, build Luna high (D-015, D-017)
     phases:
       smoke:
-        - {id: gate.smoke, kind: fixed, usd: 3.0, note: "readiness/smoke.py --max-usd 3 (FX-8), incl. E3 probes"}
+        - {id: gate.smoke, kind: fixed, usd: 3.4, note: "readiness/smoke.py (--max-usd 4): gate checks $2.95 incl. E3 probes + the main and Study G arm-family checks $0.41 (D-046)"}
       anchor:
         - {id: gate.anchor.index, kind: build, profile: anchor, worlds: {anchor-medical: 1}, systems: [lightrag],
            note: "PC1 LightRAG index, paper model gpt-4o-mini (D-009)"}

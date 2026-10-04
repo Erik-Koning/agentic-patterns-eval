@@ -428,7 +428,7 @@ Exact model IDs and snapshots are those `readiness/probe_openai.py` confirmed an
 - **Other limits.**
   - The per-agent turn caps of §3.1.
   - A per-sample runaway guard (Inspect `cost_limit`): 20 × the cell's conservative per-sample projection, at least $0.50. A hit is a cap hit.
-  - No wall-clock cap is applied: the brief's optional wall-clock cap is not implemented. Wall-clock is reported, never capped.
+  - No experimental wall-clock cap is applied; wall-clock is reported, never capped. A runaway guard stops a sample whose working time (which excludes waits for connections and rate limits) exceeds 30 minutes at a 12-turn cap, scaled with the turn cap (F1-32: 110 minutes; `budget.sample_working_limit`); a guard hit ends the sample with limit `working` and counts as a cap hit (a failure), and is reported per arm and cell.
 - **Budget guard.** Before each phase, and before each test group, the conservative projection must fit what is left of both the program's $5,000 (D-021) and the main study's allocation of $1,100 (D-035).
   - The test phase runs Studies A and B first, so a budget stop loses only Studies C and F.
   - A stopped or failed test is still analysed. Its missing cells make members "not evaluable", named in the report.
@@ -454,7 +454,7 @@ Exact model IDs and snapshots are those `readiness/probe_openai.py` confirmed an
    - Inspect output caching is off for every arm.
    - Provider prompt caching is left at its default for every arm.
    - Cache-read and cache-write tokens are reported per arm.
-   - No per-run cache nonce (brief §6.2) is set. Arms that send the same system prompt and corpus may share a provider cache prefix. That can lower cache-adjusted $ and wall-clock, but never tokens (the confirmatory meter) or success.
+   - **Per-run cache nonce** (brief §6.2): every agent prompt of a task starts with a short `Run reference` line derived from the run, phase, group and arm (`agent/cache_nonce.py`; recorded per sample as `cache_nonce`), so provider prompt caches never cross runs or arms that share the same corpus prefix. Epochs of one arm share their nonce, so a later epoch can read an earlier epoch's cache: cache-hit claims use first epochs. kg-role calls (APG classify, LightRAG keywords) carry no nonce.
 10. **Blind analysis.** The analysis code (`analyze_main.py`, `analysis/`) is frozen with this design, before the test split exists.
 11. **Fresh test split.** Generated after the freeze (§4.1).
 12. **Programmatic scoring only.**

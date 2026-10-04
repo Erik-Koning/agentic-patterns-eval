@@ -110,10 +110,10 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
 | B5 | ✅ merged 2d29cb4 | D-044 |
 | B11 | ✅ PREREGISTRATION_G.md d04e2d4; tuning grid + probe extension merged | D-042, D-043 |
-| B12 | 🔄 smoke checks, cache nonce, runaway guard building; independent review next | |
+| B12 | ✅ part 1 merged (smoke checks, cache nonce, runaway guard; D-046); independent review next | |
 
 **Follow-ups found during the build** (must be done before any paid run):
-- **For B12:** a per-run cache nonce (brief §6.2: provider prefix caches must not carry across runs or arms sharing a monolith prefix) and a runaway wall-clock guard (brief §4.5); the runner writing the `cap multiple` and `pilot σ and power` pre-registration items.
+✅ - **For B12:** a per-run cache nonce (brief §6.2: provider prefix caches must not carry across runs or arms sharing a monolith prefix) and a runaway wall-clock guard (brief §4.5); the runner writing the `cap multiple` and `pilot σ and power` pre-registration items.
 ✅ - **Pilot cap-hit gate (D-039):** M7 may outgrow the 8 × B0 token cap; the main runner doubles the cap multiple for all arms when any arm's pilot cap-hit rate exceeds 10% (with the B1 integration).
 ✅ - **Freeze scope:** the gate's freeze hashes all of `run_plan.yaml`, `models.yaml` and `model_costs.yaml`, so once the gate freezes, any later main/G plan edit would break it. Being changed to per-study resolved slices (with the B1 integration).
 ✅ - **`search_kb` limit handling:** a token limit tripped inside `search_kb` became a tool error (one extra model call). Being fixed with the B1 integration.
