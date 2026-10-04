@@ -200,8 +200,8 @@ def test_the_kg_arm_follows_the_gate_runs_verdict_and_selection(clean_env, monke
     _fake_gate_run(runs, "g-unfrozen", "GO", frozen=False)
     _fake_gate_run(runs, "g-offline", "GO", offline=True)
 
-    def kg(gid: str | None, offline: bool = False) -> dict:
-        return run_study.kg_resolution(StudyRun("main", "m", offline=offline, runs_root=runs, gate_run_id=gid))
+    def kg(gid: str | None, offline: bool = False) -> dict:  # a run per gate run: a run keeps the resolution it copied (R-A1)
+        return run_study.kg_resolution(StudyRun("main", f"m-{gid}", offline=offline, runs_root=runs, gate_run_id=gid))
 
     go = kg("g-go")
     assert (go["key"], go["arm"], go["system"], go["env"], go["verdict"]) == ("APG*", "APG-q", "apg", {"APE_APG_SHORTLIST_K": "24"}, "GO")
@@ -292,7 +292,7 @@ def test_a_run_keeps_the_gate_resolution_it_copied_and_a_gate_reanalysis_never_t
     assert run_study.phase_state(StudyRun("main", "m", runs_root=runs, gate_run_id="g-go"), "build-dev")["fingerprint"] == before["fingerprint"]
     # The gate's selection changes: refused live; a new run id resolves the new one.
     (d / "config" / "selected.yaml").write_text(yaml.safe_dump({**SELECTED, "APG*": {"arm": "APG-s", "env": {"APE_APG_SHORTLIST_K": "12"}}}))
-    with pytest.raises(PhaseError, match=r"resolution changed since this run copied it at .* \(arm, candidate, env, gate_selected\)"):
+    with pytest.raises(PhaseError, match=r"resolution changed since this run copied it at .* \(arm, candidate, declared, env, gate_selected\)"):
         run_study.kg_resolution(StudyRun("main", "m", runs_root=runs, gate_run_id="g-go"))
     after = run_study.phase_state(StudyRun("main", "m2", runs_root=runs, gate_run_id="g-go"), "build-dev")
     assert after["params"]["kg"]["arm"] == "APG-s" and after["fingerprint"] != before["fingerprint"]
@@ -902,13 +902,16 @@ def test_main_builds_cover_the_kg_cells_and_share_the_gates_dev_worlds(clean_env
     assert run_study.kg_build_cell(StudyRun("main", "b6n", runs_root=clean_env / "runs", gate_run_id="g-nogo"), "test")[0].spec["systems"] == ["lightrag"]
     dev = {f"{s['family']}-{s['level']}": s for s in run_study.world_specs(live, "dev")}
     assert set(dev) == {"F1-32", "F2-10", "F3-60", "F7-1000"}
-    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == ["apg"], "M1k and M2 read the KG; S3s no longer tunes in main (D-041)"
+    assert dev["F7-1000"]["shared"] is True and dev["F7-1000"]["n_tasks"] == run_study.plan(live).cell("gate.tune").spec["tasks_per_world"] and dev["F7-1000"]["kinds"] == [], "only M1 tunes on F7-1000 (D-041, D-047): no KG or chunks to build"
     assert "shared" not in dev["F1-32"] and dev["F1-32"]["kinds"] == [] and dev["F1-32"]["seed_base"] == 1000
     assert run_study.kg_worlds(live, "dev") == {}, "shared dev worlds are the gate's: not projected again"
 
 
-def test_a_live_build_dev_refuses_another_builder_than_the_gate_runs(clean_env):
+def test_a_live_build_dev_refuses_another_builder_than_the_gate_runs(clean_env, monkeypatch):
     _fake_gate_run(clean_env / "gates", "g-go", "GO")
+    # Since D-047 no main tuning cell reads an artifact on the shared dev worlds; the guard still stands for one that does.
+    real = run_study.world_specs
+    monkeypatch.setattr(run_study, "world_specs", lambda r, split: [s | ({"kinds": ["apg"]} if s.get("shared") else {}) for s in real(r, split)])
     run = StudyRun("main", "b", runs_root=clean_env / "runs", gate_run_id="g-go", gate_runs_root=clean_env / "gates")
     assert run_study._refuse_other_builder(run) is None, "no gate build-dev record: nothing to compare"
     ours = run_study.build_params(run)
@@ -1387,6 +1390,29 @@ def test_the_runner_index_reads_only_the_latest_runs_identities():
 
     index = {"tasks": {"old": {"log": "a.eval", "status": "success"}, "new": {"log": "b.eval", "status": "success"}}, "runs": [{"tasks": ["old"]}, {"tasks": ["new"]}, {"tasks": []}]}
     assert latest_tasks(index) == {"new": {"log": "b.eval", "status": "success"}} and latest_tasks({"tasks": {}, "runs": []}) == {}
+
+
+def test_a_live_freeze_records_the_cost_limits_checks_affordability_and_freezes_the_native_record(clean_env, monkeypatch):
+    """R-B3: the allocation is a guard input, so a live freeze checks the test fits what is left; R-C6: the freeze
+    records each test group's per-sample cost limit (the test applies it) and, live with CM-native cells, freezes the
+    support record."""
+    from ape.agent.cm_arms import NATIVE_RECORD_ENV, record_native_support
+
+    run = StudyRun("main", "aff", offline=True, runs_root=clean_env / "runs")
+    run.out_config_dir.mkdir(parents=True)
+    run.selected_path.write_text(yaml.safe_dump({}))
+    need, left = run_study.test_affordability(run)
+    assert need == pytest.approx(run_study._test_projected(run)) and left > 0
+    limits = run_study.test_cost_limits(run)
+    groups = {g["dir"]: g for g in run_study.run_groups(run, "test") if g["arms"]}
+    assert set(limits) == set(groups) and all(v["cost_limit_usd"] >= 0.5 and v["sample_usd"] > 0 for v in limits.values())
+    g = next(iter(groups.values()))
+    assert limits[g["dir"]]["sample_usd"] == pytest.approx(run_study.group_projected(run, g) / run_study.group_live_samples(run, g), rel=1e-4)
+    monkeypatch.setenv(NATIVE_RECORD_ENV, str(record_native_support("openai/gpt-6-luna", True, evidence="test", path=clean_env / "native.json")))
+    live_g = StudyRun("study_g", "nat", runs_root=clean_env / "runs")
+    monkeypatch.setattr(run_study, "native_routes", lambda r: ({"g.cm.luna-high": "provider"}, []))
+    assert run_study.frozen_files(live_g, live_g.prereg_path)["native_compaction.json"] == clean_env / "native.json"
+    assert "native_compaction.json" not in run_study.frozen_files(StudyRun("study_g", "nat", offline=True, runs_root=clean_env / "runs"), live_g.prereg_path)
 
 
 def test_an_extension_names_a_frozen_primary_run_of_the_same_study(clean_env):

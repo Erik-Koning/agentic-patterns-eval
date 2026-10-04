@@ -36,7 +36,9 @@ MOCK_PRICE = {"input": 1.0, "output": 2.0, "input_cache_write": 1.0, "input_cach
 
 # The right-sized plan's conservative $ per study, as documented in BUDGET.md and DECISIONS.md D-021
 # (priors only, no measured calibration). Update the docs with these when the plan or the priors change.
-DOCUMENTED = {"gate": 214, "main": 1025, "study_g": 3486, "total": 4725, "expected": 3168}
+# R-B4 (2026-10-03): whole worlds as the runners run them (100 -> 108, 20 -> 24, 15 -> 24), M1k/M2/S9 no longer tuned
+# (D-047), the g.pilot.topo cell. Were 214 / 1,025 / 3,486 / 4,725 / 3,168.
+DOCUMENTED = {"gate": 220, "main": 1127, "study_g": 3490, "total": 4836, "expected": 3249}
 
 
 @pytest.fixture(autouse=True)
@@ -106,11 +108,11 @@ def test_two_small_cells_reproduce_hand_computed_costs(tmp_path):
     # Pull: 3 calls, context 200 x 2 = 400, history 100 x 1 = 100 -> 1,000 in; a compile per call (3 classify, 3 embeds).
     pull = 3 * (1000 * 2 + 1000 * 10) / 1e6 + 3 * (300 * 1 + 100 * 4) / 1e6 + 3 * 50 * 0.5 / 1e6
     assert push == pytest.approx(0.023725) and pull == pytest.approx(0.038175)
-    assert est.total(cell="agent-cell") == pytest.approx(10 * (push + pull))  # 5 tasks x 2 epochs per mode
+    assert est.total(cell="agent-cell") == pytest.approx(24 * (push + pull))  # n_tasks 5 runs one whole world of 12 (R-B4) x 2 epochs per mode
     # Expected: half the agent input cached at 0.1 x input -> input rate 2 x (0.5 + 0.05) = 1.1; kg and embeddings uncached.
     push_exp = 2 * (750 * 1.1 + 1000 * 10) / 1e6 + (300 + 400) / 1e6 + 25 / 1e6
     pull_exp = 3 * (1000 * 1.1 + 1000 * 10) / 1e6 + 3 * (300 + 400) / 1e6 + 75 / 1e6
-    assert est.total("expected", cell="agent-cell") == pytest.approx(10 * (push_exp + pull_exp))
+    assert est.total("expected", cell="agent-cell") == pytest.approx(24 * (push_exp + pull_exp))
 
     # Session cell: N=10 items x 2 calls = 20 agent calls on a managed view of 0.5 x W = 5,000 tokens, 1,000 out;
     # summaries add 10% (2 calls); one probe (checkpoint 5 <= N). Every call costs (5,000 x 2 + 1,000 x 10) / 1e6.
@@ -120,7 +122,7 @@ def test_two_small_cells_reproduce_hand_computed_costs(tmp_path):
     assert est.total(cell="session-cell") == pytest.approx(2 * 3 * session)  # 2 sessions x 3 epochs
     per_call_exp = (5000 * 2 * (0.75 + 0.25 * 0.1) + 1000 * 10) / 1e6
     assert est.total("expected", cell="session-cell") == pytest.approx(6 * 23 * per_call_exp)
-    assert est.total() == pytest.approx(10 * (push + pull) + 6 * session)
+    assert est.total() == pytest.approx(24 * (push + pull) + 6 * session)
 
 
 # ---------- the real plan ----------
@@ -236,7 +238,7 @@ def test_calibrate_writes_measured_tokens_and_the_model_prefers_them(tmp_path):
     embed = 60 * 0.02 / 1e6  # prior: one query embedding per per-query compile, text-embedding-3-small
     per_sample = a["calls_per_sample"] * (a["input_per_call"] * 1.0 + a["output_per_call"] * 2.0) / 1e6
     per_sample += k["calls_per_sample"] * (k["input_per_call"] * 1.0 + k["output_per_call"] * 2.0) / 1e6
-    assert with_measured.total() == pytest.approx(10 * (per_sample + embed))
+    assert with_measured.total() == pytest.approx(12 * (per_sample + embed))  # n_tasks 10 runs one whole world of 12 (R-B4)
     assert with_measured.total() != pytest.approx(priors_only.total())
 
     # Re-calibrating merges: an entry for another key survives.

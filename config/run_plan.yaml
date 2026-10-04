@@ -25,8 +25,8 @@ budget:
   # Per-study ceilings the orchestrators' budget guards enforce (with the program total). D-035 (2026-10-03): set to the
   # right-sized plan's conservative projection plus headroom (gate 214, main 1,013, study_g 3,483 -> 4,710); were the
   # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells. R-B4
-  # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,130.5 + the D-039 pilot re-runs the
-  # runner reserves, 35.7 = 1,166.2, + ~5% headroom -> main 1,225).
+  # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,126.8 + the D-039 pilot re-runs the
+  # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225).
   allocations: {gate: 300, main: 1225, study_g: 3600}
   contingency_usd: 270
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
