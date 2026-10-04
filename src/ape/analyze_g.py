@@ -9,11 +9,13 @@
 
 and returns a compact JSON-able summary, which the phase records under `analysis` in the analyze manifest.
 
-**Inputs** (each may be missing; a missing one is reported, never raised on):
+**Inputs** (each may be missing; a missing one is reported, never raised on, except the run plan live: S-9):
 - `test/manifest.json`: per plan cell, its status and groups. A group carries its arms as declared in the plan and as
   run (a tuned arm runs as its selection), the arms skipped because they are not built yet, its profile and effort,
   and its log files.
-- `config/run_plan.yaml` (the run's config dir): each cell's block, design and planned arms.
+- `config/run_plan.yaml` (the run's config dir): each cell's block, design, planned arms and sessions. The
+  confirmatory families are decided over its points: live, an unreadable plan raises `PhaseError`; offline, it is
+  reported and G-H2a and G-H3 are INCOMPLETE.
 - `config/models.yaml`: each group's capability point, `<tier>-<effort>` from its profile's agent model and its effort.
 - `config/model_costs.yaml`: prices for usage Inspect left unpriced.
 - `freeze.json`: the role (primary or extension), the frozen test-seed block, the rehearsal flag and the commit.
@@ -25,7 +27,8 @@ Arms are relabelled from the arm that ran to the arm the plan declares, per cell
 analysis compares plan arms). `g_report.g_report` then computes every hypothesis, the confirmatory rows over the run
 plan's points: a planned point without data makes G-H2a or the G-H3 sequence INCOMPLETE (never SUPPORTED), as
 PREREGISTRATION_G.md requires. On top of that the report adds:
-- the run: freeze, role, seed block and test status;
+- the run: freeze, role, seed block and test status; a run frozen as an extension is labelled a **replication** of
+  its primary run (PREREGISTRATION_G.md §9.1: analysed alone, never pooled);
 - the selections and tuning summary;
 - a **coverage table** per plan cell and arm: planned, run, skipped (with the runner's reason, e.g. an arm whose solver
   is not registered), missing (planned and not skipped, but no data), and sessions present against planned.
@@ -43,7 +46,7 @@ from typing import Any
 import pandas as pd
 
 from .analysis.g_load import cell_info, load_g_cells, point_label
-from .analysis.g_report import _clean, _table, g_report, render
+from .analysis.g_report import PLANNED_UNKNOWN, _clean, _table, g_report, render
 from .config import ROOT
 
 REPORT_DIR = "report"
@@ -248,6 +251,8 @@ def _summary(cov: list[dict], d: dict, test: dict | None, sessions: pd.DataFrame
         "test_status": (test or {}).get("status"),
         "primary_complete": (test or {}).get("primary_complete"),
         "decisions": {r["id"]: r["decision"] for r in d.get("decisions") or []},
+        "replication_of": (d.get("run") or {}).get("replication"),
+        "section_errors": [e["section"] for e in d.get("errors") or []],
         "coverage": states,
         "skipped": [f"{r['cell']}: {r['arm']}" for r in cov if r["state"] == "skipped"],
         "missing": [f"{r['cell']}: {r['arm']}" for r in cov if r["state"] in ("missing", "not run")],
@@ -268,15 +273,20 @@ def analyze(run, **report_kw) -> dict:
     test = _read_json(run.manifest_path("test"), "test manifest (the test phase has not run)", problems)
     freeze = _read_json(run.freeze_path, "freeze.json", problems)
     plan = _plan(run, problems)
+    if plan is None and not run.offline:
+        # S-9: the plan fixes the points each confirmatory family must cover; a live analysis never decides without it
+        from .run_gate import PhaseError
+
+        raise PhaseError(f"Study G analysis: {problems[-1]}. G-H2a and G-H3 are decided over the run plan's points; restore the run's run_plan.yaml and re-run analyze")
     prices = _prices(run, problems)
     if test is not None and test.get("status") != "done":
         problems.append(f"test phase {test.get('status')}; primary cells complete: {test.get('primary_complete')}")
     cells, labels, points = collect(run, test, plan, problems)
     data = load_g_cells(cells, plan=plan, points=points, prices=prices)
     items, sessions = relabel(data.items, labels), relabel(data.sessions, labels)
-    # The run's plan fixes the points each confirmatory family must cover; an unreadable plan (already reported) leaves
-    # the decisions over the points present.
-    planned = {"planned": {}} if plan is None else {"plan": plan}
+    # The run's plan fixes the points each confirmatory family must cover (and the minimum sessions at each); offline,
+    # an unreadable plan (already reported) makes the confirmatory rows INCOMPLETE (S-9).
+    planned = {"planned": PLANNED_UNKNOWN} if plan is None else {"plan": plan}
     d = g_report(items, sessions, data.capability, cells=data.cells, problems=[*problems, *data.problems], **planned, **report_kw)
     cov = coverage(plan, test, sessions, data.capability, points)
     sel = selections(run, problems)
@@ -285,6 +295,7 @@ def analyze(run, **report_kw) -> dict:
         "run_id": run.run_id,
         "offline": bool(run.offline),
         "freeze": {k: (freeze or {}).get(k) for k in ("frozen_at", "rehearsal", "role", "test_seeds", "code_commit")} if freeze else None,
+        "replication": replication(freeze),
         "test": {"status": (test or {}).get("status"), "primary_complete": (test or {}).get("primary_complete"), "cells": {c: x.get("status") for c, x in ((test or {}).get("cells") or {}).items()}},
     })  # fmt: skip
     d["coverage"] = _clean(cov)
@@ -295,13 +306,23 @@ def analyze(run, **report_kw) -> dict:
     return _summary(cov, d, test, sessions, [*problems, *data.problems], out_dir)
 
 
+def replication(freeze: Mapping | None) -> str | None:
+    """The primary run this run replicates, when it was frozen as an extension (`--extension-of`): PREREGISTRATION_G.md
+    §9.1 reports such a run alone, as a replication, never pooled."""
+    role = (freeze or {}).get("role") or {}
+    return (role.get("of") or "unknown run") if role.get("kind") == "extension" else None
+
+
 def render_run(d: dict) -> str:
     """The run report: the run, coverage and selections, then `g_report.render`'s sections."""
     r = d["run"]
     fz = r.get("freeze") or {}
     seeds = fz.get("test_seeds") or {}
     role = fz.get("role") or {}
-    L = [f"# Study G report: run `{r['run_id']}`{' (OFFLINE: mock models)' if r['offline'] else ''}", ""]
+    rep = r.get("replication")
+    L = [f"# Study G report: run `{r['run_id']}`{' (REPLICATION of `' + rep + '`)' if rep else ''}{' (OFFLINE: mock models)' if r['offline'] else ''}", ""]
+    if rep:
+        L += [f"> **Replication.** This run was frozen as an extension of `{rep}`. PREREGISTRATION_G.md §9.1 pre-registers no extension and spends no α on one: it is analysed alone, reported as a replication of `{rep}`, and never pooled with it.", ""]
     L += [
         f"- Freeze: {fz.get('frozen_at') or 'NOT FROZEN'}{' (offline rehearsal)' if fz.get('rehearsal') else ''}; role {role.get('kind') or '–'}{' of ' + role['of'] if role.get('of') else ''}; "
         f"test seeds {seeds.get('base', '–')}–{seeds.get('last', '–')}; commit `{fz.get('code_commit') or '–'}`.",

@@ -40,7 +40,8 @@ The planned design is D-033's: topology cells at Luna-low and Luna-high with 16 
 calibrates them; every function takes them as arguments.
 
 **Outputs** (`power_report`): per confirmatory test, the rejection rate at its null (type I; ≤ nominal) and at the
-plausible effects (power), each with its Monte Carlo standard error, for the t-test and the sign-flip; for the
+plausible effects (power), each with its Monte Carlo standard error, for the t-test (read at its calibrated level,
+`g_hypotheses.t_level`, as the report decides: S-4) and the sign-flip (at α); for the
 descriptive rows, the estimate's mean, SD and interval coverage of 0; the minimum attainable p of an exact
 session-level sign-flip per confirmatory test (`flip_floor`), with what would fix a test that cannot reach its level;
 alternative designs (the design before D-033, 24 Luna sessions per point, 12 Sol sessions, 6 Astra CM sessions); and
@@ -60,7 +61,7 @@ import pandas as pd
 from scipy.special import expit, logit
 
 from . import g_stats as gs
-from .g_hypotheses import ALPHA, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE, TIER_ORDER
+from .g_hypotheses import ALPHA, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE, TIER_ORDER, t_level
 
 _GH_X, _GH_W = np.polynomial.hermite_e.hermegauss(40)
 _GH_W = _GH_W / _GH_W.sum()
@@ -359,11 +360,13 @@ def analyse_topo(sessions: pd.DataFrame, cap: Mapping[str, float], *, references
     h = gs.gh3(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, boot=0, meters=())
     if h.get("testable"):
         pre, a, rec, cost = h["pre"], h["h3a"], h["h3b"]["recovery"], h["h3b"]["cost"]
-        out["G-H3-pre"] = {"t": _rej(pre["p_t"], alpha), "flip": _rej(pre["p_flip"], alpha), "est": pre["est"], "se": pre["se"]}
-        out["G-H3a"] = {"t": _rej(a["p_t"], alpha), "flip": _rej(a["p_flip"], alpha), "est": h["isolation_share"].get("est"), "se": h["isolation_share"].get("se"), "sequence": a["claim"]}
-        out["G-H3b.recovery"] = {"t": _rej(rec["p_t"], alpha), "flip": _rej(rec["p_flip"], alpha), "est": h["recovery_share"].get("est"), "se": h["recovery_share"].get("se")}
-        out["G-H3b.cost"] = {"t": _rej(cost.get("p_t"), alpha), "flip": _rej(cost.get("p_flip"), alpha), "est": cost.get("ratio"), "se": cost.get("se")}
-        out["G-H3b"] = {"t": _rej(rec["p_t"], alpha) and _rej(cost.get("p_t"), alpha), "flip": _rej(rec["p_flip"], alpha) and _rej(cost.get("p_flip"), alpha), "sequence": h["h3b"]["claim"]}
+        # S-4: the t decides at each test's calibrated level (as g_report); the sign-flip is read at α
+        lv = lambda x: x.get("level", alpha)  # noqa: E731
+        out["G-H3-pre"] = {"t": _rej(pre["p_t"], lv(pre)), "flip": _rej(pre["p_flip"], alpha), "est": pre["est"], "se": pre["se"]}
+        out["G-H3a"] = {"t": _rej(a["p_t"], lv(a)), "flip": _rej(a["p_flip"], alpha), "est": h["isolation_share"].get("est"), "se": h["isolation_share"].get("se"), "sequence": a["claim"]}
+        out["G-H3b.recovery"] = {"t": _rej(rec["p_t"], lv(rec)), "flip": _rej(rec["p_flip"], alpha), "est": h["recovery_share"].get("est"), "se": h["recovery_share"].get("se")}
+        out["G-H3b.cost"] = {"t": _rej(cost.get("p_t"), lv(cost)), "flip": _rej(cost.get("p_flip"), alpha), "est": cost.get("ratio"), "se": cost.get("se")}
+        out["G-H3b"] = {"t": _rej(rec["p_t"], lv(rec)) and _rej(cost.get("p_t"), lv(cost)), "flip": _rej(rec["p_flip"], alpha) and _rej(cost.get("p_flip"), alpha), "sequence": h["h3b"]["claim"]}
     return out
 
 
@@ -539,8 +542,8 @@ def _walk(node: dict):
 def render(d: dict) -> str:
     L = [f"# Study G power and type I error (one-sided α = {d['alpha']}; {d['sims']} simulated studies per planned row, {d.get('sims_other', '–')} otherwise)", ""]
     L += [
-        "Confirmatory rows (G-H2a, G-H3-pre, G-H3a, G-H3b): P(reject) by the session-clustered t ('t') and the wild sign-flip "
-        "('flip'), ± Monte Carlo SE. Descriptive rows (G-H1, G-H2b; D-033): 'covers 0' is the share of 95% intervals that "
+        f"Confirmatory rows (G-H2a, G-H3-pre, G-H3a, G-H3b): P(reject) by the session-clustered t ('t', at the calibrated level "
+        f"{t_level(d['alpha']):g}: S-4) and the wild sign-flip ('flip', at α), ± Monte Carlo SE. Descriptive rows (G-H1, G-H2b; D-033): 'covers 0' is the share of 95% intervals that "
         "include 0. sd: the estimate's sampling SD across simulated studies; MDE80: (z_0.975 + z_0.8) × sd.",
         "",
     ]

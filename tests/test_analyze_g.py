@@ -99,3 +99,41 @@ def test_arms_are_relabelled_to_their_plan_names():
     assert out.loc[out["arm"] == "S-CM*", "run_arm"].tolist() == ["CM-sum"]
     assert out[out["plan_cell"] == "d"]["arm"].tolist() == ["CM-sum"]  # unmapped: as it ran
     assert analyze_g.relabel(pd.DataFrame(), {}).empty
+
+
+def _copy_run(offline_g, tmp_path, config=None) -> StudyRun:
+    dst_root = tmp_path / "runs"
+    shutil.copytree(offline_g["run"].dir, dst_root / "study_g" / "t1")
+    return StudyRun("study_g", "t1", offline=True, runs_root=dst_root, config_dir=config or offline_g["config"])
+
+
+def test_an_unreadable_plan_is_incomplete_offline_and_an_error_live(offline_g, tmp_path, monkeypatch):
+    """S-9: the plan fixes the points each confirmatory family must cover. Offline, an unreadable plan is reported and
+    G-H2a and G-H3 are INCOMPLETE (never decided over the points present); live, the analysis refuses."""
+    config = tmp_path / "config"
+    shutil.copytree(offline_g["config"], config)
+    (config / "run_plan.yaml").write_text("cells: [unclosed\n")
+    run = _copy_run(offline_g, tmp_path, config)
+    s = analyze_g.analyze(run, reps=200, boot=0, glmm=False)
+    assert any("run plan unreadable" in p for p in s["problems"])
+    assert all(s["decisions"][h] == "INCOMPLETE" for h in ("G-H2a", "G-H3-pre", "G-H3a", "G-H3b"))
+    d = json.loads((run.dir / "report" / "decision.json").read_text())
+    assert d["planned_unknown"] and "planned points unknown" in (run.dir / "report" / "report.md").read_text()
+    live = StudyRun("study_g", "live1", offline=False, runs_root=tmp_path / "live")
+    monkeypatch.setattr(analyze_g, "_plan", lambda run, problems: problems.append("run plan unreadable (test)"))
+    from ape.run_gate import PhaseError
+
+    with pytest.raises(PhaseError, match="run plan unreadable"):
+        analyze_g.analyze(live, reps=200, boot=0, glmm=False)
+
+
+def test_an_extension_run_is_labelled_a_replication(offline_g, tmp_path):
+    """PREREGISTRATION_G.md §9.1: a run frozen with --extension-of is analysed alone and reported as a replication."""
+    run = _copy_run(offline_g, tmp_path)
+    fz = json.loads(run.freeze_path.read_text())
+    fz["role"] = {"kind": "extension", "of": "t0"}
+    run.freeze_path.write_text(json.dumps(fz))
+    s = analyze_g.analyze(run, reps=200, boot=0, glmm=False)
+    md = (run.dir / "report" / "report.md").read_text()
+    assert s["replication_of"] == "t0" and md.startswith("# Study G report: run `t1` (REPLICATION of `t0`)") and "never pooled" in md
+    assert analyze_g.replication({"role": {"kind": "primary", "of": None}}) is None and analyze_g.replication(None) is None

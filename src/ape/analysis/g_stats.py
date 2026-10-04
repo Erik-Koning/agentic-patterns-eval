@@ -14,6 +14,11 @@ per-session value (a paired difference, a linear form of several arms, or a line
   about 12.6 of 16 for D-033's topology design, where the G − 1 cap left the G-H3 tests at 0.028–0.030). This is the
   gate's validated world-clustered t-interval (D-023) generalised from equal-weight cell means to any weights; on a
   pooled mean it reproduces `gate_stats.cluster_t` (tests).
+- **Decision level** (S-4): the confirmatory tests (`gap_iut`, `gh3`) reject when the t's one-sided p is at most the
+  calibrated `g_hypotheses.t_level(alpha)` (0.013 at α = 0.025), not α: under skewed or heavy-tailed session effects
+  the t rejected true nulls at up to 0.040 at a nominal 0.025, and no df correction fixed every row. Each result
+  carries its `level`; its interval is the (1 − 2·level) one. A planned point with fewer usable sessions than its
+  minimum (`min_sessions`, from the plan) is missing (`short_points`), and the family INCOMPLETE.
 - **Sign-flip** (`flip_test`): the wild sign-flip with null-restricted residuals: the per-point means are moved to
   the nearest values satisfying the null, residuals are flipped per world, and the studentised statistic is
   recomputed. All 2^G sign vectors are enumerated while 2^G ≤ 8 × the resamples (up to G = 16 at the report's
@@ -49,7 +54,7 @@ import pandas as pd
 from scipy.stats import norm
 from scipy.stats import t as student_t
 
-from .g_hypotheses import ALPHA, COST_METER, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE, TOST_ESTIMAND, TOST_MARGIN
+from .g_hypotheses import ALPHA, COST_METER, COST_RATIO, ISOLATION_SHARE, RECOVERY_SHARE, TOST_ESTIMAND, TOST_MARGIN, t_level
 from .gate_stats import holm_test, t_bounds, t_p_greater, t_p_less
 
 REPS = 10_000
@@ -398,12 +403,16 @@ def contrast(
     flip: bool = True,
     boot: int = 0,
     primary: str = "t",
+    level: float | None = None,
 ) -> dict:
-    """One-sided test of L against `null` with everything the report shows: estimate, se, df, the two-sided (1 − 2α)
-    interval (its relevant end is the one-sided α bound), the t and sign-flip p-values, whether the flip test can reach
-    α at all, an optional bootstrap interval, and the decision by the `primary` test (t | flip)."""
+    """One-sided test of L against `null` with everything the report shows: estimate, se, df, the two-sided
+    (1 − 2·level) interval (its relevant end is the one-sided bound the decision uses), the t and sign-flip p-values,
+    whether the flip test can reach α at all, an optional bootstrap interval, and the decision by the `primary` test
+    (t | flip). `level` is the t-test's one-sided level (default α; the confirmatory rows pass the calibrated
+    `g_hypotheses.T_LEVEL`, S-4); the flip test is always read at α."""
+    lvl = alpha if level is None else float(level)
     st = lincomb(v, weights)
-    lo, hi = t_bounds(st, alpha) if st.get("se") is not None else (None, None)
+    lo, hi = t_bounds(st, lvl) if st.get("se") is not None else (None, None)
     p_t = _p(st, null, alternative) if st.get("se") is not None else None
     fl = flip_test(v, weights, null, alternative, reps=reps, seed=seed) if flip and st.get("se") is not None else {"p": None, "min_p": None, "exact": None}
     out = {
@@ -414,6 +423,7 @@ def contrast(
         "null": null,
         "alternative": alternative,
         "alpha": alpha,
+        "level": lvl,
         "p_t": p_t,
         "p_flip": fl.get("p"),
         "flip_exact": fl.get("exact"),
@@ -431,7 +441,7 @@ def contrast(
     p = out["p_t"] if primary == "t" else out["p_flip"]
     out["primary"] = primary
     out["p"] = p
-    out["reject"] = bool(p is not None and p <= alpha)
+    out["reject"] = bool(p is not None and p <= (lvl if primary == "t" else alpha))
     return out
 
 
@@ -615,7 +625,7 @@ def gh1(sessions: pd.DataFrame, capability, *, topology: str = "M2", reference: 
 
 
 def _brief(c: dict) -> dict:
-    keys = ("est", "se", "df", "ci", "p_t", "p_flip", "flip_min_p", "flip_reachable", "sessions", "testable", "reason", "reject")
+    keys = ("est", "se", "df", "ci", "level", "p_t", "p_flip", "flip_min_p", "flip_reachable", "sessions", "testable", "reason", "reject")
     out = {k: c.get(k) for k in keys}
     out["n"] = sum(p["n"] for p in c.get("points", {}).values()) if c.get("points") else 0
     return out
@@ -624,35 +634,51 @@ def _brief(c: dict) -> dict:
 # ---------- G-H2 ----------
 
 
-def gap_iut(sessions: pd.DataFrame, *, block: str | None = "cm", high: str = "O-state", low: str = "CM0", length: str = "long", outcome: str = "item_success", scale: str = "prob", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, flip: bool = True, primary: str = "t", planned_points: Sequence[str] | None = None) -> dict:
-    """G-H2a: Gap_T = s(high) − s(low) > 0 at every point (intersection-union: each point one-sided at α, no
-    adjustment). `all_positive` is the IUT decision; points that cannot be tested make it False.
+def _short(counts: Mapping[str, int], planned: Sequence[str] | None, min_sessions: Mapping[str, int] | None) -> dict[str, dict]:
+    """Planned points with fewer usable sessions than their minimum (S-4): {point: {"sessions", "minimum"}}."""
+    if planned is None or not min_sessions:
+        return {}
+    return {c: {"sessions": int(counts.get(c, 0)), "minimum": int(min_sessions[c])} for c in planned if c in min_sessions and 0 < int(counts.get(c, 0)) < int(min_sessions[c])}
+
+
+def gap_iut(sessions: pd.DataFrame, *, block: str | None = "cm", high: str = "O-state", low: str = "CM0", length: str = "long", outcome: str = "item_success", scale: str = "prob", alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, flip: bool = True, primary: str = "t", planned_points: Sequence[str] | None = None, min_sessions: Mapping[str, int] | None = None, level: float | None = None) -> dict:
+    """G-H2a: Gap_T = s(high) − s(low) > 0 at every point (intersection-union: each point one-sided, no adjustment),
+    each t-test at the calibrated `level` (default `g_hypotheses.t_level(alpha)`, S-4). `all_positive` is the IUT
+    decision; points that cannot be tested make it False.
 
     With `planned_points` (the plan's points, PREREGISTRATION_G.md) the decision is over exactly those: a planned point
-    without testable data makes the result `incomplete` (named in `missing_points`) and `all_positive` False, whatever
-    the other points show; points outside the plan are reported, not decided on. Without it, the points present."""
+    without testable data, or with fewer usable sessions than `min_sessions[point]` (the S-4 minimum, from the plan's
+    sessions), makes the result `incomplete` (named in `missing_points`; the short ones also in `short_points`) and
+    `all_positive` False, whatever the other points show; `present_positive` is the decision over the planned points
+    that are present and not short. Points outside the plan are reported, not decided on. Without it, the points
+    present."""
+    lvl = t_level(alpha) if level is None else float(level)
     wide = session_values(sessions, [high, low], block=block, length=length, outcome=outcome, scale=scale)
     v = long_values(wide, {high: 1.0, low: -1.0})
-    points = {c: _brief(contrast(g, {c: 1.0}, alternative="greater", alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary)) for c, g in v.groupby("point")}
+    points = {c: _brief(contrast(g, {c: 1.0}, alternative="greater", alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, level=lvl)) for c, g in v.groupby("point")}
     planned = list(planned_points) if planned_points is not None else None
-    decided = {c: r for c, r in points.items() if planned is None or c in planned}
-    missing = [c for c in planned if c not in points or not points[c]["testable"]] if planned is not None else []
+    short = _short({c: r["n"] for c, r in points.items() if r["testable"]}, planned, min_sessions)
+    decided = {c: r for c, r in points.items() if (planned is None or c in planned) and c not in short}
+    missing = [c for c in planned if c not in points or not points[c]["testable"] or c in short] if planned is not None else []
     tested = [c for c, r in decided.items() if r["testable"]]
     flip_ok = all(r["p_flip"] is not None and r["p_flip"] <= alpha for r in decided.values()) if decided else False
     present_positive = bool(decided) and len(tested) == len(decided) and all(r["reject"] for r in decided.values())
     return {
         "high": high,
         "low": low,
+        "level": lvl,
         "points": points,
         "planned_points": planned,
+        "min_sessions": dict(min_sessions) if min_sessions else {},
         "missing_points": missing,
+        "short_points": short,
         "incomplete": bool(missing),
         "unplanned_points": sorted(set(points) - set(planned)) if planned is not None else [],
         "present_positive": present_positive,
         "all_positive": present_positive and not missing,
         "all_positive_flip": bool(decided) and flip_ok and not missing,
         "flip_unreachable": [c for c, r in decided.items() if r["flip_reachable"] is False],
-        "testable": bool(tested),
+        "testable": bool(tested) or bool(short),
         "reason": None if points else "no paired O-state / CM0 sessions",
     }
 
@@ -720,10 +746,10 @@ def tost(sessions: pd.DataFrame, capability, strategy: str, *, estimand: str = T
     }
 
 
-def gh2(sessions: pd.DataFrame, capability, *, strategies: Sequence[str] = ("CM-sum", "CM-todo"), estimand: str = TOST_ESTIMAND, margin: float | None = None, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t", block: str | None = "cm", planned_points: Sequence[str] | None = None) -> dict:
+def gh2(sessions: pd.DataFrame, capability, *, strategies: Sequence[str] = ("CM-sum", "CM-todo"), estimand: str = TOST_ESTIMAND, margin: float | None = None, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t", block: str | None = "cm", planned_points: Sequence[str] | None = None, min_sessions: Mapping[str, int] | None = None, level: float | None = None) -> dict:
     """G-H2: Gap_T at every point (G-H2a), R_x per strategy present (G-H2c), and θ per strategy (G-H2b; its TOST with
     Holm across the strategies is still computed, though D-033 decides nothing on it)."""
-    gaps = gap_iut(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, block=block, planned_points=planned_points)
+    gaps = gap_iut(sessions, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, block=block, planned_points=planned_points, min_sessions=min_sessions, level=level)
     arms = sorted(set(_rows(sessions, block, "long", None).get("arm", pd.Series(dtype=str))) - {"O-state", "CM0"})
     heads = {s: headroom(sessions, s, alpha=alpha, boot=boot, seed=seed, block=block) for s in arms}
     tosts = {s: tost(sessions, capability, s, estimand=estimand, margin=margin, alpha=alpha, reps=reps, seed=seed, flip=flip, primary=primary, block=block) for s in strategies}
@@ -835,15 +861,20 @@ def _cost_boot(wide: pd.DataFrame, a: str, b: str, weights: Mapping[str, float],
     return out[np.isfinite(out)]
 
 
-def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[str] | None = None, planned_points: Sequence[str] | None = None, outcome: str = "item_success", scale: str = "prob", iso: float = ISOLATION_SHARE, recovery: float = RECOVERY_SHARE, cost_ratio: float = COST_RATIO, meter: str = COST_METER, meters: Sequence[str] = COST_METERS, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t") -> dict:
+def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[str] | None = None, planned_points: Sequence[str] | None = None, outcome: str = "item_success", scale: str = "prob", iso: float = ISOLATION_SHARE, recovery: float = RECOVERY_SHARE, cost_ratio: float = COST_RATIO, meter: str = COST_METER, meters: Sequence[str] = COST_METERS, alpha: float = ALPHA, reps: int = REPS, seed: int = SEED, boot: int = 2000, flip: bool = True, primary: str = "t", min_sessions: Mapping[str, int] | None = None, level: float | None = None) -> dict:
     """G-H3 at the points where S1, M1, M2 and S-CM* all ran (equal point weights): the gatekeeper M2 − S1 > 0, H3a
     (isolation share ≥ `iso` as (M1 − S1) − iso (M2 − S1) > 0) and H3b (recovery ≥ `recovery` and cost per solved item
     ratio ≤ `cost_ratio`, an intersection-union), in fixed sequence; the shares with ratio intervals; every cost meter.
 
     With `planned_points` (the plan's points, PREREGISTRATION_G.md) the pool is those points only; a planned point
-    without ≥ 2 sessions of all four arms makes the result `incomplete` (named in `missing_points`): the estimates over
-    the planned points present are kept, and the report labels the rows INCOMPLETE. `points` instead pools exactly
-    the points given; without either, every point with data."""
+    without ≥ 2 sessions of all four arms, or with fewer than `min_sessions[point]` (the S-4 minimum, from the plan's
+    sessions; such a point is left out of the pool and named in `short_points`), makes the result `incomplete` (named
+    in `missing_points`): the estimates over the planned points present are kept, and the report labels the rows
+    INCOMPLETE. `points` instead pools exactly the points given; without either, every point with data.
+
+    Every t-test is decided at the calibrated `level` (default `g_hypotheses.t_level(alpha)`, S-4). A cost clause that
+    cannot be computed (a missing meter value, no items solved) leaves G-H3b `testable: False` (NOT_TESTABLE), not
+    rejected."""
     wide = session_values(sessions, list(TOPO_ARMS), block=block, length=None, outcome=outcome, scale=scale)
     if len(wide):
         ok = wide.dropna()
@@ -852,14 +883,16 @@ def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[
         ok, counts = wide, {}
     planned = list(planned_points) if planned_points is not None and points is None else None
     candidates = points or planned or sorted(counts)
-    pts = [c for c in candidates if counts.get(c, 0) >= MIN_SESSIONS]
+    short = _short(counts, planned, min_sessions)
+    pts = [c for c in candidates if counts.get(c, 0) >= MIN_SESSIONS and c not in short]
     missing = [c for c in planned if c not in pts] if planned is not None else []
-    base = {"points": pts, "sessions": {c: int(counts.get(c, 0)) for c in (candidates or counts)}, "planned_points": planned, "missing_points": missing, "incomplete": bool(missing)}
+    lvl = t_level(alpha) if level is None else float(level)
+    base = {"points": pts, "sessions": {c: int(counts.get(c, 0)) for c in (candidates or counts)}, "planned_points": planned, "min_sessions": dict(min_sessions) if min_sessions else {}, "missing_points": missing, "short_points": short, "incomplete": bool(missing), "level": lvl}
     if not pts:
         return base | {"testable": False, "reason": f"no {'planned ' if planned else ''}point has ≥ {MIN_SESSIONS} sessions with all of {TOPO_ARMS}" + (f" (planned: {planned})" if planned else "")}
     ok = ok[ok["point"].isin(pts)]
     w = {c: 1.0 / len(pts) for c in pts}
-    kw = {"alpha": alpha, "reps": reps, "seed": seed, "flip": flip, "primary": primary}
+    kw = {"alpha": alpha, "reps": reps, "seed": seed, "flip": flip, "primary": primary, "level": lvl}
     dM2 = long_values(ok, {"M2": 1.0, "S1": -1.0})
     pre = contrast(dM2, w, **kw)
     h3a = contrast(long_values(ok, {"M1": 1.0, "M2": -iso, "S1": iso - 1.0}), w, **kw)  # (M1 − S1) − iso (M2 − S1)
@@ -880,15 +913,18 @@ def gh3(sessions: pd.DataFrame, *, block: str | None = "topo", points: Sequence[
             costs[m] = c | {"per_point": info}
         else:
             costs[m] = {"testable": False, "reject": False, "reason": info.get("reason") or "cost not computable at every point", "per_point": info}
-    cost = costs.get(meter, {"testable": False, "reject": False})
+    cost = costs.get(meter, {"testable": False, "reject": False, "reason": f"no {meter} meter"})
     seq_pre = pre["reject"]
     seq_a = seq_pre and h3a["reject"]
     h3b_ok = rec["reject"] and cost.get("reject", False)
+    # S-9: an untestable clause (a NaN cost, no recovery variance) makes G-H3b NOT_TESTABLE, never NOT_SUPPORTED
+    h3b_testable = bool(rec.get("testable") and cost.get("testable", True) is not False)
+    h3b_reason = None if h3b_testable else (cost.get("reason") if cost.get("testable", True) is False else rec.get("reason"))
     return base | {
         "testable": pre["testable"],
         "pre": pre,
         "h3a": h3a | {"tested": seq_pre, "claim": bool(seq_a)},
-        "h3b": {"recovery": rec, "cost": cost, "tested": bool(seq_a), "claim": bool(seq_a and h3b_ok), "meter": meter},
+        "h3b": {"recovery": rec, "cost": cost, "tested": bool(seq_a), "testable": h3b_testable, "reason": h3b_reason, "claim": bool(seq_a and h3b_ok and h3b_testable), "meter": meter},
         "isolation_share": iso_share,
         "specialization_share": spec_share,
         "recovery_share": rec_share,

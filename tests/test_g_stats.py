@@ -272,6 +272,88 @@ def test_degradation_slopes_and_glmm():
     assert gs.glmm(two.assign(item=None), {"luna-high": 0.8, "sol-high": 0.86}, block="cm")["status"] in ("ok", "non-finite", "failed")
 
 
+def _topo_h3() -> pd.DataFrame:
+    """Two points, 4 sessions each; isolation share 0.65 and recovery 0.9 on average (as in the margin test)."""
+    m1, scm = [0.64, 0.68, 0.64, 0.68], [0.76, 0.80, 0.76, 0.80]
+    spec = {}
+    for p in ("luna-high", "sol-high"):
+        spec |= {(p, "S1"): [0.40] * 4, (p, "M2"): [0.80] * 4, (p, "M1"): m1, (p, "S-CM*"): scm}
+    s = _session_rows(spec, N=25)
+    s.loc[s["arm"] == "S-CM*", "cost_usd"] *= 0.4  # cost per solved item about 0.4 of M2's
+    return s
+
+
+def test_s4_calibrated_level_and_minimum_sessions():
+    """S-4: the confirmatory t-tests decide at the calibrated level (the flip at α), with the matching one-sided bound;
+    a planned point below its minimum sessions is missing (left out of the decision, the family INCOMPLETE)."""
+    v = pd.DataFrame({"point": "a", "session": [f"s{i}" for i in range(6)], "value": [0.30, -0.05, 0.22, 0.02, 0.15, 0.10]})
+    p = gs.contrast(v, {"a": 1.0}, flip=False)["p_t"]
+    assert 0 < p < 0.5
+    above, below = gs.contrast(v, {"a": 1.0}, flip=False, level=p * 1.01), gs.contrast(v, {"a": 1.0}, flip=False, level=p * 0.99)
+    assert above["reject"] and not below["reject"] and below["level"] == pytest.approx(p * 0.99)
+    assert above["ci"][0] == pytest.approx(0.0, abs=1e-3)  # the (1 − 2·level) interval's lower end sits at the null when p = level
+    assert gh.T_LEVEL == gh.t_level(gh.ALPHA) <= gh.ALPHA
+    assert gh.t_level(0.05) == pytest.approx(0.05 * gh.T_LEVEL / gh.ALPHA)
+    # The minimum per planned point: from the plan's sessions, never above them.
+    assert all(gh.min_sessions(n) <= n for n in (2, 4, 5, 6, 8, 10, 16)) and gh.min_sessions(None) is None
+    # The planned sizes' minimums (topology Luna 16, Sol 8; CM Luna 10, Sol 6, Astra 4), validated by simulation.
+    assert {n: gh.min_sessions(n) for n in (16, 8, 10, 6, 4)} == {16: 10, 8: 5, 10: 6, 6: 4, 4: 3}
+    # G-H2a: a planned point with fewer sessions than its minimum is short: INCOMPLETE, whatever it shows.
+    s = _session_rows({("luna-high", "CM0"): [0.4, 0.5, 0.45], ("luna-high", "O-state"): [0.9, 0.95, 0.92], ("sol-high", "CM0"): [0.4, 0.5, 0.45, 0.5], ("sol-high", "O-state"): [0.9, 0.95, 0.92, 0.9]}, block="cm", N=40)
+    g = gs.gap_iut(s, planned_points=["luna-high", "sol-high"], min_sessions={"luna-high": 4, "sol-high": 4}, reps=200)
+    assert g["incomplete"] and g["short_points"] == {"luna-high": {"sessions": 3, "minimum": 4}} and g["missing_points"] == ["luna-high"]
+    assert g["points"]["luna-high"]["reject"] and g["present_positive"] and not g["all_positive"] and g["level"] == gh.T_LEVEL
+    assert gs.gap_iut(s, planned_points=["luna-high", "sol-high"], min_sessions={"luna-high": 3, "sol-high": 4}, reps=200)["all_positive"]
+    # G-H3: the short point leaves the pool.
+    h = gs.gh3(_topo_h3(), planned_points=["luna-high", "sol-high"], min_sessions={"luna-high": 4, "sol-high": 6}, boot=0, reps=200)
+    assert h["incomplete"] and h["points"] == ["luna-high"] and h["short_points"] == {"sol-high": {"sessions": 4, "minimum": 6}} and h["level"] == gh.T_LEVEL
+    d = gr.g_report(None, _topo_h3(), {}, reps=200, boot=0, glmm=False, planned={"G-H2a": [], "G-H3": ["luna-high", "sol-high"]}, min_sessions={"G-H3": {"sol-high": 6}})
+    dec = {r["id"]: r for r in d["decisions"]}
+    assert dec["G-H3-pre"]["decision"] == "INCOMPLETE" and dec["G-H3-pre"]["decision_on_present_points"] == "SUPPORTED" and dec["G-H3-pre"]["short_points"] == {"sol-high": {"sessions": 4, "minimum": 6}}
+    assert any("minimum sessions per planned point" in c for c in d["caveats"]) and "below the minimum sessions: sol-high (4 of 6)" in gr.render(d)
+
+
+def test_s9_sections_are_isolated_a_nan_cost_is_not_testable_and_an_unknown_plan_is_incomplete(monkeypatch):
+    """S-9: one section's exception is listed and leaves the decisions standing; a cost clause that cannot be computed
+    makes G-H3b NOT_TESTABLE (not NOT_SUPPORTED); an unreadable plan makes the confirmatory rows INCOMPLETE."""
+    planned = {"G-H2a": [], "G-H3": ["luna-high", "sol-high"]}
+    ok = gr.g_report(None, _topo_h3(), {}, reps=200, boot=0, glmm=False, planned=planned)
+    assert {r["id"]: r["decision"] for r in ok["decisions"]}["G-H3b"] == "SUPPORTED" and ok["errors"] == []
+    # A NaN cost in one session: the cost clause cannot be computed.
+    s = _topo_h3()
+    s.loc[(s["arm"] == "S-CM*") & (s["point"] == "sol-high") & (s["session"] == "w1"), "cost_usd"] = np.nan
+    d = gr.g_report(None, s, {}, reps=200, boot=0, glmm=False, planned=planned)
+    dec = {r["id"]: r for r in d["decisions"]}
+    assert dec["G-H3a"]["decision"] == "SUPPORTED" and dec["G-H3b"]["decision"] == "NOT_TESTABLE" and "cost_usd missing" in dec["G-H3b"]["reason"]
+    assert d["gh3"]["h3b"]["testable"] is False and not d["gh3"]["h3b"]["claim"]
+
+    # Failing sections: listed, the rest (and the decisions) stand, and the report renders.
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(gs, "cost_table", boom)
+    monkeypatch.setattr(gs, "gh1", boom)
+    d = gr.g_report(None, _topo_h3(), {}, reps=200, boot=0, glmm=False, planned=planned)
+    assert {e["section"] for e in d["errors"]} == {"costs", "G-H1"} and all("RuntimeError: boom" in e["error"] for e in d["errors"])
+    dec = {r["id"]: r["decision"] for r in d["decisions"]}
+    assert dec["G-H3-pre"] == dec["G-H3a"] == dec["G-H3b"] == "SUPPORTED" and dec["G-H1"] == "descriptive"
+    md = gr.render(d)
+    assert "## Section errors" in md and "## Decisions" in md and "**SUPPORTED**" in md and any("section(s) failed" in c for c in d["caveats"])
+    json.dumps(d)
+    monkeypatch.setattr(gr, "decisions", boom)
+    d = gr.g_report(None, _topo_h3(), {}, reps=200, boot=0, glmm=False, planned=planned)
+    assert all(r["decision"] in ("NOT_TESTABLE", "descriptive") for r in d["decisions"]) and "decisions" in {e["section"] for e in d["errors"]}
+    monkeypatch.undo()
+    # The plan unreadable: INCOMPLETE, with the decision on the points present kept.
+    d = gr.g_report(None, _topo_h3(), {}, reps=200, boot=0, glmm=False, planned=gr.PLANNED_UNKNOWN)
+    dec = {r["id"]: r for r in d["decisions"]}
+    assert d["planned_unknown"] and all(dec[h]["decision"] == "INCOMPLETE" for h in ("G-H2a", "G-H3-pre", "G-H3a", "G-H3b"))
+    assert dec["G-H3-pre"]["decision_on_present_points"] == "SUPPORTED" and any("planned points unknown" in p for p in d["header"]["problems"])
+    assert "planned points unknown (run plan unreadable)" in gr.render(d)
+    (pl, mins), problem = gr.planned_points_and_sessions(plan=None)
+    assert problem is None and pl["G-H3"] == ["luna-low", "luna-high", "sol-high"] and set(mins["G-H2a"]) == set(pl["G-H2a"])
+
+
 # ---------- hypotheses and report ----------
 
 

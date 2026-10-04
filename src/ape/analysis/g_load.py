@@ -38,7 +38,10 @@ sample's knobs.
   or from per-call records with `kind` and `usage`, else from the probes' own usage records.
 Unpriced usage is priced from config/model_costs.yaml (cache reads at their price). Every field may be missing;
 nothing raises on a missing score (an errored sample's unscored items fail, as in the gate), a missing store, or
-unknown extra fields. Duplicate session-epochs (a retried sample in a second log) keep the last one without an error.
+unknown extra fields. A sample limit (Inspect's `sample.limit`: tokens, messages, time, working time) ends the session:
+the item in progress (the first without a completed record) fails even if an answer was recorded in the turn that hit
+the limit, items completed before it stay as scored, and the report fails (D-047); `limit_item` names that item (None
+when the limit fell in the report phase). Duplicate session-epochs (a retried sample in a second log) keep the last one without an error.
 
 **Capability** (audit §2.1): S1's success on F7-10 and F3-5 from the `g.cap.*` agent logs (`gate_stats.load_results`),
 the equal-weight mean of the two cells' task means, with a world-clustered standard error.
@@ -224,6 +227,11 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
     has_kind = {k for (_, k) in per_item_tok}
     errored = sample.error is not None
     wc = md.get("w_crossing_item")
+    # A sample limit ends the session mid-item; an answer can still be recorded in the turn that tripped it. The item in
+    # progress (the first one with no completed record) therefore fails, as D-047 rules; items completed before the
+    # limit stay as scored. A limit after the last case fell in the report phase: the report fails.
+    limited = getattr(sample, "limit", None) is not None
+    in_progress = next((p for p in range(1, N + 1) if p not in store_items), None) if limited else None
     items = []
     for pos in range(1, N + 1):
         si, st = score_items.get(pos), store_items.get(pos, {})
@@ -232,6 +240,9 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
             success, answered, ovf = bool(si.get("success")), bool(si.get("answered")), bool(si.get("overflow", lost))
         else:
             success, answered, ovf = bool(st.get("success", False)) and not lost, bool(st.get("answered", False)) and not lost, lost
+        if pos == in_progress:
+            success, answered = False, False
+            labels[pos] = [*(labels.get(pos) or []), "limit"]
         base = si or st
         vf, vd = st.get("view_tokens_first"), st.get("view_tokens_decision")
         items.append({
@@ -340,10 +351,11 @@ def sample_rows(sample, ctx: Mapping, prices: Mapping | None = None) -> tuple[li
         "epoch": int(sample.epoch),
         "N": N,
         "w_crossing_item": wc,
-        "report_exact": float(val["report_exact"]) if "report_exact" in val else (float(bool(rep.get("exact"))) if rep else 0.0),
+        "report_exact": 0.0 if limited else (float(val["report_exact"]) if "report_exact" in val else (float(bool(rep.get("exact"))) if rep else 0.0)),
         "report_disp_acc": rep.get("dispositions_accuracy"),
         "report_submitted": rep.get("submitted"),
-        "session_success": float(val.get("session_success", 0.0) or 0.0),
+        "session_success": 0.0 if limited else float(val.get("session_success", 0.0) or 0.0),
+        "limit_item": in_progress if limited else None,  # the case in progress when a sample limit fired (None: report phase)
         "probe_f1": float(np.mean([p["f1"] for p in probes.values()])) if probes else np.nan,
         "probe_coverage": float(np.mean([p["taken"] for p in probes.values()])) if probes else np.nan,
         "probes": probes,

@@ -32,16 +32,18 @@ Study G asks whether context management and multi-agent topology still pay as th
 
 ## 2. Hypotheses, estimands and tests
 
-### 2.1 Conventions (D-029, D-032, D-038)
+### 2.1 Conventions (D-029, D-032, D-038, D-047)
 
 - **Sessions are the clusters.** A session is one F8 world (§4.3). Its epochs are pooled first, since they share the world. A world run at several capability points is one cluster across them (cells of one length and knob variant read the same seeds, §4.1).
-- **Outcome.** A session's item success rate, pooled over epochs. An item fails when it is answered wrongly, never reached, lost to the overflow rule (§3.2), or left unscored by an errored sample (as in the gate). Binary session success (every item and the report exact) is reported with pass^k and never tested: over 20–40 items it is near 0 for real agents.
+- **Outcome.** A session's item success rate, pooled over epochs. An item fails when it is answered wrongly, never reached, lost to the overflow rule (§3.2), left unscored by an errored sample (as in the gate), or in progress when a sample limit ended the session (D-047; the report then fails too). Binary session success (every item and the report exact) is reported with pass^k and never tested: over 20–40 items it is near 0 for real agents.
 - **Decision test: the session-clustered t.** Every confirmatory estimand is a linear combination L = Σ_c a_c ḡ_c of per-point session means of a per-session value (a paired difference, a linear form of several arms, or a linearised ratio).
   - The variance of L is unbiased with each shared world one cluster across points; with no shared world it is Welch's.
-  - The df are Welch–Satterthwaite, capped at G_eff − 1 when worlds are shared, where G_eff is the model-based effective number of clusters (D-038). G_eff is about 12.6 of 16 in the topology design, and G in a balanced design. The earlier cap at G − 1 let G-H3's tests reject at 0.028–0.030 against 0.025; with G_eff − 1 they reject at 0.026–0.027 (10,000 simulated studies).
+  - The df are Welch–Satterthwaite, capped at G_eff − 1 when worlds are shared, where G_eff is the model-based effective number of clusters (D-038). G_eff is about 12.6 of 16 in the topology design, and G in a balanced design.
+  - **The decision level is calibrated: each confirmatory t-test rejects when its one-sided p is at most 0.013** (`g_hypotheses.T_LEVEL`; D-047, review finding S-4). At a nominal 0.025 the t rejected true nulls at up to 0.037 in G-H3's proportion tests (arm-specific session variance), 0.040 in its cost clause (heavy-tailed costs) and 0.037 in G-H2a at Astra (4 sessions, a wider O-state session spread): the variance is unbiased, but the statistic's tails are heavier than t_df's. No small-sample df correction (Bell–McCaffrey, G_eff − 2, kurtosis-aware) or skewness correction brought every row to 0.025. At 0.013 the worst of 72 stress scenarios rejects at 0.024 in G-H3 and 0.021–0.023 in G-H2a (16,000 and 20,000 simulated studies per scenario, and the review's own runs), at the planned sizes and at the minimum sessions below. The confirmatory rows' intervals are the matching (1 − 2 × 0.013) = 97.4% intervals; every other interval is 95%.
+  - **Minimum sessions per planned point** (`g_hypotheses.min_sessions`): max(3, ⌈0.6 × planned⌉) usable sessions, never more than planned. Topology: Luna-low and Luna-high 10 of 16, Sol-high 5 of 8. Context management: Luna 6 of 10, Sol 4 of 6, Astra 3 of 4. A planned point below its minimum is missing, and its family INCOMPLETE (§9.1). These are the smallest sizes the simulation validated at 0.013: with every topology point at its minimum the worst row rejects at 0.023, while Sol at 4 sessions reaches 0.027.
   - It is the gate's validated world-clustered t (D-023), generalised to any weights. It is primary, rather than a sign-flip, because Astra's 4 sessions give a sign-flip floor of 1/16 = 0.0625 (D-032).
 - **Reported beside it, never decisive:** the wild session-level sign-flip with null-restricted residuals (exact up to 16 clusters), with its minimum attainable p; and the session bootstrap (percentile), which the gate found anti-conservative with few clusters.
-- **α.** One-sided **0.025** per confirmatory family (G-H2-gap and G-H3), with no correction across the two families (as in the main study, D-031). Intervals are two-sided 95%.
+- **α.** One-sided **0.025** per confirmatory family (G-H2-gap and G-H3), with no correction across the two families (as in the main study, D-031); each test is decided at the calibrated 0.013 that holds it. Descriptive intervals are two-sided 95%.
 - **Ratios** (the isolation share, the recovery, R_x) are tested as linear forms, (N − r D) > 0, which needs no ratio inference. The ratios themselves get delta-method, Fieller and bootstrap intervals, and are not estimated when their denominator is ≤ 2 pp.
 - **Scale.** Gaps, shares, headroom and cost ratios are on the probability scale. G-H1's slope is on the empirical-logit scale, log((k + 0.5) / (n − k + 0.5)): near the ceiling a constant logit effect shrinks in pp (audit §2.1).
 - **Cost per solved item:** Σ cost / Σ items solved per arm and point. Cache-adjusted $ is the primary meter, because compaction and pruning break cached prefixes (audit §5.1); tokens, calls and wall-clock are reported. Management (`cm`) calls are included and probe calls excluded.
@@ -56,13 +58,13 @@ The rows of `ape.analysis.g_hypotheses.HYPOTHESES`, the single source of this se
 |---|---|---|---|---|---|---|
 | G-H1 | descriptive | G-H1 | M2, S-CM*, S1 | Slope of the per-session gap Δ_s = logit(M2) − logit(S-CM*) on measured capability (OLS over sessions), and the change along the fitted line over the capability span, at Luna-low, Luna-high and Sol-high (S-CM* does not run at Astra). Sensitivity: S1-pre (M2 − S1 on the items before S1's overflow; all four points). S1 as scored is reported only descriptively. Sensitivity (D-043): the same with capability replaced by the tier rank (Luna-low < Luna-high < Sol < Astra, equally spaced). | estimate with 95% session-clustered t and session-bootstrap intervals; no decision (D-033) | – |
 | G-H1-M1 | descriptive | G-H1 | M1, S-CM*, S1 | As G-H1 with M1 (Luna-low, Luna-high and Sol-high). | estimate with interval | – |
-| G-H2a | confirmatory | G-H2-gap | O-state, CM0 | Per point: mean over sessions of s(O-state) − s(CM0), item success rate, N = 40 (Astra 24). | intersection-union: one-sided session-clustered t at α at every point (no multiplicity adjustment); exact sign-flip reported | 0 (pp) |
+| G-H2a | confirmatory | G-H2-gap | O-state, CM0 | Per point: mean over sessions of s(O-state) − s(CM0), item success rate, N = 40 (Astra 24). | intersection-union: one-sided session-clustered t at the calibrated level 0.013 at every point (no multiplicity adjustment); exact sign-flip reported | 0 (pp) |
 | G-H2b | descriptive | G-H2 | CM-sum, CM-todo, O-state, CM0 | θ_x = slope of R_x,c = (s_x − s_CM0) / (s_O − s_CM0) on measured capability × the capability span (per-point ratio estimators, linearised per session). Sensitivities: the gain s_x − s_CM0 on the logit scale; and (D-043) capability replaced by the tier rank (Luna-low < Luna-high < Sol < Astra, equally spaced). | estimate with 95% session-clustered interval; no decision (D-033) | – |
 | G-H2c | descriptive | G-H2 | CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state, CM0 | R_x,c with delta-method, Fieller and session-bootstrap intervals; undefined when the headroom is ≤ 2 pp. | intervals only | – |
 | G-H2d | descriptive | G-H2 | CM0, O-state, CM-prune, CM-sum, CM-todo, CM-reset, CM-native | Logistic slopes with session-clustered intervals; Gap(N = 40) − Gap(N = 10) at Luna-high (Welch over sessions). | intervals only | – |
-| G-H3-pre | confirmatory | G-H3 (1) | M2, S1 | Mean over Luna-low, Luna-high and Sol-high (equal weights) of the per-session M2 − S1, item success rate. | one-sided session-clustered t | 0 (pp) |
-| G-H3a | confirmatory | G-H3 (2) | M1, M2, S1 | Linear form (M1 − S1) − 0.5 (M2 − S1) > 0, pooled over Luna-low, Luna-high and Sol-high (equal weights); the share itself with Fieller and bootstrap intervals. | one-sided session-clustered t | 0.5 (share) |
-| G-H3b | confirmatory | G-H3 (3) | S-CM*, M2, S1 | (S-CM* − S1) − 0.8 (M2 − S1) > 0 and log(CPS_S-CM* / CPS_M2) < log 0.6 (cache-adjusted $, probes excluded), pooled over Luna-low, Luna-high and Sol-high (equal weights). | intersection-union of two one-sided session-clustered t-tests at α | 0.8 (share; cost ratio 0.6) |
+| G-H3-pre | confirmatory | G-H3 (1) | M2, S1 | Mean over Luna-low, Luna-high and Sol-high (equal weights) of the per-session M2 − S1, item success rate. | one-sided session-clustered t at the calibrated level 0.013 | 0 (pp) |
+| G-H3a | confirmatory | G-H3 (2) | M1, M2, S1 | Linear form (M1 − S1) − 0.5 (M2 − S1) > 0, pooled over Luna-low, Luna-high and Sol-high (equal weights); the share itself with Fieller and bootstrap intervals. | one-sided session-clustered t at the calibrated level 0.013 | 0.5 (share) |
+| G-H3b | confirmatory | G-H3 (3) | S-CM*, M2, S1 | (S-CM* − S1) − 0.8 (M2 − S1) > 0 and log(CPS_S-CM* / CPS_M2) < log 0.6 (cache-adjusted $, probes excluded), pooled over Luna-low, Luna-high and Sol-high (equal weights). | intersection-union of two one-sided session-clustered t-tests at the calibrated level 0.013 | 0.8 (share; cost ratio 0.6) |
 | G-H3-spec | descriptive | G-H3 | M1, M2, S1 | Ratio of pooled mean differences. | intervals only | – |
 | G-D1 | descriptive | descriptive | all session arms | Mean probe F1 (a missed checkpoint scores 0) with session-clustered intervals. | intervals only | – |
 | G-D2 | descriptive | descriptive | all session arms | Label counts and rates per item. | counts only | – |
@@ -72,17 +74,17 @@ The rows of `ape.analysis.g_hypotheses.HYPOTHESES`, the single source of this se
 Plan cells (`config/run_plan.yaml`), level, and planned power or precision. Power comes from `ape.analysis.g_power` at the D-033 design with D-038's df rule, through the real analysis path:
 
 <!-- BEGIN GENERATED: g_hypotheses.design_markdown() -->
-| ID | Plan cells | One-sided α | Planned power and precision |
+| ID | Plan cells | One-sided α (t-test level) | Planned power and precision |
 |---|---|---|---|
 | G-H1 | g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive. g_power at the D-033 design: its 95% interval covers the true 0 in 95.6% of null studies (S1-pre 94.8%); the change over the span has SD 0.29 logit (0.37 before D-033; S1-pre 0.36), so the interval excludes 0 in 26% of studies when M2's advantage falls 0.9 → 0 across the points (S1-pre 39%). Under a constant mechanism the S-CM* estimate drifts +0.24 and S1's +0.67 (CM0's overflow rule); S1-pre's does not. Tier order (D-043): the S-CM* interval covers 0 in 95.2% of null studies and the change over the tier steps spanned has SD 0.31 logit (S1-pre 0.40); it excludes 0 in 30% of studies under the same convergence (S1-pre 42%). |
 | G-H1-M1 | g.topo.luna-low, g.topo.luna, g.topo.sol | – (descriptive) | – |
-| G-H2a | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | 0.025 | Decided over the plan's points: a planned point without paired sessions makes it INCOMPLETE, never SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test there (D-032). g_power: type I 0.020–0.024 per point (10,000 studies); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies. |
+| G-H2a | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | 0.025 (0.013) | Decided over the plan's points: a planned point without paired sessions, or below its minimum (Luna 6 of 10, Sol 4 of 6, Astra 3 of 4; S-4), makes it INCOMPLETE, never SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test there (D-032). Each point's t at the calibrated 0.013 (S-4). g_power: type I 0.012–0.013 per point (20,000 studies; at most 0.023 under the review's stress scenarios, which reached 0.037 at a nominal 0.025); power 0.94 by t at the ~+25–30 pp gaps CM0's overflow implies, limited by Astra's 4 sessions (0.996 with 6; 0.86 with σ_arm 0.6). At a nominal 0.025 it was 0.99. |
 | G-H2b | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cap.luna-low, g.cap.luna-high, g.cap.sol-high, g.cap.astra-high | – (descriptive) | D-033 made this row descriptive (the TOST at ±0.20 R had power 0.01; 80% would need ±0.46). The gain on the logit scale drifts +0.16 to +0.22 over the span under a constant R_x, because of CM0's overflow rule. g_power: θ has SD 0.14 R; its 95% interval covers 0 in 95% of studies at a constant R_x and excludes 0 in 20% when R_x falls by 0.2 over the span. Tier order (D-043): SD 0.15 R, covering 0 in 96% of studies at a constant R_x and excluding it in 22% under that fall. |
 | G-H2c | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high | – (descriptive) | – |
 | G-H2d | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10 | – (descriptive) | CM0 fails every item after its overflow, so 'gains grow with length' holds for CM0 by construction; the slopes of the managed arms and O-state carry the information. |
-| G-H3-pre | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | Pools the plan's points; a planned point without ≥ 2 sessions of all four arms makes G-H3-pre, G-H3a and G-H3b INCOMPLETE, never SUPPORTED. g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp). |
-| G-H3a | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | g_power (D-033 design): type I 0.026 at a share of 0.5 (10,000 studies); power 0.997 at 0.75, 0.996 at 0.80, 0.90 at 0.70, 0.66 at 0.65 (0.95 / 0.68 at 0.80 / 0.70 with σ_arm 0.6). Before D-033: 0.84 at 0.75. |
-| G-H3b | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 | Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7). g_power (D-033 design): type I 0.027 (recovery at 0.8) and 0.026 (cost at 0.6) over 16,000 studies, 0.006 with both clauses at their margins; power 0.69 at recovery 0.95 and cost ratio 0.45, 0.37 at 0.90 / 0.50, 0.11 at 0.85 / 0.55 (the cost clause alone ≥ 0.99 at ≤ 0.5). With 24 Luna sessions per point 0.76; with 12 Sol sessions 0.74. Before D-033: 0.38. |
+| G-H3-pre | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 (0.013) | Pools the plan's points; a planned point without ≥ 2 sessions of all four arms, or below its minimum (Luna 10 of 16, Sol 5 of 8; S-4), makes G-H3-pre, G-H3a and G-H3b INCOMPLETE, never SUPPORTED. Every G-H3 t at the calibrated 0.013 (S-4). g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp); type I at most 0.013 under the review's stress scenarios (16,000 studies each). |
+| G-H3a | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 (0.013) | g_power (D-033 design; t at the calibrated 0.013, S-4): type I 0.012 at a share of 0.5 (20,000 studies; under the review's stress scenarios at most 0.021 at the planned sizes and 0.024 at the minimum sessions, against 0.026–0.037 at a nominal 0.025); power 0.99 at 0.75 and at 0.80, 0.83 at 0.70, 0.55 at 0.65 (0.90 / 0.58 at 0.80 / 0.70 with σ_arm 0.6). Before D-033: 0.73 at 0.75. At a nominal 0.025 it was 0.997 / 0.90 / 0.66 at 0.75 / 0.70 / 0.65. |
+| G-H3b | g.topo.luna-low, g.topo.luna, g.topo.sol | 0.025 (0.013) | Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7), each t at the calibrated 0.013 (S-4); a clause that cannot be computed (a missing cost) makes it NOT_TESTABLE. g_power (D-033 design): type I 0.014 (recovery at 0.8) and 0.015 (cost at 0.6) over 20,000 studies, 0.002 with both clauses at their margins (under the review's stress scenarios at most 0.021 and 0.024 at the planned sizes, against up to 0.037 and 0.040 at a nominal 0.025); power 0.56 at recovery 0.95 and cost ratio 0.45, 0.26 at 0.90 / 0.50, 0.07 at 0.85 / 0.55 (the cost clause alone ≥ 0.96 at ≤ 0.5). With 24 Luna sessions per point 0.67; with 12 Sol sessions 0.62; with σ_arm 0.6 0.35. Before D-033: 0.26. At a nominal 0.025 it was 0.69 / 0.37 / 0.11. |
 | G-H3-spec | g.topo.luna-low, g.topo.luna, g.topo.sol | – (descriptive) | – |
 | G-D1 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
 | G-D2 | g.cm.luna-low, g.cm.luna-high, g.cm.sol-high, g.cm.astra-high, g.cm.luna-n10, g.topo.luna-low, g.topo.luna, g.topo.sol, g.topo.astra | – (descriptive) | – |
@@ -93,9 +95,9 @@ Plan cells (`config/run_plan.yaml`), level, and planned power or precision. Powe
 
 **G-H2a: headroom at every capability point** (family G-H2-gap).
 - **Estimand:** per point, Gap_T = s(O-state) − s(CM0): the mean over sessions of the paired difference in item success rate. It uses the long sessions: N = 40 at Luna-low, Luna-high and Sol-high, and N = 24 at Astra-high.
-- **Test:** intersection-union. Each point gets a one-sided t at 0.025, with no adjustment (an intersection-union test needs none). G-H2a is SUPPORTED only if every point rejects.
-- **Astra:** its 4 sessions cannot reach α by sign-flip, so the decision rests on the t there. Simulated type I: 0.020–0.024 per point.
-- **Expected:** CM0 fails every item after its overflow, which falls at a median 0.70 of the session (D-028). So the gap is about 25–30 pp by construction (power 0.99). G-H2a establishes that the headroom exists at every point; how much of it each strategy recovers is G-H2c's question (descriptive).
+- **Test:** intersection-union. Each point gets a one-sided t at the calibrated 0.013 (§2.1), with no adjustment (an intersection-union test needs none). G-H2a is SUPPORTED only if every point rejects.
+- **Astra:** its 4 sessions cannot reach α by sign-flip, so the decision rests on the t there. Simulated type I at 0.013: 0.012–0.013 per point under g_power's model (20,000 studies), and at most 0.023 under the review's stress scenarios (Astra with a wider O-state session spread, which reached 0.037 at a nominal 0.025).
+- **Expected:** CM0 fails every item after its overflow, which falls at a median 0.70 of the session (D-028). So the gap is about 25–30 pp by construction: power 0.94 at the calibrated level, limited by Astra's 4 sessions (0.99 at a nominal 0.025; 0.996 with 6 Astra sessions). G-H2a establishes that the headroom exists at every point; how much of it each strategy recovers is G-H2c's question (descriptive).
 
 **G-H3: decomposition, a fixed sequence at 0.025** (family G-H3; audit §2.3, §7).
 - **Points:** pooled with equal weights over Luna-low, Luna-high and Sol-high, where S1, M1, M2 and S-CM\* all run. Astra runs S1 and M2 only.
@@ -104,11 +106,12 @@ Plan cells (`config/run_plan.yaml`), level, and planned power or precision. Powe
 1. **G-H3-pre** (the gatekeeper): M2 − S1 > 0. Without a gain the shares are undefined. Power 1.0 at the expected +28–33 pp.
 2. **G-H3a** (isolation carries at least half): (M1 − S1) − 0.5 (M2 − S1) > 0.
    - The isolation share (M1 − S1) / (M2 − S1) is reported with Fieller and bootstrap intervals. The specialisation share is its complement (G-H3-spec).
-   - Power 0.997 at a share of 0.75, 0.90 at 0.70 and 0.66 at 0.65.
-3. **G-H3b** (a managed single agent recovers it more cheaply): an intersection-union of two one-sided t-tests at 0.025, both required.
+   - Power 0.99 at a share of 0.75, 0.83 at 0.70 and 0.55 at 0.65, at the calibrated 0.013 (0.997, 0.90 and 0.66 at a nominal 0.025).
+3. **G-H3b** (a managed single agent recovers it more cheaply): an intersection-union of two one-sided t-tests at the calibrated 0.013, both required.
    - Recovery: (S-CM\* − S1) − 0.8 (M2 − S1) > 0.
    - Cost: log(CPS(S-CM\*) / CPS(M2)) < log 0.6, where CPS is the cost per solved item in cache-adjusted $.
-   - Power 0.69 at a recovery of 0.95 and a cost ratio of 0.45, and 0.37 at 0.90 and 0.50. The cost clause alone has power ≥ 0.99 at a ratio ≤ 0.5.
+   - Power 0.56 at a recovery of 0.95 and a cost ratio of 0.45, and 0.26 at 0.90 and 0.50, at the calibrated 0.013 (0.69 and 0.37 at a nominal 0.025, which over-rejected: §2.1). The cost clause alone has power ≥ 0.96 at a ratio ≤ 0.5.
+   - A cost that cannot be computed (a session's meter missing) makes G-H3b NOT_TESTABLE, never NOT_SUPPORTED.
    - G-H3b is the study's weakest confirmatory test, so a NOT_SUPPORTED there is weak evidence against it.
 
 **What G-H3 measures: isolation against a harness-enforced window (D-040).**
@@ -160,7 +163,7 @@ The power and precision in §2.2–2.4 assume:
 - a W crossing at 0.70 of the session, ± 0.06 by world and ± 0.03 by epoch;
 - base success 0.65 / 0.75 / 0.82 / 0.88 and measured capability 0.72 / 0.80 / 0.86 / 0.90 at Luna-low / Luna-high / Sol-high / Astra-high.
 
-They stay assumptions until the micro-pilot (§4.5). G-H3a and G-H3b lose power if σ_arm is larger: at σ_arm 0.6, G-H3a's power is 0.95 at a share of 0.80 and 0.68 at 0.70.
+They stay assumptions until the micro-pilot (§4.5). G-H3a and G-H3b lose power if σ_arm is larger: at σ_arm 0.6, G-H3a's power is 0.90 at a share of 0.80 and 0.58 at 0.70, and G-H3b's 0.35 at a recovery of 0.95 (at the calibrated 0.013).
 
 To reproduce: `uv run python -m ape.analysis.g_power --sims 2000 --sims-other 500 --workers 8` (seeded).
 
@@ -313,13 +316,16 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 - **The sizes are D-033's.** No rule re-sizes them from pilot data.
 - **What the micro-pilot measures.** It runs the 7 Luna CM arms on 3 pilot sessions each (N = 40, 1 epoch): calls per item, view sizes, cache shares, management overheads and crossing positions.
   - `ape.budget calibrate` replaces the cost priors from its logs automatically (the run's `config/budget_calibration_measured.yaml`), and every later phase's budget check uses them.
+- **The topology pilot (planned, D-047).** A short `g.pilot.topo` cell runs the four topology arms, S1, M1, M2 and S-CM\*, on 2 pilot sessions each at N = 20, so the team arms are exercised before the freeze as the CM arms are. The run plan gains the cell before the freeze; this section describes it as planned.
+- **Session failure rates (planned, D-047).** For every micro-pilot cell and arm, the micro-pilot summary reports the share of sessions that errored, that hit a sample limit (tokens, messages, time or working time) and that overflowed W. A limit fails the item in progress and the report (§9.1).
 - **Before the freeze, the analyst reviews:**
   - CM0 overflows in the long sessions (near 0.70) and O-state does not;
   - CM-native compacts (its support record) and no arm fails at start;
+  - the team arms complete their `g.pilot.topo` sessions, and the session error, limit and overflow rates per cell and arm;
   - calls per item and views against the priors (§7);
   - the re-projected Study G cost against its $3,600 allocation;
   - `g_power` re-run with the measured crossing and base success. The σ priors cannot be estimated from 3 sessions per arm at one point.
-- **The user then confirms the planned sizes, or changes them before the freeze.** For example, 24 Luna topology sessions per point would raise G-H3b's power from 0.69 to 0.76 for about +$51. Decision: [USER: micro-pilot review and go-ahead at the planned sizes]
+- **The user then confirms the planned sizes, or changes them before the freeze.** For example, 24 Luna topology sessions per point would raise G-H3b's power from 0.56 to 0.67 for about +$51 (at the calibrated 0.013). Decision: [USER: micro-pilot review and go-ahead at the planned sizes]
 
 ## 5. Capability points and the capability anchor
 
@@ -431,18 +437,20 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 
 | Label | Meaning |
 |---|---|
-| SUPPORTED | The confirmatory row's test rejects at one-sided 0.025 with every planned point present: for G-H2a at every planned point, for G-H3b both clauses. |
-| INCOMPLETE | A planned point lacks paired data; the missing points are named, and the estimate and decision over the points present are reported beside it. Never counted as SUPPORTED. |
+| SUPPORTED | The confirmatory row's t-test rejects at its calibrated one-sided level (§2.1; the family's α is 0.025) with every planned point present: for G-H2a at every planned point, for G-H3b both clauses. |
+| INCOMPLETE | A planned point lacks paired data or has fewer usable sessions than its minimum (§2.1), or the run plan cannot be read (so the planned points are unknown); the missing points are named, and the estimate and decision over the points present are reported beside it. Never counted as SUPPORTED. |
 | NOT_SUPPORTED | Tested, and it does not reject. |
 | NOT_TESTED | An earlier step of G-H3's sequence was not supported. |
-| NOT_TESTABLE | Arms, points or sessions are missing (fewer than 2 paired sessions at a point); the reason is given. |
+| NOT_TESTABLE | Arms, points or sessions are missing (fewer than 2 paired sessions at a point), or a clause cannot be computed (G-H3b's cost when a session's meter is missing); the reason is given. Never NOT_SUPPORTED. |
 | descriptive | G-H1, G-H1-M1, G-H2b, G-H2c, G-H2d, G-H3-spec and G-D1–G-D3: an estimate with its interval, never a decision. |
 
 - **Missing data.** A cell that fails or that the budget stops is reported in the coverage table with its reason. No value is imputed.
-  - G-H3 pools its planned points (Luna-low, Luna-high, Sol-high) and G-H2a tests its planned points (all four). If any planned point lacks paired data, the row is labelled **INCOMPLETE**, never SUPPORTED, and the report names the missing points; the estimate over the points present, and the decision those points alone would give, are reported beside it (`g_stats.gap_iut`, `g_stats.gh3`, `planned_points`). A missing planned point is a deviation.
-- **Errored samples** count as failures (§2.1).
+  - G-H3 pools its planned points (Luna-low, Luna-high, Sol-high) and G-H2a tests its planned points (all four). If any planned point lacks paired data, or has fewer usable sessions than its minimum (§2.1), the row is labelled **INCOMPLETE**, never SUPPORTED, and the report names the missing points; the estimate over the points present (a point below its minimum is left out), and the decision those points alone would give, are reported beside it (`g_stats.gap_iut`, `g_stats.gh3`, `g_report.planned_points_and_sessions`). A missing planned point is a deviation.
+  - The planned points and sessions come from the run's frozen `config/run_plan.yaml`. If it cannot be read, a live analysis stops with an error; an offline one labels G-H2a and G-H3 INCOMPLETE.
+- **Errored samples** count as failures (§2.1). **Sample limits** (tokens, messages, time, working time): the item in progress when the limit fired fails, even if an answer was recorded in the turn that hit it; items completed before it stand; a limit in the report phase fails the report (D-047).
+- **Section failures.** Each report section is computed in isolation: one that fails is listed under the report's section errors, and the other sections and the decisions stand.
 - **Re-runs.** A failed group is re-run by resuming it. Nothing is re-run because of its result.
-- **No extension.** Study G pre-registers no extension and spends no α on one. A later run, including one frozen with `--extension-of`, is analysed alone, reported as a replication, and never pooled with this run.
+- **No extension.** Study G pre-registers no extension and spends no α on one. A later run, including one frozen with `--extension-of`, is analysed alone, reported as a replication, and never pooled with this run: `ape.analyze_g` labels such a run's report "REPLICATION of `<primary run>`".
 
 ### 9.2 Reading guide (audit §2.4)
 
