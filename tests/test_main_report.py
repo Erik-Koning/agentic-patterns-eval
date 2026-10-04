@@ -40,6 +40,10 @@ def test_the_report_is_complete_and_json_serialisable(report):
     for heading in ("## Confirmatory tests", "## S8 frontier", "## Cost-meter rank flips", "## Determinism", "## Invariants", "## Analysis choices"):
         assert heading in md
     assert all(m in md for m in CONFIRMATORY)
+    pooled = [s for s in report["summary"] if len(s["cells"] or []) > 1 and s["label"] != "not evaluable"]
+    assert pooled and all(set(s["per_cell"]) == set(s["cells"]) for s in pooled), "BUILD_REVIEW S-6: per-cell estimates beside pooled members"
+    assert "per cell (equal weights)" in md and "most influential worlds" in md, "BUILD_REVIEW S-3: per-world influence"
+    assert all(isinstance(s["caveats"], list) for s in report["summary"])
 
 
 def test_strong_effects_are_supported_through_the_whole_path():

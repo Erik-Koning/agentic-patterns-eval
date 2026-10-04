@@ -236,3 +236,87 @@ def test_interval_coverage_and_type_i_error_near_nominal_at_nine_worlds():
         rej += res["p"] <= ALPHA
     assert 0.90 <= cover / reps <= 0.995, cover / reps  # 1,000 replicates: 0.962
     assert rej / reps <= ALPHA + 3 * np.sqrt(ALPHA * (1 - ALPHA) / reps), rej / reps  # 1,000 replicates: 0.026
+
+
+# ---------------------------------------------------------------- BUILD_REVIEW fixes (S-2, S-3, S-6, H5)
+
+
+def test_duplicates_are_dropped_across_log_files_by_sample_uuid():
+    """H5 (BUILD_REVIEW S-10): a completed sample copied into a retry's log keeps its uuid; it is counted once."""
+    base = {"plan_cell": "main.A.arms", "arm": "M1", "cell": "F1-32", "world": "F1-32-test-s13000", "task": "t0", "tier": "luna", "success": 1.0, "tokens": 1.0}
+    rows = [base | {"epoch": 1, "uuid": "a", "log_file": "first.eval"}, base | {"epoch": 1, "uuid": "a", "log_file": "retry.eval"}, base | {"epoch": 2, "uuid": "b", "log_file": "retry.eval"}]
+    kept, notes = ms.confirmatory_rows(pd.DataFrame(rows))
+    assert notes["duplicates_dropped"] == 1 and list(kept["uuid"]) == ["a", "b"]
+
+
+def _frontier_draw(kappa: float, seed: int):
+    settings = mp.Settings(kappa=kappa)
+    spec = {("luna", "F1-32"): {"S1": 0.4, "M1": mp.S8Target(mp.COST["M1"], 0.0)}}
+    n, ep = mp._sizes_for(spec, mp.planned_sizes(), settings)
+    return mp.simulate(spec, n, ep, mp.Sigmas(), settings, np.random.default_rng(seed)).tables()
+
+
+def _brute_sd(t, member, reps, rng) -> float:
+    """The frontier estimate's bootstrap SD recomputing the arm's mean cost, S1's mean run cost, λ and S8 per resample."""
+    cell, term = member.cells[0], member.terms[1]
+    pool, f = t.pool("luna", cell), t.frontier("luna", cell, "tokens")
+    tm, cost = t.tm["luna"], t.cost["luna"]["tokens"]
+    df = pd.DataFrame({"y": tm[term.match], "ca": cost[term.match]}).join(pd.DataFrame(f.task_success, index=pool.index)).join(pd.Series(pool.cost["tokens"].mean(axis=1), index=pool.index, name="cs")).dropna()
+    names = list(dict.fromkeys(df.index.get_level_values("world")))
+    gi = np.array([names.index(w) for w in df.index.get_level_values("world")])
+    ts, est = df[list(range(f.K))].to_numpy(), []
+    for _ in range(reps):
+        w = rng.multinomial(len(names), np.full(len(names), 1 / len(names)))[gi].astype(float)
+        r = (w @ df["ca"].to_numpy()) / (w @ df["cs"].to_numpy())
+        j = int(np.clip(np.floor(r) - 1, 0, f.K - 2))
+        lam = float(np.clip(r - (j + 1), 0, 1))
+        est.append(w @ (df["y"].to_numpy() - ((1 - lam) * ts[:, j] + lam * ts[:, j + 1])) / w.sum())
+    return float(np.std(est))
+
+
+def test_the_matched_cost_correction_carries_the_noise_of_the_match(monkeypatch):
+    """BUILD_REVIEW S-2: with failed runs costing more (κ = 3), treating S8@M1 as fixed understates the estimate's spread
+    (scratch runs: 0.885 of a bootstrap that recomputes the match in every resample); the delta-method correction
+    matches it (1.005), and leaves the estimate unchanged."""
+    member = get("M2").members[1]
+    rng = np.random.default_rng(9)
+    corrected, uncorrected = [], []
+    for seed in range(4):
+        t = _frontier_draw(3.0, seed)
+        d, info = ms.member_series(t, member)
+        assert info["cells"]["F1-32"]["frontier"]["S8@M1"]["matched_cost_correction"]["applied"]
+        c = ms.Contrast.from_series(d)
+        W = ms._resample_weights(c, 2000, rng)
+        with monkeypatch.context() as m:
+            m.setattr(ms, "_matched_cost_influence", lambda *a, **k: (None, {"applied": False}))
+            d0, _ = ms.member_series(t, member)
+        c0 = ms.Contrast.from_series(d0)
+        assert c.est == pytest.approx(c0.est), "the correction is centred: the estimate is unchanged"
+        brute = _brute_sd(t, member, 2000, rng)
+        corrected.append(np.std(ms._estimates(c, W)) / brute)
+        uncorrected.append(np.std(ms._estimates(c0, W)) / brute)
+    assert 0.92 < np.mean(corrected) < 1.08 and np.mean(uncorrected) < 0.94, (corrected, uncorrected)
+
+
+def test_world_influence_flags_a_claim_one_world_carries_and_kg_build_failures():
+    """BUILD_REVIEW S-3: one world with a huge effect, the others none: supported, but not without that world."""
+    big = [[0.6] * 3] * 8 + [[1.0] * 3]
+    tm = _tm({"F7-1000": {"A": big, "B": [[0.6] * 3] * 9}})
+    tm["A"] = tm["A"] + np.random.default_rng(0).normal(0, 0.001, len(tm))
+    hyp = Hypothesis("I", "test", "", "confirmatory", (Member("I.x", (Term("A"), Term("B", -1)), ("F7-1000",), "superiority"),))
+    res = ms.evaluate_family(_tables(tm), hyp, reps=500, flagged_worlds={"F7-1000-test-s4008"})["members"]["I.x"]
+    top = res["influence"][0]
+    assert top["cluster"] == "F7-1000-test-s4008" and top["contribution"] > 0.03 and top["kg_build_failed"] == ["F7-1000-test-s4008"]
+    assert res["kg_build_failed_worlds"] == ["F7-1000-test-s4008"]
+    if res["label"] == "supported":
+        assert any("driven by one world" in c for c in res["caveats"]) and any("KG build failed" in c for c in res["caveats"])
+    clean = ms.evaluate_family(_tables(_tm({"F7-1000": _const(0.1)})), hyp, reps=500)["members"]["I.x"]
+    assert clean["label"] == "supported" and clean["caveats"] == [] and len(clean["influence"]) == 9
+
+
+def test_pooled_members_report_each_cells_estimate():
+    """BUILD_REVIEW S-6: a pooled claim is an equal-weight average over cells; every cell's estimate is beside it."""
+    tm = pd.concat([_tm({"F3-5": _const(0.0)}), _tm({"F3-60": _const(0.1)})])
+    hyp = Hypothesis("P", "test", "", "confirmatory", (Member("P.x", (Term("A"), Term("B", -1)), ("F3-5", "F3-60"), "superiority"),))
+    m = ms.evaluate_family(_tables(tm), hyp, reps=500)["members"]["P.x"]
+    assert m["est"] == pytest.approx(0.05) and m["per_cell"]["F3-5"]["est"] == pytest.approx(0.0) and m["per_cell"]["F3-60"]["est"] == pytest.approx(0.1)

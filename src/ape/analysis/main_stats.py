@@ -18,7 +18,16 @@ Exact (all 2^G flips) for G ≤ EXACT_MAX_CLUSTERS, else Monte Carlo with a fixe
 TOST) shift each cluster by δ·w_g, w_g = Σ_c λ_c N_gc / N_c (Σ_g w_g = 1), so the shifted statistic is est − δ. The
 smallest attainable one-sided p is 2^−G: 0.00195 at 9 worlds (`min_p`). Superiority under the sharp null of
 exchangeable arms is exact; shifted nulls, DiD and frontier contrasts rest on approximate symmetry of the cluster
-sums, which `main_power` checks by simulating type I error at each null boundary.
+sums, which `main_power` checks by simulating type I error at each null boundary. **The condition is symmetric world
+contributions** (BUILD_REVIEW S-3): worlds that are catastrophic for one arm only (a broken KG build, say) skew the
+cluster sums, and the level then drifts above nominal (independent review: 0.075 for K1 and M5 with 15% of worlds at
+−3 logit for one arm). So every member reports its per-world influence (`world_influence`: contribution and the
+member without each world), and a supported claim that one world carries, or that rests on a world whose KG build
+failed its quality check, is a §8 caveat (`caveats`).
+
+**Frontier contrasts** carry the noise of the matched cost (`_matched_cost_influence`, BUILD_REVIEW S-2): S8 is
+interpolated at the arm's realised mean cost over S1's mean run cost, an estimate from the same worlds, so each task's
+delta-method influence on that weight is added to its contrast value (centred: the estimate is unchanged).
 
 **Intervals** (two-sided 1 − 2α, so one-sided level-α bounds; reported, never the decision):
 - `ci`: the sign-flip test inverted in δ (p is monotone in δ, so a bisection finds the bounds). It agrees with the
@@ -461,14 +470,21 @@ def run_order(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def confirmatory_rows(frame: pd.DataFrame, exclude_prefix: str = DETERMINISM_PREFIX) -> tuple[pd.DataFrame, dict]:
-    """The rows the hypotheses use: every plan cell except Study C's (determinism only), each sample-epoch once (the
-    same (tier, arm, cell, task, epoch) from the same log file twice, e.g. a log passed under two plan cells, is dropped
-    and counted; without a log_file column, the same epoch twice)."""
+    """The rows the hypotheses use: every plan cell except Study C's (determinism only), each sample-epoch once:
+    - a row with a sample `uuid` (the loader's: one per sample-epoch run, kept when Inspect copies a completed sample
+      into a retry's log) is a duplicate of an earlier row with the same uuid and epoch, whichever log file holds it;
+    - a row without one is a duplicate of an earlier row with the same (tier, arm, cell, task, epoch) from the same log
+      file (e.g. a log passed under two plan cells; without a log_file column, the same epoch twice).
+    Duplicates are dropped and counted."""
     rows = frame
     if "plan_cell" in rows.columns and exclude_prefix:
         rows = rows[~rows["plan_cell"].fillna("").astype(str).str.startswith(exclude_prefix)]
     keys = [k for k in ("tier", "arm", "cell", "world", "task", "epoch", "log_file") if k in rows.columns]
     dup = rows.duplicated(subset=keys, keep="first")
+    if "uuid" in rows.columns and rows["uuid"].notna().any():
+        has = rows["uuid"].notna()
+        by_uuid = rows[has].duplicated(subset=["uuid", "epoch"] if "epoch" in rows.columns else ["uuid"], keep="first")
+        dup = dup | by_uuid.reindex(rows.index, fill_value=False)
     return rows[~dup], {"rows": int(len(frame)), "used": int((~dup).sum()), "duplicates_dropped": int(dup.sum()), "excluded_plan_cells": sorted({str(p) for p in frame.get("plan_cell", pd.Series(dtype=str)).dropna() if str(p).startswith(exclude_prefix)}) if exclude_prefix else []}
 
 
@@ -495,46 +511,92 @@ def build_tables(frame: pd.DataFrame, meters: dict | None = None, s1_epochs: int
 # --------------------------------------------------------------------------- members and families
 
 
-def term_series(tables: Tables, term: Term, cell: str, meter: str) -> tuple[pd.Series | None, dict]:
-    """One term's per-task values in one cell (index cell, world, task), or None with the reason."""
+def _matched_cost_influence(tables: Tables, term: Term, cell: str, meter: str, f: fr.Frontier, pool: "Pool", target: float, m: dict) -> tuple[pd.Series | None, dict]:
+    """Each task's influence on the interpolation weight λ of `S8@arm` (BUILD_REVIEW S-2), times the frontier's slope.
+
+    S8@arm is interpolated at r̂ = C̄_arm / C̄_S1 (the arm's realised mean cost over S1's mean run cost, both measured on
+    the same worlds), so λ̂ = r̂ − k is an estimate. Treating the per-task S8 values as fixed ignores its noise, and when
+    cost depends on success (failed runs costing more) that noise is correlated with the arm's own success: the frontier
+    tests then ran at 0.073–0.089 against 0.05 (M3) and 0.027–0.031 against 0.025 (M2.frontier). By the delta method the
+    estimate moves by slope × (λ̂ − λ), and λ̂ − λ ≈ mean_t (c_arm,t − r̂ c_S1,t) / C̄_S1 (`sum` costs: S8(k) costs k runs),
+    so task t contributes ψ_t = slope × (c_arm,t − r̂ c_S1,t) / C̄_S1, slope = S8(k+1) − S8(k) on the condition curve. For
+    `max`-priced wall-clock only the arm's cost is linearised: ψ_t = slope × (c_arm,t − C̄_arm) / (cost(k+1) − cost(k)).
+    `below` (flat at S8(1)) has no influence."""
+    if m.get("status") != "inside" or f.K < 2:
+        return None, {"applied": False, "why": f"status {m.get('status')}" if m.get("status") != "inside" else "a 1-run pool has no slope"}
+    j = int(m["k"]) - 1
+    seg = j if j < f.K - 1 else f.K - 2  # at S8(K) exactly: the segment it closes
+    slope = float(f.success[seg + 1] - f.success[seg])
+    tab = (tables.cost.get(term.tier) or {}).get(meter)
+    if tab is None or term.match not in tab.columns:
+        return None, {"applied": False, "why": f"no per-task {meter} cost for {term.match}"}
+    arm_cost = tab[term.match][tab.index.get_level_values("cell") == cell].dropna()
+    agg = tables.wall_aggregate if meter == "wall" else "sum"
+    if agg == "sum":
+        s1_cost = pd.Series(np.nanmean(pool.cost[meter], axis=1), index=pool.index)
+        both = pd.concat([arm_cost, s1_cost], axis=1).dropna()
+        psi = slope * (both.iloc[:, 0] - (target / f.run_cost) * both.iloc[:, 1]) / f.run_cost
+    else:
+        dcost = float(f.cost[seg + 1] - f.cost[seg])
+        psi = slope * (arm_cost - target) / dcost if dcost > 0 else None
+    return psi, {"applied": psi is not None, "slope": slope, "aggregate": agg}
+
+
+def _term(tables: Tables, term: Term, cell: str, meter: str) -> tuple[pd.Series | None, dict, pd.Series | None]:
+    """One term's per-task values in one cell (index cell, world, task) or None with the reason, and for a matched S8
+    term the per-task matched-cost influence ψ (`_matched_cost_influence`)."""
     if term.arm != "S8":
         tm = tables.tm.get(term.tier)
         if tm is None or term.arm not in tm.columns:
-            return None, {"reason": f"no {term.arm} in tier {term.tier}"}
+            return None, {"reason": f"no {term.arm} in tier {term.tier}"}, None
         s = tm[term.arm][tm.index.get_level_values("cell") == cell].dropna()
-        return (s, {}) if len(s) else (None, {"reason": f"no {term.arm} tasks in {cell} ({term.tier})"})
+        return (s, {}, None) if len(s) else (None, {"reason": f"no {term.arm} tasks in {cell} ({term.tier})"}, None)
     f = tables.frontier(term.tier, cell, meter, term.pool)
     if f is None:
-        return None, {"reason": f"no S1 pool for S8 in {cell} ({term.tier}, {meter})"}
+        return None, {"reason": f"no S1 pool for S8 in {cell} ({term.tier}, {meter})"}, None
     pool = tables.pool(term.tier, cell, term.pool)
     info = {"frontier": {"K": f.K, "tasks": len(pool.index), "short_tasks": pool.short_tasks, "inconsistent_keys": f.inconsistent_keys, "points": f.points()}}
     if term.k:
         if term.k > f.K:
-            return None, info | {"reason": f"S8({term.k}) needs {term.k} pool runs, the pool has {f.K}"}
-        return pd.Series(f.task_success[:, term.k - 1], index=pool.index), info
+            return None, info | {"reason": f"S8({term.k}) needs {term.k} pool runs, the pool has {f.K}"}, None
+        return pd.Series(f.task_success[:, term.k - 1], index=pool.index), info, None
     target = tables.arm_cost(term.tier, cell, term.match, meter)
     if target is None:
-        return None, info | {"reason": f"no {meter} cost for {term.match} in {cell} ({term.tier})"}
+        return None, info | {"reason": f"no {meter} cost for {term.match} in {cell} ({term.tier})"}, None
     vals, m = fr.interpolate(f, target)
     info["match"] = m
     if vals is None:
-        return None, info | {"reason": f"{term.match} is {m['status']} the S8 frontier in {cell} ({term.tier}, {meter})"}
-    return pd.Series(vals, index=pool.index), info
+        return None, info | {"reason": f"{term.match} is {m['status']} the S8 frontier in {cell} ({term.tier}, {meter})"}, None
+    psi, corr = _matched_cost_influence(tables, term, cell, meter, f, pool, target, m)
+    info["matched_cost_correction"] = corr
+    return pd.Series(vals, index=pool.index), info, psi
+
+
+def term_series(tables: Tables, term: Term, cell: str, meter: str) -> tuple[pd.Series | None, dict]:
+    """One term's per-task values in one cell (index cell, world, task), or None with the reason."""
+    s, info, _ = _term(tables, term, cell, meter)
+    return s, info
 
 
 def member_series(tables: Tables, member: Member, meter: str = PRIMARY_METER) -> tuple[pd.Series, dict]:
-    """The member's per-task contrast over its cells (cells without paired tasks are left out and named)."""
+    """The member's per-task contrast over its cells (cells without paired tasks are left out and named).
+
+    A matched S8 term adds coef × ψ_t, its matched-cost influence centred over the cell's paired tasks: the point
+    estimate is unchanged (the cell mean of the addition is 0), but every per-task value, so every cluster's
+    contribution to the sign flip, the cluster-t and the bootstrap, now carries the noise of the matched cost."""
     parts, cells = [], {}
     for cell in member.cells:
-        cols, info = [], {}
+        cols, info, psis = [], {}, []
         for term in member.terms:
-            s, tinfo = term_series(tables, term, cell, meter)
+            s, tinfo, psi = _term(tables, term, cell, meter)
             if tinfo.get("frontier") or tinfo.get("match"):
                 info.setdefault("frontier", {})[term.label()] = {k: v for k, v in tinfo.items() if k != "reason"}
             if s is None:
                 info["reason"] = tinfo["reason"]
                 break
             cols.append(term.coef * s)
+            if psi is not None:
+                psis.append(term.coef * psi)
         if "reason" in info:
             cells[cell] = info | {"tasks": 0}
             continue
@@ -542,7 +604,11 @@ def member_series(tables: Tables, member: Member, meter: str = PRIMARY_METER) ->
         full = df.dropna()
         cells[cell] = info | {"tasks": int(len(full)), "unpaired_tasks": int(len(df) - len(full))}
         if len(full):
-            parts.append(full.sum(axis=1))
+            d_cell = full.sum(axis=1)
+            if psis:
+                corr = pd.concat(psis, axis=1).reindex(full.index).fillna(0.0).sum(axis=1)
+                d_cell = d_cell + (corr - corr.mean())
+            parts.append(d_cell)
         else:
             cells[cell]["reason"] = "no task has every term"
     d = pd.concat(parts) if parts else pd.Series(dtype=float, index=pd.MultiIndex.from_tuples([], names=["cell", "world", "task"]))
@@ -563,11 +629,47 @@ def cost_ratio_check(tables: Tables, member: Member, alpha: float = 0.025, reps:
     num, den = Contrast.from_series(pair[cr.num], tables.cluster_by), Contrast.from_series(pair[cr.den], tables.cluster_by)
     r = ratio_ci(num, den, alpha, reps, seed)
     ok = r["ratio"] is not None and np.isfinite(r["ratio"]) and r["ratio"] <= cr.max_point and r["ci"][1] is not None and r["ci"][1] <= cr.max_upper
-    return r | {"ok": bool(ok), "meter": cr.meter, "rule": f"{cr.num}/{cr.den} ≤ {cr.max_point} and the upper end of its 95% CI ≤ {cr.max_upper}"}
+    rule = f"{cr.num}/{cr.den} ≤ {cr.max_upper} with 97.5% confidence (its one-sided upper bound, the upper end of the two-sided 95% BCa interval) and point estimate ≤ {cr.max_point}"
+    return r | {"ok": bool(ok), "meter": cr.meter, "rule": rule, "note": "realised cost is the logged final attempts' usage; errored attempts' usage (retried, D-030) is not in it"}
 
 
-def evaluate_member(tables: Tables, member: Member, alpha: float, meter: str = PRIMARY_METER, reps: int = REPS, seed: int = 0, ci: bool = True, exact_max: int = EXACT_MAX_CLUSTERS) -> dict:
-    """One member: its contrast, inference, and cost condition. Missing arms or cells are reported, never raised."""
+def per_cell_estimates(d: pd.Series, cluster_by: str, alpha: float, reps: int = REPS, seed: int = 0) -> dict:
+    """A pooled member's estimate in each of its cells (BUILD_REVIEW S-6: a pooled claim is an equal-weight average over
+    cells, and a ceiling cell dilutes it), with the inverted sign-flip and cluster-t intervals."""
+    out = {}
+    for cell in dict.fromkeys(d.index.get_level_values("cell").astype(str)):
+        sub = d[d.index.get_level_values("cell") == cell]
+        r = infer(Contrast.from_series(sub, cluster_by), "descriptive", alpha=alpha, reps=reps, seed=seed)
+        out[cell] = {k: r.get(k) for k in ("est", "ci", "ci_t", "tasks", "clusters")}
+    return out
+
+
+def world_influence(d: pd.Series, cluster_by: str, test: str, margin: float, reps: int = REPS, seed: int = 0, exact_max: int = EXACT_MAX_CLUSTERS, flagged: set | None = None) -> list[dict]:
+    """Each cluster's share of the estimate and the member re-estimated (and, for a test, re-tested) without it, most
+    influential first (BUILD_REVIEW S-3: the sign flip holds α only when worlds contribute symmetrically, so a claim one
+    world carries is a caveat). `flagged`: world ids that failed their KG build-quality check."""
+    c = Contrast.from_series(d, cluster_by)
+    if c.G < 2:
+        return []
+    s, _ = c.contributions()
+    clus = np.array([cluster_of(w, cluster_by) for w in d.index.get_level_values("world")])
+    worlds = d.index.get_level_values("world").astype(str)
+    rows = []
+    for g, name in enumerate(c.clusters):
+        keep = clus != name
+        sub = Contrast.from_series(d[keep], cluster_by)
+        row = {"cluster": name, "contribution": float(s[g]), "tasks": int((~keep).sum()), "cells": sorted({str(x) for x in d.index.get_level_values("cell")[~keep]}), "est_without": sub.est}
+        if test != "descriptive":
+            row["p_without"] = p_value(SignFlip(sub, reps=reps, seed=seed, exact_max=exact_max), test, margin)[0]
+        if flagged:
+            row["kg_build_failed"] = sorted({w for w in worlds[~keep] if w in flagged})
+        rows.append(row)
+    return sorted(rows, key=lambda r: -abs(r["contribution"]))
+
+
+def evaluate_member(tables: Tables, member: Member, alpha: float, meter: str = PRIMARY_METER, reps: int = REPS, seed: int = 0, ci: bool = True, exact_max: int = EXACT_MAX_CLUSTERS, flagged_worlds: set | None = None) -> dict:
+    """One member: its contrast, inference, and cost condition; with `ci`, also its per-cell estimates (a pooled member)
+    and its per-world influence (`world_influence`). Missing arms or cells are reported, never raised."""
     out = {"id": member.id, "contrast": member.contrast(), "test": member.test, "margin": member.margin if member.test in ("ni", "tost") else None, "cells_planned": list(member.cells)}
     d, info = member_series(tables, member, meter)
     out["coverage"] = info
@@ -577,20 +679,41 @@ def evaluate_member(tables: Tables, member: Member, alpha: float, meter: str = P
     c = Contrast.from_series(d, tables.cluster_by)
     res = infer(c, member.test, member.margin, alpha, reps=reps, seed=seed, ci=ci, exact_max=exact_max)
     out |= {"evaluable": True} | res
+    if ci:
+        if len(c.cells) > 1:
+            out["per_cell"] = per_cell_estimates(d, tables.cluster_by, alpha, reps, seed)
+        out["influence"] = world_influence(d, tables.cluster_by, member.test, member.margin, reps, seed, exact_max, flagged_worlds)
+        out["kg_build_failed_worlds"] = sorted({str(w) for w in d.index.get_level_values("world")} & set(flagged_worlds or ()))
     if member.cost_ratio is not None:
         out["cost_ratio"] = cost_ratio_check(tables, member, 0.025, reps if ci else min(reps, 2000), seed)
     return out
 
 
-def evaluate_family(tables: Tables, hyp: Hypothesis, alpha: float | None = None, reps: int = REPS, seed: int = 0, ci: bool = True, exact_max: int = EXACT_MAX_CLUSTERS) -> dict:
+def caveats(member: dict) -> list[str]:
+    """§8 caveats on a supported member: the claim does not survive dropping one world, or it rests on worlds whose KG
+    build failed its quality check."""
+    if member.get("label") != "supported":
+        return []
+    out = []
+    level = member.get("holm_level")
+    carried = [r["cluster"] for r in member.get("influence") or [] if r.get("p_without") is not None and level is not None and r["p_without"] > level]
+    if carried:
+        out.append(f"driven by one world: without {carried[0]} the test is not rejected at {level:g}" + (f" (also {len(carried) - 1} more)" if len(carried) > 1 else ""))
+    if member.get("kg_build_failed_worlds"):
+        out.append(f"rests on worlds whose KG build failed its quality check: {member['kg_build_failed_worlds']}")
+    return out
+
+
+def evaluate_family(tables: Tables, hyp: Hypothesis, alpha: float | None = None, reps: int = REPS, seed: int = 0, ci: bool = True, exact_max: int = EXACT_MAX_CLUSTERS, flagged_worlds: set | None = None) -> dict:
     """A hypothesis family: every member evaluated, then Holm within the family (or serial gatekeeping over stages), and
     each member's label:
     - `supported`: rejected at its Holm level (and its cost condition holds);
     - `not supported`: tested, not rejected (never "no effect");
     - `not tested`: Holm stopped before it, or its gate stage did not pass;
-    - `not evaluable`: its data are missing (named)."""
+    - `not evaluable`: its data are missing (named).
+    A supported member carries its §8 `caveats` (`caveats`: one world carries it, or a KG-build-failed world is in it)."""
     a = hyp.alpha if alpha is None else alpha
-    members = {m.id: evaluate_member(tables, m, a, hyp.meter, reps, seed + i, ci, exact_max) for i, m in enumerate(hyp.members)}
+    members = {m.id: evaluate_member(tables, m, a, hyp.meter, reps, seed + i, ci, exact_max, flagged_worlds) for i, m in enumerate(hyp.members)}
     out = {"id": hyp.id, "source": hyp.source, "statement": hyp.statement, "status": hyp.status, "alpha": a, "procedure": hyp.procedure, "meter": hyp.meter, "members": members, "note": hyp.note}
     if hyp.status != "confirmatory":
         return out
@@ -620,6 +743,8 @@ def evaluate_family(tables: Tables, hyp: Hypothesis, alpha: float | None = None,
                 if rejected[i] and cond is not None:
                     m["why"] = f"rejected, but the cost condition fails: {cond.get('reason') or cond['rule']}"
         open_gate = all(members[i]["rejected"] for i in ids)
+    for m in members.values():
+        m["caveats"] = caveats(m)
     out["supported"] = [i for i, m in members.items() if m.get("label") == "supported"]
     return out
 

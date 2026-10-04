@@ -10,6 +10,7 @@ import anyio
 import pytest
 from inspect_ai import eval as inspect_eval
 from inspect_ai.model import ChatMessageTool, get_model
+from inspect_ai.tool import ToolCall
 
 from ape.agent.multi import core
 from ape.apg.author import author_world
@@ -47,6 +48,8 @@ def _run(env, family, level, arm, model, **kw):
     assert log.status == "success", log.error
     s = log.samples[0]
     assert s.error is None, s.error
+    if arm == "S1":
+        return s
     for key in REQUIRED:
         assert key in s.store, key
     acc = s.store["mas_accounting"]
@@ -162,22 +165,71 @@ def test_a_worker_calling_tools_it_lacks_gets_tool_errors_and_recovers(env):
     assert s.store[ANSWER] is not None and s.scores["task_success"].value == "C"
 
 
-def test_an_exception_inside_a_worker_is_a_failed_result_not_a_failed_sample(env, monkeypatch):
+class OnceBroken(GoldMulti):
+    """One transient provider error: the first call `when(tool names)` selects raises once (BUILD_REVIEW r06)."""
+
+    def __init__(self, worlds, when, exc: type[Exception] = RuntimeError):
+        super().__init__(worlds)
+        self.when, self.exc, self.fired = when, exc, False
+
+    def __call__(self, messages, tools, tool_choice, config):
+        if not self.fired and self.when({t.name for t in tools}):
+            self.fired = True
+            raise self.exc("Error code: 500 - upstream connect error (simulated)")
+        return super().__call__(messages, tools, tool_choice, config)
+
+
+def _member(names):
+    return "lookup_supplier" in names and not names & {"delegate", "report", "plan"}
+
+
+ERROR_CASES = [
+    ("S1", "F7", "10", lambda n: True),
+    ("M1", "F7", "10", lambda n: "report" in n),  # a worker's call
+    ("M7", "F2", "2", _member),  # a council member's call
+    ("S8k3", "F2", "2", lambda n: True),  # an ensemble attempt's call
+]
+
+
+@pytest.mark.parametrize("arm,family,level,when", ERROR_CASES, ids=[c[0] for c in ERROR_CASES])
+def test_a_provider_error_inside_any_agent_is_retried_and_scored_like_s1(env, arm, family, level, when):
+    """BUILD_REVIEW A-2: a provider error in a worker, a council member or an ensemble attempt ends the sample as it does
+    S1's, so Inspect's retry_on_error re-runs it, instead of a scored failure or a lost vote the harness never sees."""
+    s = _run(env, family, level, arm, OnceBroken(env / "worlds", when), retry_on_error=2)
+    assert len(s.error_retries) == 1 and "upstream connect error" in s.error_retries[0].message
+    assert s.scores["task_success"].value == "C"
+    if arm != "S1":
+        assert not any(a["error"] for a in s.store["mas_agents"]), "the attempt that was scored ran clean"
+    if arm == "S8k3":
+        assert all(v is not None for v in s.store["mas_ensemble"]["votes"]), "no vote lost"
+
+
+@pytest.mark.parametrize("exc", [RuntimeError, TimeoutError])
+def test_an_unretried_worker_error_is_a_harness_error_with_records(env, monkeypatch, exc):
+    """Without retries the sample errors (a counted harness error), with its records. A TimeoutError, which
+    execute_tools would turn into a tool error the orchestrator works around, is held by delegate and re-raised too;
+    Inspect then treats it as it treats one from S1's own call (a warning, the state scored, no retry)."""
     orig = core.Delivery.compile
 
     async def flaky(self, agent, query, turn, source="push"):
-        if agent.role == "worker" and agent.id == "w1.2":
-            raise RuntimeError("kg exploded")
+        if agent.id == "w1.2":
+            raise exc("kg exploded")
         return await orig(self, agent, query, turn, source)
 
     monkeypatch.setattr(core.Delivery, "compile", flaky)
-    s = _run(env, "F1", "8", "M1", GoldMulti(env / "worlds"))
+    gold = GoldMulti(env / "worlds")
+    log = inspect_eval(main_study(family="F1", level="8", split="dev", arm="M1"), model=get_model(M, custom_outputs=gold, memoize=False),
+                       log_dir=str(env / "logs"), display="none", limit=1, fail_on_error=False)[0]
+    s = log.samples[0]
+    if exc is TimeoutError:
+        assert s.error is None and s.scores["task_success"].value == "I"
+    else:
+        assert s.error is not None and "kg exploded" in s.error.message
+    orch = next(a for a in s.store["mas_agents"] if a["role"] == "orchestrator")
+    assert orch["tool_calls"] == ["plan", "delegate"] and orch["stop"] == "interrupted", "the orchestrator never worked around it"
     bad = next(a for a in s.store["mas_agents"] if a["id"] == "w1.2")
-    assert bad["status"] == "error" and "kg exploded" in bad["error"]
-    result = next(m.text for m in s.messages if isinstance(m, ChatMessageTool) and m.function == "delegate")
-    assert "Subtask 2 (worker 2): [no result: the worker failed with an error]" in result
-    assert s.scores["task_success"].value == "I" and s.scores["error_analysis"].metadata["error"] == "missing_items"
-    assert sum(1 for a in _agents(s, "worker") if a["status"] == "reported") == 7
+    assert bad["stop"] == "error" and "kg exploded" in bad["error"]
+    assert s.store["mas_rounds"] and s.store.get(ANSWER) is None
 
 
 class HangingWorker(GoldMulti):
@@ -255,24 +307,58 @@ def test_a_council_without_proposals_ends_unanswered_without_crashing(env):
     assert chair_prompt.count("no proposal") == 3
 
 
-class OneBrokenAttempt(GoldMulti):
-    """The first S8k3 attempt to start fails with an exception from the model; the others work."""
-
-    def __init__(self, worlds):
-        super().__init__(worlds)
-        self.first = True
+class DoubleProposal(GoldMulti):
+    """Council members propose twice in one turn (two parallel calls of the proposal tool): a wrong answer first."""
 
     def __call__(self, messages, tools, tool_choice, config):
-        if self.first and len(messages) == 2:
-            self.first = False
-            raise RuntimeError("provider exploded")
-        return super().__call__(messages, tools, tool_choice, config)
+        o = super().__call__(messages, tools, tool_choice, config)
+        calls = o.message.tool_calls or []
+        if len(calls) == 1 and "rationale" in calls[0].arguments:
+            wrong = ToolCall(id=calls[0].id + "x", function=calls[0].function, arguments={**calls[0].arguments, "final_supplier": "SUP-00000", "chain": ["SUP-00000"]})
+            o.message.tool_calls = [wrong, calls[0]]
+        return o
 
 
-def test_an_ensemble_attempt_that_fails_leaves_the_others_to_vote(env):
-    s = _run(env, "F7", "10", "S8k3", OneBrokenAttempt(env / "worlds"))
-    attempts = _agents(s, "attempt")
-    assert sum(a["stop"] == "error" for a in attempts) == 1 and "provider exploded" in next(a["error"] for a in attempts if a["error"])
-    ens = s.store["mas_ensemble"]
-    assert sum(v is not None for v in ens["votes"]) == 2 and ens["aggregation"] == "majority"
-    assert s.scores["task_success"].value == "C"
+def test_two_proposals_in_one_turn_record_the_first_and_say_so_to_the_second(env):
+    """BUILD_REVIEW A-8: both used to be told "Proposal recorded." while only the first counted."""
+    s = _run(env, "F2", "2", "M7", DoubleProposal(env / "worlds"))
+    for phase in s.store["mas_council"]["phases"]:
+        assert all(p["answer"]["final"] == "SUP-00000" for p in phase), "the first proposal of the turn is the member's"
+    chair = next(a for a in s.store["mas_agents"] if a["role"] == "chair")
+    assert chair["tool_calls"] == ["submit_chain"]
+
+
+def test_the_proposal_slot_is_taken_before_the_parse_awaits():
+    """The race itself (BUILD_REVIEW r11): two concurrent calls; one records, the other is told it was ignored."""
+    import anyio
+    from inspect_ai.tool import ToolDef, ToolParam, ToolParams
+    from inspect_ai.util import store
+
+    from ape.agent.multi import prompts as P
+    from ape.agent.multi.primitives import proposal_tool
+
+    async def submit_chain(final_supplier: str, chain: list[str]) -> str:
+        await anyio.sleep(0.01)
+        store().set(ANSWER, {"final": final_supplier, "chain": chain})
+        return "ok"
+
+    answer = ToolDef(submit_chain, name="submit_chain", description="Submit.", parameters=ToolParams(
+        properties={"final_supplier": ToolParam(type="string"), "chain": ToolParam(type="array", items=ToolParam(type="string"))}, required=["final_supplier", "chain"]))
+    sink: list = []
+    prop = proposal_tool(None, answer, sink)
+    assert prop.parallel is False
+    results = {}
+
+    async def main():
+        async def call(name, final):
+            results[name] = await prop.tool(final_supplier=final, chain=[final], rationale=name)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(call, "first", "SUP-00000")
+            tg.start_soon(call, "second", "SUP-55741")
+
+    anyio.run(main)
+    assert sorted(results.values()) == sorted(["Proposal recorded.", P.PROPOSAL_AGAIN])
+    (recorded,) = sink
+    winner = next(k for k, v in results.items() if v == "Proposal recorded.")
+    assert recorded["rationale"] == winner
