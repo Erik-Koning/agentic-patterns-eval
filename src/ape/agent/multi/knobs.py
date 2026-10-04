@@ -2,13 +2,17 @@
 
 | Knob | Arms | What | Values (default) |
 |---|---|---|---|
-| `APE_MAS_<ARM>_PROMPT` | S9, M1, M1K, M2, M7 | the role notes | a variant in `prompts.VARIANTS` (`default`: B2's notes) |
-| `APE_MAS_<ARM>_CLIP` | M1, M1K, M2, M7 | tokens of a worker's result or a member's rationale as another agent reads it | 100-8,000 (2,000) |
+| `APE_MAS_<ARM>_PROMPT` | S9, M1 (read by M1s, M1k, M2), M7 | the role notes | a variant in `prompts.VARIANTS` (`default`: B2's notes) |
+| `APE_MAS_<ARM>_CLIP` | M1 (read by M1s, M1k, M2), M7 | tokens of a worker's result or a member's rationale as another agent reads it | 100-8,000 (2,000) |
 
-**Each arm has its own knobs**, so one arm's tuning candidates never move another arm, and the study runner runs each
-tuned arm under exactly its own selection's knobs (`run_study.env_group`, D-042). **M1s reads M1's knobs** (the runner
-runs it under M1's selection): M1 and M1s differ in CONC only and must give the model identical inputs, so M1's
-selection is M1s's too. S8k3 has none: its attempts are S1's, and its aggregator note stays fixed. The structural parameters (3 workers,
+**Each tuned arm has its own knobs**, so one arm's tuning candidates never move another arm, and the study runner runs
+each tuned arm under exactly its own selection's knobs (`run_study.env_group`, D-042). **The orchestrator chain shares
+M1's knobs** (BUILD_REVIEW A-1): M1s, M1k and M2 read `APE_MAS_M1_*` and run under M1's selection. Each step of the
+chain is pre-registered as one switch (M1s -> M1: CONC; M1 -> M1k: DEL; M1k -> M2: SPEC), so the four must run one
+protocol variant: with their own variants, M1 -> M1k and M1k -> M2 could also differ in 2-7 lines of role text, and
+the tune cannot tell variants apart. M2's notes still differ from M1k's by the specialization text only (the roster
+and the specialty sentence, which no variant changes). There are no `APE_MAS_M1K_*` or `APE_MAS_M2_*` knobs: setting
+one raises. S8k3 has none: its attempts are S1's, and its aggregator note stays fixed. The structural parameters (3 workers,
 2 critique rounds, council k = 3; brief §4.2) are fixed a priori and are not knobs.
 
 Every `APE_MAS_*` variable is checked whenever a multi-agent solver is built: a misspelt name or an unknown value raises
@@ -25,9 +29,9 @@ from . import prompts as P
 from .core import TEXT_MAX_TOKENS
 
 PREFIX = "APE_MAS_"
-KNOB_ARM = {"S9": "S9", "M1": "M1", "M1s": "M1", "M1k": "M1K", "M2": "M2", "M7": "M7"}  # arm -> its knobs' name part
+KNOB_ARM = {"S9": "S9", "M1": "M1", "M1s": "M1", "M1k": "M1", "M2": "M1", "M7": "M7"}  # arm -> its knobs' name part
 NO_KNOBS = ("S8k3",)
-CLIP_ARMS = ("M1", "M1K", "M2", "M7")  # where one agent reads another's text
+CLIP_ARMS = ("M1", "M7")  # where one agent reads another's text (M1's clip is the whole orchestrator chain's)
 CLIP_RANGE = (100, 8000)
 KNOBS = {f"{PREFIX}{a}_PROMPT": (a, "prompt") for a in dict.fromkeys(KNOB_ARM.values())} | {f"{PREFIX}{a}_CLIP": (a, "clip") for a in CLIP_ARMS}
 
