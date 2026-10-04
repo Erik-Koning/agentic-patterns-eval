@@ -198,7 +198,7 @@ STEPS: dict[str, tuple[tuple[str, ...], str]] = {
 # Who requires which checks. The gate's live preflight requires GATE_CHECKS (checks.json `required`); a study's
 # (`ape.run_study`, `Study.smoke_checks`) requires them plus its own, which must equal STUDY_CHECKS here.
 STUDY_CHECKS = {"main": ("mas_orchestrator", "mas_council", "mas_ensemble", "mas_kg_workers"), "study_g": ("g_cm_sum", "g_cm_todo", "g_team_session")}
-ADDON_CHECKS = tuple(ADDON_CELLS)  # in no `required` list until the add-on study's runner requires them
+ADDON_CHECKS = tuple(ADDON_CELLS)  # required by the add-on study's runner (`ape.run_study.STUDIES["m5"].smoke_checks`), by no other
 GATE_CHECKS = tuple(s for s in STEPS if s not in ADDON_CHECKS and not any(s in checks for checks in STUDY_CHECKS.values()))
 CHECK_GROUPS = {"gate": GATE_CHECKS, **STUDY_CHECKS, "addon": ADDON_CHECKS}  # names --only / --skip also accept
 # The checks that run on the shared F7-100 / F3 worlds (built once, up front); the others build their own.

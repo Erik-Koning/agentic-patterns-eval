@@ -1458,7 +1458,12 @@ def _snapshot(d: Path) -> dict:
 
 def test_m5_is_off_by_default_and_priced_when_enabled(tmp_path):
     """The M5 add-on study's cells are all disabled in the plan, so the program's totals are unchanged; enabled they
-    cost about $110 conservative (M5 = M1 x 1.2, M5-spec = M2 x 1.2, plus fresh M1 and M2 controls)."""
+    cost about $123 conservative (M5 = M1 x 1.5, M5-spec = M2 x 1.5, plus fresh M1 and M2 controls)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("readiness_smoke_m5", ROOT / "readiness" / "smoke.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
     from ape.budget import estimate, load_plan, projected_cost
 
     plan = load_plan()
@@ -1466,9 +1471,10 @@ def test_m5_is_off_by_default_and_priced_when_enabled(tmp_path):
     assert {c.id for c in m5} == {"m5.pilot.a", "m5.pilot.b", "m5.test.a", "m5.test.b"} and not any(c.enabled for c in m5)
     assert projected_cost(study="m5") == 0 and plan.budget["allocations"]["m5"] == 150
     est = estimate(load_plan(_m5_config(tmp_path) / "run_plan.yaml"), measured=[])
-    assert 100 < est.total(study="m5") < 115 and est.total(study="m5", arm="M5") > est.total(study="m5", arm="M1"), "M5 is 1.2 x M1"
+    assert 115 < est.total(study="m5") < 130 and est.total(cell="m5.test.a", arm="M5") == pytest.approx(1.5 * est.total(cell="m5.test.a", arm="M1"), rel=0.02), "M5 is 1.5 x M1"
     assert est.total(study="m5") < plan.budget["allocations"]["m5"]
-    assert STUDIES["m5"].depends_on == "main" and STUDIES["m5"].phases == ("preflight", "pilot", "freeze", "test", "analyze") and "mas_ledger" in STUDIES["m5"].smoke_checks
+    assert STUDIES["m5"].depends_on == "main" and STUDIES["m5"].phases == ("preflight", "pilot", "freeze", "test", "analyze")
+    assert set(smoke.ADDON_CHECKS) <= set(STUDIES["m5"].smoke_checks), "a live m5 run requires the ledger's smoke check (and its controls')"
 
 
 def test_the_m5_offline_rehearsal_inherits_the_frozen_main_run_and_never_writes_into_it(offline, tmp_path):

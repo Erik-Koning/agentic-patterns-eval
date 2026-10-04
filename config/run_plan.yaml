@@ -27,7 +27,7 @@ budget:
   # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells. R-B4
   # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,126.8 + the D-039 pilot re-runs the
   # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225). m5: the M5 add-on study (off by default; its
-  # enabled cells project ~$110 conservative).
+  # enabled cells project ~$123 conservative, the ledger arms at 1.5 x their team).
   allocations: {gate: 300, main: 1225, study_g: 3600, m5: 150}
   contingency_usd: 1000
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
