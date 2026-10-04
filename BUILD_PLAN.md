@@ -101,18 +101,33 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | Seam | ✅ 4fbb68b, a85799f | `main_study` covers F1/F2/F3/F7; `agent/solvers.arm_solver` dispatch point; S5 = the gate's KG arm (`APE_KG_ARM`); `ape.build` takes seed_base and F8 knobs |
 | B1 + B6 | ✅ merged dffa9b3; integration merged 61e4215 (877 passed) | D-036, D-045 |
 | B2 | ✅ merged cb3516d | D-034 (M2 dropped on F1) |
-| B4 | ✅ statistics core merged cc9dcb5; run-dir glue after B1 | D-029, D-031; power gaps P-1 |
+| B4 | ✅ statistics core cc9dcb5, `analyze_main` f6eeac6 | D-029, D-031, D-033, D-048 |
 | B7 | ✅ merged efe6158 | D-030 |
 | B8 | ✅ merged b45f316 | D-037; overheads priced (D-035) |
-| B10 | ✅ statistics core merged f413dd2; run-dir glue after B1 | D-029, D-032; power gaps P-2 |
+| B10 | ✅ statistics core f413dd2, `analyze_g` 311c256 | D-029, D-032, D-033, D-038, D-049 |
 | B3 | ✅ merged d2f12ab | D-041 |
 | B9 | ✅ merged 83172ed | D-040 (incl. a B7 checkpoint fix) |
 | Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
 | B5 | ✅ merged 2d29cb4 | D-044 |
 | B11 | ✅ PREREGISTRATION_G.md d04e2d4; tuning grid + probe extension merged | D-042, D-043 |
-| B12 | ✅ part 1 merged (smoke checks, cache nonce, runaway guard; D-046); ✅ independent review of a576a2c (BUILD_REVIEW.md: 4 A, 12 B); 🔄 fix round (5 packages, D-047) | full suite 944 passed |
+| B12 | ✅ smoke checks, cache nonce, runaway guard (D-046); ✅ independent review of a576a2c (BUILD_REVIEW.md: 4 A, 12 B); ✅ fix round merged (D-047–D-050) | full suite 987 passed, 2 skipped (b41a518) |
 
-**Follow-ups found during the build** (must be done before any paid run):
+### Runnable? (§1's eight criteria, 2026-10-04)
+
+| # | Criterion | Main study | Study G |
+|---|---|---|---|
+| 1 | Arms (gold mock 100%, misbehaving mock survives) | ✅ S1, S3s, S5, S7, S9, M1, M1s, M1k, M2, M7, S8k3 | ✅ CM0/S1, O-state, CM-prune, CM-trim, CM-sum, CM-todo, CM-reset, CM-native, S-CM*, M1, M2 |
+| 2 | Runner (one command, resumable, budget-guarded, own seeds and test lock) | ✅ `run_study --study main`; offline rehearsal runs every arm | ✅ `run_study --study study_g` |
+| 3 | Tuning (declared grid, equal budgets, sign-off before a live tune) | ✅ grid; ⏳ owners and sign-off (M-arm author, skeptic) | ✅ grid; ⏳ owners and sign-off (CM-arm owner, skeptic) |
+| 4 | Analysis (every pre-registered test; type I and power simulated through the real path) | ✅ (D-031, D-048) | ✅ (D-032, D-049) |
+| 5 | Pre-registration (placeholders; frozen and hashed with the code) | ✅ drafted; ⏳ `[USER]` names; `[PILOT]` items filled by the pilot | ✅ drafted; ⏳ `[USER]` names and the micro-pilot go-ahead |
+| 6 | Smoke (live checks for the new arm types; runner refuses without them) | ✅ built (4 checks); ⏳ live run needs a valid key | ✅ built (3 checks); ⏳ live run needs a valid key and the Sol/Astra probe |
+| 7 | Budget (fits the allocation and $5,000) | ✅ $1,127 of $1,225 | ✅ $3,490 of $3,600; program $4,836 conservative / $3,249 expected |
+| 8 | Review (no open A or B findings) | ✅ BUILD_REVIEW.md | ✅ BUILD_REVIEW.md |
+
+**What remains is user input and live runs:** a valid OpenAI key (O-1), `APE_BACKUP_DIR`, role names and sign-offs in the three tuning grids and the pre-registrations, the H5 spot-check, the gate's live run (its verdict picks the main study's KG arm and S3s selection), the probe (`--study study_g`, which writes the CM-native support records) and the live smoke.
+
+**Follow-ups found during the build** (all done):
 ✅ - **For B12:** a per-run cache nonce (brief §6.2: provider prefix caches must not carry across runs or arms sharing a monolith prefix) and a runaway wall-clock guard (brief §4.5); the runner writing the `cap multiple` and `pilot σ and power` pre-registration items.
 ✅ - **Pilot cap-hit gate (D-039):** M7 may outgrow the 8 × B0 token cap; the main runner doubles the cap multiple for all arms when any arm's pilot cap-hit rate exceeds 10% (with the B1 integration).
 ✅ - **Freeze scope:** the gate's freeze hashes all of `run_plan.yaml`, `models.yaml` and `model_costs.yaml`, so once the gate freezes, any later main/G plan edit would break it. Being changed to per-study resolved slices (with the B1 integration).

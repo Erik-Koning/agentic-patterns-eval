@@ -37,4 +37,14 @@ Three reviewers who wrote none of the code, each in its own read-only copy, each
 
 ## Status
 
-Fix round dispatched 2026-10-03 (packages F-runner, F-arms, F-session, F-stats-main, F-stats-g). This section is updated when they merge.
+**Fixed and merged (2026-10-04).** Every A- and B-level finding is fixed with a regression test, and the C-level findings too, except where noted. Full suite on the merged tree: see BUILD_PLAN §6.
+
+| Package | Findings | Outcome | Decisions |
+|---|---|---|---|
+| F-runner | R-A1, R-A2, R-B1–B5, S-5, R-C1, C2, C4–C6 | Gate resolution copied and frozen; analyze refuses post-freeze changes without a recorded deviation (gate too); smoke currency per paid phase; code identity in pre-freeze phases; budget not frozen; whole-world pricing; pilot gate on Clopper–Pearson lower bounds pooled per arm; Study G session health and a topology pilot cell | D-050 |
+| F-arms | A-1, A-2, A-8 | S9, M1s, M1k and M2 run M1's prompt variant (one variant along the single-switch chain); provider errors inside multi-agent arms propagate and retry; M7 proposal race fixed | D-047 |
+| F-session | A-3, A-5, A-6, A-7, A-9/R-C3 | Todo instruction matches the loop; limit-tripping calls recorded; time/working-limited sessions drop their checkpoint; no-op prunes not counted; CM-native compaction usage reaches the ledger; CM-native calibration on the next case | — |
+| F-stats-main | S-1, S-2, S-3, S-6, S-7, S-8, S-10, S-11 (+ A-4) | Cap hits fail and cast no vote; frontier contrasts carry the matched cost's uncertainty (M2.frontier back to 0.019–0.029); symmetric-worlds condition stated with per-world influence and a W1 caveat; pooled claims worded as equal-weight averages with per-cell estimates. M3 keeps a documented residual (≤ 0.059 at one boundary) from two near-ceiling cells | D-048 |
+| F-stats-g | S-4, S-9, S-12 (+ A-4) | Calibrated t level 0.013 keeps every confirmatory row ≤ 0.025 across 72 scenarios; minimum sessions per planned point; the item in progress at a limit fails; report sections isolated | D-049 |
+
+**Left as documented limits:** CM-trim may leave a reasoning-only item the Responses API could reject (CM-trim is in no plan cell); a limit tripped by a provider compaction cannot be recorded per call (Inspect's own usage still counts it); realised cost excludes errored attempts' usage (the ledger has it per arm and the report shows the share); the budget guard checks before each eval set, not inside one.
