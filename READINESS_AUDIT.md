@@ -13,7 +13,7 @@
 **Offline state:**
 - 987 tests pass (2 skipped). Two opt-in tests also pass when enabled with `APE_TEST_BGE=1`; they use the real bge model.
 - `run_gate all --offline` runs all nine phases; `run_study all --offline` runs every phase and every arm of the main study (about 2 minutes) and of Study G (about 1 minute); `readiness/smoke.py --dry` passes, including the seven new arm-family checks.
-- The cost model prints **$4,836 conservative / $3,249 expected** (gate $220, main $1,127, Study G $3,490; contingency $164).
+- The cost model prints **$2,996 conservative / $2,047 expected** (gate $220, main $827, Study G $1,950; contingency $2,004) after D-051 (Astra topology off by default) and D-052 (one epoch at Sol/Astra in Study G; Study F Sol at 60 tasks).
 - **Nothing has run live.**
 
 ## 1. Bottom line
@@ -28,7 +28,7 @@
 1. **PC1 (the LightRAG anchor).**
    - A faithful setup passes about 40% of the time with gpt-4o-mini, after the D-025 fidelity work (it was 10–15%). The remaining gap comes from LightRAG 1.5.7 vs 1.2.5.
    - If PC1 fails: diagnose it (judge parse rates are now recorded), then either accept it with a written diagnosis, which puts a caveat in the report, or stop.
-2. **Budget headroom:** $164, or 3.3%. The live smoke re-projects the program from its real calls; each study's guard stops a phase whose projection exceeds what is left of the program or its allocation (gate $300, main $1,225, Study G $3,600).
+2. **Budget headroom:** $2,004, or 40%. The live smoke re-projects the program from its real calls; each study's guard stops a phase whose projection exceeds what is left of the program or its allocation (gate $300, main $1,225, Study G $3,600).
 3. **Power:**
    - P(unqualified GO) at no true difference is 0.84 at 16 worlds per cell, 0.885 with the extension.
    - At 12 worlds it is only 0.68. That is the D-017 Sol-builder path, which costs +$1,074 and needs approval.
@@ -95,7 +95,7 @@ uv run --locked python -m ape.run_gate all --run-id gate-1        # build-dev, t
 **Built and reviewed** (BUILD_PLAN B7–B11, B12; D-030–D-050):
 - **Arms:** CM0 (= S1), O-state, CM-prune, CM-trim, CM-sum, CM-todo, CM-reset, CM-native (gated by the probe's support record), S-CM* (a tuned stack), and M1/M2 as an orchestrator with isolated workers; one ContextPolicy layer with management calls metered as `cm`, the window enforced on every input, probes never appended, and mid-session checkpoint/resume.
 - **Runner:** `python -m ape.run_study <phase|all> --study study_g --run-id <id>`, with its own seeds and test lock, a micro-pilot that also pilots the topology arms and gates session errors, limits and overflow (D-050), and the safeguards of §4.
-- **Analysis and pre-registration:** session-clustered t at a calibrated level (0.013) with a minimum number of sessions per planned point (D-049); `PREREGISTRATION_G.md` with its generated tables. Confirmatory: G-H2a (power 0.94), G-H3 (G-H3a 0.83–0.99; G-H3b 0.56); G-H1 and G-H2b are estimates with intervals (D-033), with tier order as a sensitivity (D-043).
+- **Analysis and pre-registration:** session-clustered t at a calibrated level (0.013) with a minimum number of sessions per planned point (D-049); `PREREGISTRATION_G.md` with its generated tables. Confirmatory: G-H2a (power 0.99), G-H3 (G-H3a 0.79–0.98; G-H3b 0.58); G-H1 and G-H2b are estimates with intervals (D-033), with tier order as a sensitivity (D-043).
 
 **Before a live run:** the probe with `--study study_g` (honoured parameters and API mode per model; the CM-native support records for Luna and Sol); the live smoke (Study G checks); names and sign-offs (CM-arm owner, skeptic, analyst, independent prompt author; `config/tuning_grid_study_g.yaml`); your review of the micro-pilot and go-ahead at the planned sizes.
 
@@ -106,9 +106,9 @@ uv run --locked python -m ape.run_gate all --run-id gate-1        # build-dev, t
 | 1 | Key (O-1) and backup destination | A dedicated project key with about a $300 limit now, raised per study. `APE_BACKUP_DIR` on an external or synced disk. |
 | 2 | Names and sign-offs | Gate: APG owner and the skeptic (O-3). Main: the M-arm prompt author (not the skeptic), the skeptic (signs off S1) and the analyst. Study G: the CM-arm owner, the skeptic (owns S-CM*), the analyst and an independent prompt author. They go in the three tuning grids and the pre-registrations' `[USER]` items. |
 | 3 | H5 spot-check | A human reviews part A of `readiness/spotcheck.md` (30–45 min) before the pilot. |
-| 4 | Contingency at 3.3% against the brief's 20% | Accept with staged spending; recalibrate after the gate pilot and each micro-pilot (`ape.budget calibrate`), which will likely lower Study G (its priors look conservative). |
+| 4 | Contingency | $2,004 (40%) after D-051/D-052, above the brief's 20%. Recalibrate after the gate pilot and each micro-pilot (`ape.budget calibrate`); Study G's priors look conservative. |
 | 5 | Study G sizing at the micro-pilot review | G-H3b has power 0.56; 24 Luna topology sessions per point would give about 0.67 for about +$51. Decide with the micro-pilot's numbers. |
-| 6 | D-017 Sol builder (+$1,074) | Only if Luna fails the build-quality check; it would not fit the budget without cuts, so try revising the authoring prompt on dev first. |
+| 6 | D-017 Sol builder (+$1,074) | Only if Luna fails the build-quality check; it now fits within the contingency, but try revising the authoring prompt on dev first. |
 | 7 | If PC1 fails | Diagnose first. Accept only with a written diagnosis (the report carries a caveat); a high judge parse-failure rate makes PC1 "not evaluable", which can't be accepted. |
 
 Decided during the build (DECISIONS D-028–D-050): the power trade-offs (D-033), M2 off F1 (D-034), the Study G design questions (D-043), M3's residual (D-048), and the review's fixes (D-047, D-049, D-050).

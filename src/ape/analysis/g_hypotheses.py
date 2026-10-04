@@ -72,7 +72,8 @@ T_LEVEL = 0.013
 # S-4's minimum usable sessions per planned point: max(MIN_SESSIONS_FLOOR, ⌈MIN_SESSIONS_SHARE × planned⌉), never more
 # than planned; a planned point below it is missing and its family INCOMPLETE. The smallest the simulation validated at
 # T_LEVEL: topology Luna 10 of 16 and Sol 5 of 8 (all three points at their minimum at once: worst 0.023; Sol at 4
-# reaches 0.027 with arm-specific variance), CM Luna 6 of 10, Sol 4 of 6 and Astra 3 of 4 (worst 0.019).
+# reaches 0.027 with arm-specific variance), CM Luna 6 of 10, Sol 4 of 6 and Astra 3 of 4 (worst 0.019). With D-052's
+# one-epoch designs the minima are topology Sol 8 of 12, CM Sol 5 of 8 and Astra 4 of 6 (the same max(3, ceil(0.6 x planned)) rule).
 MIN_SESSIONS_SHARE = 0.6
 MIN_SESSIONS_FLOOR = 3
 
@@ -168,12 +169,12 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "pp",
         "G-H2-gap",
         "confirmatory",
-        notes="Decided over the plan's points: a planned point without paired sessions, or below its minimum (Luna 6 of 10, Sol 4 "
-        "of 6, Astra 3 of 4; S-4), makes it INCOMPLETE, never SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below "
-        "1/16 = 0.0625, so the decision rests on the t-test there (D-032). Each point's t at the calibrated 0.013 (S-4). g_power: "
+        notes="Decided over the plan's points: a planned point without paired sessions, or below its minimum (Luna 6 of 10, Sol 5 "
+        "of 8, Astra 4 of 6; S-4, D-052), makes it INCOMPLETE, never SUPPORTED. Astra has 6 sessions (D-052): an exact sign-flip cannot go below "
+        "1/64 ≈ 0.016, so the decision rests on the t-test there (D-032). Each point's t at the calibrated 0.013 (S-4). g_power: "
         "type I 0.012–0.013 per point (20,000 studies; at most 0.023 under the review's stress scenarios, which reached 0.037 at "
-        "a nominal 0.025); power 0.94 by t at the ~+25–30 pp gaps CM0's overflow implies, limited by Astra's 4 sessions (0.996 "
-        "with 6; 0.86 with σ_arm 0.6). At a nominal 0.025 it was 0.99.",
+        "a nominal 0.025); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies with D-052's one-epoch design (Sol 8 x 1, Astra 6 x 1; "
+        "0.97 with epoch noise 2.5x the prior; 0.94 with the earlier Sol 6 x 2, Astra 4 x 2).",
     ),
     GHypothesis(
         "G-H2b",
@@ -237,7 +238,7 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "confirmatory",
         step=1,
         notes="Pools the plan's points; a planned point without ≥ 2 sessions of all four arms, or below its minimum (Luna 10 of "
-        "16, Sol 5 of 8; S-4), makes G-H3-pre, G-H3a and G-H3b INCOMPLETE, never SUPPORTED. Every G-H3 t at the calibrated "
+        "16, Sol 8 of 12; S-4, D-052), makes G-H3-pre, G-H3a and G-H3b INCOMPLETE, never SUPPORTED. Every G-H3 t at the calibrated "
         "0.013 (S-4). g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp); type I at most 0.013 under the review's stress "
         "scenarios (16,000 studies each).",
     ),
@@ -255,7 +256,7 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "G-H3",
         "confirmatory",
         step=2,
-        notes="g_power (D-033 design; t at the calibrated 0.013, S-4): type I 0.012 at a share of 0.5 (20,000 studies; under the review's stress scenarios at most 0.021 at the planned sizes and 0.024 at the minimum sessions, against 0.026–0.037 at a nominal 0.025); power 0.99 at 0.75 and at 0.80, 0.83 at 0.70, 0.55 at 0.65 (0.90 / 0.58 at 0.80 / 0.70 with σ_arm 0.6). Before D-033: 0.73 at 0.75. At a nominal 0.025 it was 0.997 / 0.90 / 0.66 at 0.75 / 0.70 / 0.65.",
+        notes="g_power (D-033 design; t at the calibrated 0.013, S-4): type I 0.012 at a share of 0.5 (20,000 studies; under the review's stress scenarios at most 0.021 at the planned sizes and 0.024 at the minimum sessions, against 0.026–0.037 at a nominal 0.025); power 0.99 at 0.75 and at 0.80, 0.83 at 0.70, 0.55 at 0.65 (0.90 / 0.58 at 0.80 / 0.70 with σ_arm 0.6); D-052's Sol 12 x 1 (was 8 x 2): 0.98 at 0.80, 0.79 at 0.70 (800 studies). Before D-033: 0.73 at 0.75. At a nominal 0.025 it was 0.997 / 0.90 / 0.66 at 0.75 / 0.70 / 0.65.",
     ),
     GHypothesis(
         "G-H3b",
@@ -272,7 +273,7 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         "G-H3",
         "confirmatory",
         step=3,
-        notes="Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7), each t at the calibrated 0.013 (S-4); a clause that cannot be computed (a missing cost) makes it NOT_TESTABLE. g_power (D-033 design): type I 0.014 (recovery at 0.8) and 0.015 (cost at 0.6) over 20,000 studies, 0.002 with both clauses at their margins (under the review's stress scenarios at most 0.021 and 0.024 at the planned sizes, against up to 0.037 and 0.040 at a nominal 0.025); power 0.56 at recovery 0.95 and cost ratio 0.45, 0.26 at 0.90 / 0.50, 0.07 at 0.85 / 0.55 (the cost clause alone ≥ 0.96 at ≤ 0.5). With 24 Luna sessions per point 0.67; with 12 Sol sessions 0.62; with σ_arm 0.6 0.35. Before D-033: 0.26. At a nominal 0.025 it was 0.69 / 0.37 / 0.11.",
+        notes="Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7), each t at the calibrated 0.013 (S-4); a clause that cannot be computed (a missing cost) makes it NOT_TESTABLE. g_power (D-033 design): type I 0.014 (recovery at 0.8) and 0.015 (cost at 0.6) over 20,000 studies, 0.002 with both clauses at their margins (under the review's stress scenarios at most 0.021 and 0.024 at the planned sizes, against up to 0.037 and 0.040 at a nominal 0.025); power 0.56 at recovery 0.95 and cost ratio 0.45 (0.58 with D-052's Sol 12 x 1, 800 studies), 0.26 at 0.90 / 0.50, 0.07 at 0.85 / 0.55 (the cost clause alone ≥ 0.96 at ≤ 0.5). With 24 Luna sessions per point 0.67; with σ_arm 0.6 0.35. Before D-033: 0.26. At a nominal 0.025 it was 0.69 / 0.37 / 0.11.",
     ),
     GHypothesis(
         "G-H3-spec",

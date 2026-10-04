@@ -144,9 +144,9 @@ studies:
            note: "Luna cells not already in Studies A/B (S1, M1 on F1-32 and all four on F7-1000 are reused); M2 dropped on F1 (D-034)"}
         - {id: main.F.luna-f7-100, arms: [S1, S5, M1, M2], cells: [F7-100], n_tasks: 100, epochs: 3,
            note: "D-028: Luna at the same KB size as main.F.sol, so the tier contrast (H6) is not confounded with KB size"}
-        - {id: main.F.sol, profile: main_sol, arms: [S1, S5, M1], cells: [F1-32, F7-100], n_tasks: 100, epochs: 3,
+        - {id: main.F.sol, profile: main_sol, arms: [S1, S5, M1], cells: [F1-32, F7-100], n_tasks: 60, epochs: 3,
            note: "tier replication on Sol (3 arms x 2 families x 3 epochs); F7-100 not F7-1000: KB scaling is K4's question (Luna), and the 83K monolith x Sol price dominated the budget"}
-        - {id: main.F.sol-m2, profile: main_sol, arms: [M2], cells: [F7-100], n_tasks: 100, epochs: 3,
+        - {id: main.F.sol-m2, profile: main_sol, arms: [M2], cells: [F7-100], n_tasks: 60, epochs: 3,
            note: "D-034: M2 on F7 only (specialization is undefined on F1: routing to segment specialists is blind)"}
 
   # ------------------------------------------------------------------------------------------------
@@ -177,19 +177,19 @@ studies:
         - {id: g.cm.luna-n10, kind: session, arms: [CM0, O-state], N: 10, sessions: 10, epochs: 3,
            note: "short-session control (audit §8), Luna only"}
         - {id: g.cm.sol-high, kind: session, profile: study_g_sol, arms: [CM0, CM-native, CM-sum, CM-todo, O-state],
-           N: 40, sessions: 6, epochs: 2,
+           N: 40, sessions: 8, epochs: 1,
            note: "D-043: CM-native replaces CM-prune at Sol (a second tier for native compaction). Needs the probe's confirmed
              Sol support record; if the probe says unsupported, put CM-prune back here before the freeze (a plan change, not a deviation)"}
         - {id: g.cm.sol-low, kind: session, profile: study_g_sol, effort: low, arms: [CM0, CM-sum, CM-todo, O-state],
            N: 40, sessions: 8, epochs: 2, enabled: false}
         - {id: g.cm.astra-high, kind: session, profile: study_g_astra, arms: [CM0, CM-sum, CM-todo, O-state],
-           N: 24, sessions: 4, epochs: 2, knobs: {output_tokens: 1750}}
+           N: 24, sessions: 6, epochs: 1, knobs: {output_tokens: 1750}}
       topology:
         - {id: g.topo.luna, kind: session, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 16, epochs: 2, knobs: {output_tokens: 2250},
            note: "D-033: 8 -> 16 sessions (G-H3a/G-H3b power)"}
         - {id: g.topo.luna-low, kind: session, effort: low, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 16, epochs: 2,
            knobs: {output_tokens: 2250}, note: "D-033: a fourth topology capability point (Luna-low), for G-H3 and the G-H1 estimate"}
-        - {id: g.topo.sol, kind: session, profile: study_g_sol, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2,
+        - {id: g.topo.sol, kind: session, profile: study_g_sol, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 12, epochs: 1,
            knobs: {output_tokens: 2250}}
         - {id: g.topo.astra, kind: session, enabled: false, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2,
            knobs: {output_tokens: 2250},
@@ -213,22 +213,24 @@ cuts:
       G-H2 TOST) rest on 4 points, with wider CIs and less power for slope differences.
   - id: C2
     applied: true
-    what: Study G Sol context-management sessions 8 -> 6
+    what: Study G Sol context-management epochs 2 -> 1 (8 sessions; D-052, was sessions 8 -> 6)
     set:
-      - {cell: g.cm.sol-high, field: sessions, from: 8, to: 6}
+      - {cell: g.cm.sol-high, field: epochs, from: 2, to: 1}
     quality: >-
-      Sol CM cells have 6 independent sessions x 2 epochs per arm (was 8 x 2). Session-clustered CIs for
-      Sol's Gap_T, R_x and degradation slopes widen by about sqrt(8/6) = 1.15x.
+      D-052: Sol CM cells run 8 sessions x 1 epoch per arm (uncut 8 x 2; the earlier version of this cut ran 6 x 2).
+      Sessions are the clusters, so one epoch with more sessions keeps Sol's G-H2a power at 1.00 for half the uncut
+      cost (g_power, robust to 2.5x the epoch-noise prior); whole-session pass^k is not available at Sol.
   - id: C3
     applied: true
-    what: Study G Astra context-management sessions 5 -> 4 and N 30 -> 24
+    what: Study G Astra context-management 6 sessions x 1 epoch and N 30 -> 24 (D-052, was 4 x 2)
     set:
-      - {cell: g.cm.astra-high, field: sessions, from: 5, to: 4}
+      - {cell: g.cm.astra-high, field: sessions, from: 5, to: 6}
+      - {cell: g.cm.astra-high, field: epochs, from: 2, to: 1}
       - {cell: g.cm.astra-high, field: N, from: 30, to: 24}
     quality: >-
-      Astra CM cells have 4 sessions x 2 epochs per arm: session-clustered CIs widen by about sqrt(5/4) = 1.12x,
-      and item-level estimates by up to ~1.25x with 20% fewer items per session. With 4 independent sessions per
-      arm, Astra-specific estimates are close to descriptive. Sessions of 24 items still cross W = 32K around mid-session, but
+      D-052: Astra CM cells run 6 sessions x 1 epoch per arm (was 4 x 2): more clusters raise G-H2a's Astra power
+      from 0.94 to 0.99 at 25% less cost than 4 x 2 (g_power, robust to 2.5x the epoch-noise prior); whole-session
+      pass^k is not available at Astra, and item-level estimates rest on 20% fewer items per session. Sessions of 24 items still cross W = 32K around mid-session, but
       Astra's degradation curve spans positions 1-24 (Luna/Sol 1-40) and loses the item-30 probe.
   - id: C4
     applied: false  # not needed once Study F Sol moved to F7-100 (review 2026-10-01): in-order minimum is C1-C3
@@ -239,7 +241,7 @@ cuts:
       Astra S1 vs M2 (G-H1 at the top tier, already 2 arms only) rests on 4 sessions x 2 epochs per arm;
       CIs widen by about 1.12x.
   - id: C5
-    applied: false  # superseded (review 2026-10-01): Sol replication moved to F7-100 at full n instead
+    applied: true  # D-052 (user): T1 is descriptive since D-033; Sol at 60 tasks (5 worlds) on F1-32 and F7-100
     what: Main-study Study F Sol tasks 100 -> 60
     set:
       - {cell: main.F.sol, field: n_tasks, from: 100, to: 60}

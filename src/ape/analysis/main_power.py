@@ -304,15 +304,21 @@ def simulate(spec: dict, n_tasks: dict, epochs: dict, sigmas: Sigmas, settings: 
     draw = Draw()
     seeds = WORLD_SEED + np.arange(settings.worlds)
     u_reg = rng.normal(0, sigmas.w, settings.worlds)  # registry KB per seed (F1/F2)
-    shared: dict = {}  # cell -> (u per task, v per task, task multiplier per task)
+    shared: dict = {}  # cell -> (world per task, u per task, v per task, task multiplier per task)
+    # A cell's tasks are drawn once, at the largest size any tier runs it; a tier that runs fewer tasks gets the first
+    # ones, i.e. whole worlds in seed order (D-052: Study F's Sol cells run the first 5 of Luna's 9 worlds).
+    n_cell: dict = {}
+    for (tier, cell) in spec:
+        n_cell[cell] = max(n_cell.get(cell, 0), n_tasks[(tier, cell)])
     for (tier, cell), arms in sorted(spec.items()):
-        n = n_tasks[(tier, cell)]
-        per_world = np.full(settings.worlds, n // settings.worlds) + (np.arange(settings.worlds) < n % settings.worlds)
-        wi = np.repeat(np.arange(settings.worlds), per_world)
         if cell not in shared:
+            N = n_cell[cell]
+            per_world = np.full(settings.worlds, N // settings.worlds) + (np.arange(settings.worlds) < N % settings.worlds)
+            wi = np.repeat(np.arange(settings.worlds), per_world)
             u = u_reg[wi] if cell.split("-")[0] in ("F1", "F2") else rng.normal(0, sigmas.w, settings.worlds)[wi]
-            shared[cell] = (wi, u, rng.normal(0, sigmas.u, n), rng.lognormal(-0.5 * math.log1p(settings.cost_cv_task**2), math.sqrt(math.log1p(settings.cost_cv_task**2)), n))
-        wi, u, v, tau = shared[cell]
+            shared[cell] = (wi, u, rng.normal(0, sigmas.u, N), rng.lognormal(-0.5 * math.log1p(settings.cost_cv_task**2), math.sqrt(math.log1p(settings.cost_cv_task**2)), N))
+        n = n_tasks[(tier, cell)]
+        wi, u, v, tau = (a[:n] for a in shared[cell])
         worlds = [_world_id(cell, int(seeds[w])) for w in wi]
         draw.index[(tier, cell)] = pd.MultiIndex.from_arrays([[cell] * n, worlds, [f"{w}-t{j:03d}" for j, w in enumerate(worlds)]], names=["cell", "world", "task"])
         s1_target = arms.get("S1")

@@ -19,7 +19,7 @@ def test_planned_sizes_are_the_runners_whole_worlds():
     assert s[("luna", "F1-32", "S1")] == {"n_tasks": 108, "worlds": 9, "epochs": 8, "plan_cell": "main.A.s1-pool"}
     assert s[("luna", "F1-32", "M1s")]["n_tasks"] == 60 and s[("luna", "F7-100", "S1")]["epochs"] == 3
     m2 = s[("sol", "F7-100", "M2")]
-    assert (m2["n_tasks"], m2["epochs"]) == (108, 3) and m2["plan_cell"].startswith("main.F.sol")
+    assert (m2["n_tasks"], m2["epochs"]) == (60, 3) and m2["plan_cell"].startswith("main.F.sol")  # D-052: Sol at 60 tasks (5 worlds)
     assert not any(v["plan_cell"].startswith("main.C.") for v in s.values()), "Study C is determinism only"
 
 

@@ -1,16 +1,16 @@
 # Program budget (FX-5)
 
-**Date:** 2026-10-04 (D-051). **Snapshot** of `uv run python -m ape.budget` with priors only (no calibration yet). The numbers come from `config/run_plan.yaml` (what runs) × `config/budget_assumptions.yaml` (per-call priors) × `config/model_costs.yaml` (prices). Decision: D-021.
+**Date:** 2026-10-04 (D-052). **Snapshot** of `uv run python -m ape.budget` with priors only (no calibration yet). The numbers come from `config/run_plan.yaml` (what runs) × `config/budget_assumptions.yaml` (per-call priors) × `config/model_costs.yaml` (prices). Decision: D-021.
 
 ## Totals for the right-sized plan (USD)
 
 | Study | Phases (conservative $) | Conservative | Expected | Allocation (D-035, D-050) |
 |---|---|---|---|---|
 | Gate | smoke 3 · anchor 11 · builds 57 · tuning 8 · pilot 13 · test 59 · diagnostics 26 · F5 3 · secondaries 40 | **220** | 193 | ≤ 300 |
-| Main study | builds 5 · micro-pilot 12 · tuning 33 · pilot 18 · A 153 · B 147 · C 64 · F 694 | **1,127** | 857 | ≤ 1,225 |
-| Study G | micro-pilot 15 · tuning 22 · capability anchor 51 · context management 1,764 · topology 699 | **2,551** | 1,613 | ≤ 3,600 |
-| **Total** | | **3,897** | **2,664** | ≤ 5,000 |
-| Contingency | $5,000 − conservative total | 1,103 | | ≥ 1,000 |
+| Main study | builds 5 · micro-pilot 12 · tuning 33 · pilot 18 · A 153 · B 147 · C 64 · F 394 | **827** | 620 | ≤ 1,225 |
+| Study G | micro-pilot 15 · tuning 22 · capability anchor 51 · context management 1,311 · topology 551 | **1,950** | 1,234 | ≤ 3,600 |
+| **Total** | | **2,996** | **2,047** | ≤ 5,000 |
+| Contingency | $5,000 − conservative total | 2,004 | | ≥ 1,000 |
 
 - **By tier** (conservative / expected): Sol-high 1,896 / 1,320 · Astra-high 1,028 / 644 · Luna-high 871 / 641 · Luna-low 89 / 45 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
 - **Pilot σ cell (D-026, 2026-10-02):** +$8 conservative. The pilot builds 8 worlds per cell (was 4; +$6.19) and runs APG* and LGR* on the 4 new ones (`gate.pilot.sigma`, +$2.17), so σ is estimated from 8 worlds per cell.
@@ -75,3 +75,4 @@ FX-6 calls `projected_cost()` and `remaining()` before each phase. It refuses th
 - **Contingent (D-039/D-045):** if the pilot's token-cap gate escalates, up to two pilot-sized re-run rounds (about $36 conservative) come out of contingency; the runner projects them before running.
 - **D-050 (2026-10-03, after the independent review):** +$111. `ape.budget` now prices what the runner runs: whole worlds of 12 tasks ("100 tasks" is 108, M1s 60, Study C 24), so main rises to $1,127 and the gate to $220; Study G gains the `g.pilot.topo` cell ($3.7). The main allocation is $1,225 (projection + the two possible cap-gate re-runs, ≈ $36, + ~5%). The allocations now add to $5,125, above the $5,000 total: each guard uses the smaller of the program's and the study's remainder, so the program total binds and a study may use another's underspend up to its own ceiling. Contingency $164.
 - **D-051 (2026-10-04, user):** −$939 conservative / −$586 expected. The Astra topology cell (`g.topo.astra`: S1 and M2 at Astra) is switched off by default (`enabled: false`; the cell and all code stay, so it can be switched back on). It fed only G-H1's descriptive S1-pre sensitivity at Astra: G-H1's S-CM* reference and G-H3 never used Astra. Contingency $164 → $1,103 (22%, above the brief's 20%).
+- **D-052 (2026-10-04, user):** −$901 conservative / −$617 expected. Study G's Sol and Astra cells run one epoch with more sessions (CM Sol 8 × 1, CM Astra 6 × 1, topology Sol 12 × 1; cuts C2 and C3 rewritten): same or better confirmatory power, robust to 2.5× the epoch-noise prior (−$601 / −$380). Study F's Sol replication runs 60 tasks (cut C5 applied; T1 is descriptive, intervals ~1.35× wider; −$300 / −$237). Contingency $2,004.

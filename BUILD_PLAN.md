@@ -122,7 +122,7 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 | 4 | Analysis (every pre-registered test; type I and power simulated through the real path) | ✅ (D-031, D-048) | ✅ (D-032, D-049) |
 | 5 | Pre-registration (placeholders; frozen and hashed with the code) | ✅ drafted; ⏳ `[USER]` names; `[PILOT]` items filled by the pilot | ✅ drafted; ⏳ `[USER]` names and the micro-pilot go-ahead |
 | 6 | Smoke (live checks for the new arm types; runner refuses without them) | ✅ built (4 checks); ⏳ live run needs a valid key | ✅ built (3 checks); ⏳ live run needs a valid key and the Sol/Astra probe |
-| 7 | Budget (fits the allocation and $5,000) | ✅ $1,127 of $1,225 | ✅ $3,490 of $3,600; program $4,836 conservative / $3,249 expected |
+| 7 | Budget (fits the allocation and $5,000) | ✅ $827 of $1,225 | ✅ $1,950 of $3,600; program $2,996 conservative / $2,047 expected (D-051, D-052) |
 | 8 | Review (no open A or B findings) | ✅ BUILD_REVIEW.md | ✅ BUILD_REVIEW.md |
 
 **What remains is user input and live runs:** a valid OpenAI key (O-1), `APE_BACKUP_DIR`, role names and sign-offs in the three tuning grids and the pre-registrations, the H5 spot-check, the gate's live run (its verdict picks the main study's KG arm and S3s selection), the probe (`--study study_g`, which writes the CM-native support records) and the live smoke.

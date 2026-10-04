@@ -393,7 +393,7 @@ def test_report_on_simulated_data_is_json_and_renders():
     # D-043's sensitivity: the same estimates on the tier rank (equally spaced), carried in the descriptive rows.
     tier = d["gh1"]["tier_order"]["S-CM*"]
     assert tier["points_used"] == ["luna-low", "luna-high", "sol-high"] and tier["span"] == 2.0 and tier["ci_span"][0] < tier["est_span"] < tier["ci_span"][1]
-    assert set(g1["tier_order"]) == {"S-CM*", "S1-pre"} and g1["tier_order"]["S1-pre"]["points"] == ["luna-low", "luna-high", "sol-high", "astra-high"]
+    assert set(g1["tier_order"]) == {"S-CM*", "S1-pre"} and g1["tier_order"]["S1-pre"]["points"] == ["luna-low", "luna-high", "sol-high"]  # Astra topology off (D-051)
     h2b = next(r for r in d["decisions"] if r["id"] == "G-H2b[CM-sum]")
     assert h2b["tier_order"]["ci"][0] < h2b["tier_order"]["estimate"] < h2b["tier_order"]["ci"][1]
     assert d["gh2"]["tost_tier_order"]["CM-sum"]["span"] == 3.0  # Luna-low to Astra: three tier steps
@@ -403,7 +403,7 @@ def test_report_on_simulated_data_is_json_and_renders():
     assert lo < hi and d["gh1"]["primary"]["ci_span"][0] < d["gh1"]["primary"]["est_span"] < d["gh1"]["primary"]["ci_span"][1]
     cost = d["gh3"]["costs"]["cost_usd"]
     assert cost["ratio_boot_ci"][0] < cost["ratio"] < cost["ratio_boot_ci"][1] and cost["ratio_ci"][0] < cost["ratio"] < cost["ratio_ci"][1]
-    assert any("astra-high" in c and "sign-flip" in c for c in d["caveats"])
+    assert not any("astra-high" in c and "sign-flip" in c for c in d["caveats"]), "6 Astra sessions reach the flip level (D-052)"
     md = gr.render(d)
     assert "## Decisions" in md and "G-H3b" in md and "Descriptive estimates (D-033" in md and "G-H1 (M2 − S-CM*)" in md
     assert "G-H1 (M2 − S-CM*), tier order (D-043)" in md and "G-H2b[CM-sum], tier order (D-043)" in md and "CM-todo, tier order (D-043)" in md
@@ -496,8 +496,8 @@ def test_type_one_error_at_the_null_through_the_real_path():
 
 def test_planned_designs_follow_d033_and_the_run_plan():
     topo = {c.point: c for c in gp.PLANNED_TOPO}
-    assert {p: (c.sessions, c.epochs, c.N) for p, c in topo.items()} == {"luna-low": (16, 2, 20), "luna-high": (16, 2, 20), "sol-high": (8, 2, 20), "astra-high": (5, 2, 20)}
-    assert set(topo["luna-low"].arms) == set(gs.TOPO_ARMS) and topo["astra-high"].arms == ("S1", "M2")
+    assert {p: (c.sessions, c.epochs, c.N) for p, c in topo.items()} == {"luna-low": (16, 2, 20), "luna-high": (16, 2, 20), "sol-high": (12, 1, 20)}  # D-051, D-052
+    assert set(topo["luna-low"].arms) == set(gs.TOPO_ARMS) and gp.ASTRA_TOPO.arms == ("S1", "M2")
     from ape.budget import load_plan
 
     plan = load_plan()
@@ -510,8 +510,11 @@ def test_planned_designs_follow_d033_and_the_run_plan():
 
 
 def test_flip_floor_flags_astra():
+    """D-052's 6 Astra sessions bring the exact sign-flip within reach (1/64 < 0.025); the old 4 could not (1/16)."""
     rows = {r["test"]: r for r in gp.flip_floor()}
-    assert rows["G-H2a [astra-high]"]["reachable"] is False and rows["G-H2a [astra-high]"]["min_p"] == 0.0625
-    assert "≥ 6" in rows["G-H2a [astra-high]"]["fix"]
+    assert rows["G-H2a [astra-high]"]["reachable"] and rows["G-H2a [astra-high]"]["min_p"] == 1 / 64
+    old = [c if c.point != "astra-high" or c.N <= 10 else type(c)(**{**c.__dict__, "sessions": 4}) for c in gp.PLANNED_CM]
+    four = {r["test"]: r for r in gp.flip_floor(cm=old)}["G-H2a [astra-high]"]
+    assert four["reachable"] is False and four["min_p"] == 0.0625 and "≥ 6" in four["fix"]
     assert rows["G-H2a [sol-high]"]["reachable"] and not any(r.startswith(("G-H1", "G-H2b")) for r in rows)  # descriptive
-    assert rows["G-H3 (pre, a, b)"]["clusters"] == 16 and {r["test"]: r for r in gp.flip_floor(shared=False)}["G-H3 (pre, a, b)"]["clusters"] == 40
+    assert rows["G-H3 (pre, a, b)"]["clusters"] == 16 and {r["test"]: r for r in gp.flip_floor(shared=False)}["G-H3 (pre, a, b)"]["clusters"] == 44

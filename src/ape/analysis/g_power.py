@@ -44,7 +44,7 @@ plausible effects (power), each with its Monte Carlo standard error, for the t-t
 `g_hypotheses.t_level`, as the report decides: S-4) and the sign-flip (at α); for the
 descriptive rows, the estimate's mean, SD and interval coverage of 0; the minimum attainable p of an exact
 session-level sign-flip per confirmatory test (`flip_floor`), with what would fix a test that cannot reach its level;
-alternative designs (the design before D-033, 24 Luna sessions per point, 12 Sol sessions, 6 Astra CM sessions); and
+alternative designs (the design before D-033, 24 Luna sessions per point, 16 Sol sessions, 8 Astra CM sessions, Astra topology on); and
 sensitivities (distinct worlds per point, σ_arm 0.6, no capability noise).
 """
 
@@ -84,18 +84,19 @@ CM_ARMS = ("CM0", "O-state", "CM-sum", "CM-todo")
 PLANNED_CM = (
     Cell("luna-low", 10, 3, 40, CM_ARMS, "n40", "g.cm.luna-low"),
     Cell("luna-high", 10, 3, 40, CM_ARMS, "n40", "g.cm.luna-high"),
-    Cell("sol-high", 6, 2, 40, CM_ARMS, "n40", "g.cm.sol-high"),
-    Cell("astra-high", 4, 2, 24, CM_ARMS, "n24", "g.cm.astra-high"),
+    Cell("sol-high", 8, 1, 40, CM_ARMS, "n40", "g.cm.sol-high"),  # D-052: one epoch, more sessions (was 6 x 2)
+    Cell("astra-high", 6, 1, 24, CM_ARMS, "n24", "g.cm.astra-high"),  # D-052 (was 4 x 2)
     Cell("luna-high", 10, 3, 10, ("CM0", "O-state"), "n10", "g.cm.luna-n10"),
 )
-# D-033: a Luna-low topology cell and 16 Luna sessions per point (was Luna-high 8, Sol 8, Astra 5).
+# D-033: a Luna-low topology cell and 16 Luna sessions per point (was Luna-high 8, Sol 8, Astra 5). D-052: Sol runs 12
+# sessions x 1 epoch (was 8 x 2). D-051: the Astra topology cell is off by default (ASTRA_TOPO, if it is switched on).
+ASTRA_TOPO = Cell("astra-high", 5, 2, 20, ("S1", "M2"), "n20", "g.topo.astra")
 PLANNED_TOPO = (
     Cell("luna-low", 16, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.luna-low"),
     Cell("luna-high", 16, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.luna"),
-    Cell("sol-high", 8, 2, 20, gs.TOPO_ARMS, "n20", "g.topo.sol"),
-    Cell("astra-high", 5, 2, 20, ("S1", "M2"), "n20", "g.topo.astra"),
+    Cell("sol-high", 12, 1, 20, gs.TOPO_ARMS, "n20", "g.topo.sol"),
 )
-PREVIOUS_TOPO =(replace(PLANNED_TOPO[1], sessions=8), *PLANNED_TOPO[2:])  # before D-033, for comparison
+PREVIOUS_TOPO = (replace(PLANNED_TOPO[1], sessions=8), replace(PLANNED_TOPO[2], sessions=8, epochs=2), ASTRA_TOPO)  # before D-033, for comparison
 LOW = {"topo": "S1", "cm": "CM0"}
 HIGH = {"topo": "M2", "cm": "O-state"}
 
@@ -465,14 +466,15 @@ def flip_floor(alpha: float = ALPHA, *, cm: Sequence[Cell] = PLANNED_CM, topo: S
 def designs() -> dict[str, tuple[str, tuple[Cell, ...]]]:
     """Alternative designs `power_report` simulates: the design before D-033 for comparison, and what would improve the
     remaining confirmatory rows further."""
-    astra6 = tuple(replace(c, sessions=6) if c.point == "astra-high" and c.N > gs.SHORT_N else c for c in PLANNED_CM)
+    astra8 = tuple(replace(c, sessions=8) if c.point == "astra-high" and c.N > gs.SHORT_N else c for c in PLANNED_CM)
     luna24 = tuple(replace(c, sessions=24) if c.point.startswith("luna") else c for c in PLANNED_TOPO)
-    sol12 = tuple(replace(c, sessions=12) if c.point == "sol-high" else c for c in PLANNED_TOPO)
+    sol16 = tuple(replace(c, sessions=16) if c.point == "sol-high" else c for c in PLANNED_TOPO)
     return {
-        "cm-astra6": ("cm", astra6),
+        "cm-astra8": ("cm", astra8),
         "topo-before-D-033": ("topo", PREVIOUS_TOPO),
         "topo-luna-24": ("topo", luna24),
-        "topo-sol-12": ("topo", sol12),
+        "topo-sol-16": ("topo", sol16),
+        "topo-with-astra": ("topo", (*PLANNED_TOPO, ASTRA_TOPO)),
     }
 
 

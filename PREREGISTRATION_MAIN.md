@@ -346,8 +346,8 @@ A cell sized in tasks uses whole worlds: the first ⌈n / 12⌉ worlds of the bl
 | main.C.s8 | C | S8k3 | Study A's and B's cells | 2 × 12 | 5 | Luna |
 | main.F.luna | F | S5 | F1-32 | 9 × 12 | 3 | Luna |
 | main.F.luna-f7-100 | F | S1, S5, M1, M2 | F7-100 | 9 × 12 | 3 | Luna |
-| main.F.sol | F | S1, S5, M1 | F1-32, F7-100 | 9 × 12 | 3 | Sol |
-| main.F.sol-m2 | F | M2 | F7-100 | 9 × 12 | 3 | Sol |
+| main.F.sol | F | S1, S5, M1 | F1-32, F7-100 | 5 × 12 (D-052) | 3 | Sol |
+| main.F.sol-m2 | F | M2 | F7-100 | 5 × 12 (D-052) | 3 | Sol |
 
 - **Cell meanings.** F1-N is breadth aggregation over N suppliers. F2-k is a dependency chain of k hops. F3-n is tool load with n tools. F7-n is policy compliance over n policies (relational, descriptive exceptions).
 - **Families.** Study A: F1, F2. Study B: F3, F7.
@@ -375,7 +375,7 @@ A cell sized in tasks uses whole worlds: the first ⌈n / 12⌉ worlds of the bl
 
 - **Sol.** S1, S5 and M1 on F1-32 and F7-100, plus M2 on F7-100 (M2 is not defined on F1, D-034).
 - **Luna.** S1, S5, M1 and M2 run on F7-100 (D-028 #2), so the tier contrast is not confounded with KB size. On F1-32, Luna reuses Study A's S1 and M1 and adds S5.
-- **Matched tasks.** Both tiers run the same test worlds and tasks.
+- **Matched tasks.** Sol runs the first 5 of the 9 test worlds per cell (60 tasks, D-052); Luna runs all 9. T1 compares the tiers on Sol's 60 tasks, which Luna also runs. T1 is descriptive (D-033), so the smaller Sol sample only widens its intervals (about 1.35×).
 - **What differs.** Only the agent model. The `kg` role, the KG builds and the embeddings are the same. Sol cells use Luna's token caps (§6).
 
 ### 4.6 Models

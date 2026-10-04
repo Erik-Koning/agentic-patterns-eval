@@ -128,7 +128,7 @@ def test_report_end_to_end_from_cells(g_logs):
     gap = d["gh2"]["gap"]
     assert dec["G-H2a"]["decision"] == "INCOMPLETE" and dec["G-H2a"]["missing_points"] == ["luna-low", "luna-high", "sol-high", "astra-high"]
     assert set(dec["G-H2a"]["short_points"]) == {"luna-high", "sol-high"} and all(v["sessions"] < v["minimum"] for v in dec["G-H2a"]["short_points"].values())
-    assert gap["points"]["luna-high"]["reject"] and gap["points"]["sol-high"]["reject"] and d["min_sessions"]["G-H2a"] == {"luna-low": 6, "luna-high": 6, "sol-high": 4, "astra-high": 3}
+    assert gap["points"]["luna-high"]["reject"] and gap["points"]["sol-high"]["reject"] and d["min_sessions"]["G-H2a"] == {"luna-low": 6, "luna-high": 6, "sol-high": 5, "astra-high": 4}
     assert "below the minimum sessions" in render(d)
     # With the planned points those two cells cover (and no minimum), it is decided.
     full = report_from_cells(_cells(g_logs), prices=PRICES, capability={"luna-high": 0.78, "sol-high": 0.86}, reps=500, boot=0, glmm=False, planned={"G-H2a": ["luna-high", "sol-high"], "G-H3": []})
