@@ -1,6 +1,6 @@
 # Readiness audit (2026-10-04)
 
-**Scope:** the whole program (the APG vs LightRAG gate, the main study and Study G) at commit `b41a518`, after the build in `BUILD_PLAN.md` (B1–B12) and its independent review (`BUILD_REVIEW.md`).
+**Scope:** the whole program (the APG vs LightRAG gate, the main study and Study G) at commit `a43763a`, after the build in `BUILD_PLAN.md` (B1–B12) and its independent review (`BUILD_REVIEW.md`).
 
 **Method:**
 - Three rounds of independent, read-only review, each proving its findings with offline reproductions:

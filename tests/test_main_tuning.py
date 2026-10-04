@@ -36,7 +36,7 @@ M = "mockllm/model"
 GRID = ROOT / "config" / "tuning_grid_main.yaml"
 B3_SYSTEMS = {"S1", "S5", "S9", "M1", "M7", "M1k", "M2"}  # BUILD_PLAN B3: equal budgets for these
 ROLES = ("s9", "orchestrator", "worker", "member", "critique", "chair")
-# sha256 of B2's six role notes (git show 7d18dfe:src/ape/agent/multi/prompts.py), in ROLES order.
+# sha256 of B2's six role notes (git show f2161bd:src/ape/agent/multi/prompts.py), in ROLES order.
 B2_NOTES_SHA = {
     "s9": "c4e09c16aeb4c9c9",
     "orchestrator": "5fac556585e9f3e2",

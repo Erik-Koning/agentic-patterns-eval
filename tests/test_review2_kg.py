@@ -1,4 +1,4 @@
-"""RELIABILITY_REVIEW 2, KG and PC1 (the review of aa6f09c): regression tests built from the reviewer's repros.
+"""RELIABILITY_REVIEW 2, KG and PC1 (the review of f45eb1d): regression tests built from the reviewer's repros.
 
 - the bge embedder in LightRAG (LightRAG deep-copies its config; the model holds locks);
 - the anchor index: a failed or empty extraction never gets a manifest, and an unhealthy or damaged index is refused;

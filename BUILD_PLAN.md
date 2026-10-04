@@ -98,19 +98,19 @@ F4, F5 for the main study, F6, F9; fault-propagation Study D, beyond the F2 data
 
 | Package | Status | Notes |
 |---|---|---|
-| Seam | ✅ 4fbb68b, a85799f | `main_study` covers F1/F2/F3/F7; `agent/solvers.arm_solver` dispatch point; S5 = the gate's KG arm (`APE_KG_ARM`); `ape.build` takes seed_base and F8 knobs |
-| B1 + B6 | ✅ merged dffa9b3; integration merged 61e4215 (877 passed) | D-036, D-045 |
-| B2 | ✅ merged cb3516d | D-034 (M2 dropped on F1) |
-| B4 | ✅ statistics core cc9dcb5, `analyze_main` f6eeac6 | D-029, D-031, D-033, D-048 |
-| B7 | ✅ merged efe6158 | D-030 |
-| B8 | ✅ merged b45f316 | D-037; overheads priced (D-035) |
-| B10 | ✅ statistics core f413dd2, `analyze_g` 311c256 | D-029, D-032, D-033, D-038, D-049 |
-| B3 | ✅ merged d2f12ab | D-041 |
-| B9 | ✅ merged 83172ed | D-040 (incl. a B7 checkpoint fix) |
-| Analysis glue | ✅ `analyze_main` f6eeac6, `analyze_g` merged | B1's `analyze(run)` interface |
-| B5 | ✅ merged 2d29cb4 | D-044 |
-| B11 | ✅ PREREGISTRATION_G.md d04e2d4; tuning grid + probe extension merged | D-042, D-043 |
-| B12 | ✅ smoke checks, cache nonce, runaway guard (D-046); ✅ independent review of a576a2c (BUILD_REVIEW.md: 4 A, 12 B); ✅ fix round merged (D-047–D-050) | full suite 987 passed, 2 skipped (b41a518) |
+| Seam | ✅ d658947, 6f30eda | `main_study` covers F1/F2/F3/F7; `agent/solvers.arm_solver` dispatch point; S5 = the gate's KG arm (`APE_KG_ARM`); `ape.build` takes seed_base and F8 knobs |
+| B1 + B6 | ✅ merged 91cab71; integration merged d3ae540 (877 passed) | D-036, D-045 |
+| B2 | ✅ merged fd59815 | D-034 (M2 dropped on F1) |
+| B4 | ✅ statistics core 0c73e99, `analyze_main` 5f18f13 | D-029, D-031, D-033, D-048 |
+| B7 | ✅ merged 11d22f6 | D-030 |
+| B8 | ✅ merged 7088801 | D-037; overheads priced (D-035) |
+| B10 | ✅ statistics core c9fffd4, `analyze_g` 37c3c4a | D-029, D-032, D-033, D-038, D-049 |
+| B3 | ✅ merged 8605ef0 | D-041 |
+| B9 | ✅ merged e1d2c3a | D-040 (incl. a B7 checkpoint fix) |
+| Analysis glue | ✅ `analyze_main` 5f18f13, `analyze_g` merged | B1's `analyze(run)` interface |
+| B5 | ✅ merged 097901a | D-044 |
+| B11 | ✅ PREREGISTRATION_G.md f7ec930; tuning grid + probe extension merged | D-042, D-043 |
+| B12 | ✅ smoke checks, cache nonce, runaway guard (D-046); ✅ independent review of 6852fa5 (BUILD_REVIEW.md: 4 A, 12 B); ✅ fix round merged (D-047–D-050) | full suite 987 passed, 2 skipped (a43763a) |
 
 ### Runnable? (§1's eight criteria, 2026-10-04)
 

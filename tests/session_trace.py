@@ -4,7 +4,7 @@
 the session made (agent calls and probes, as hashes of role, text, tool calls and tool errors, with view tokens)
 and the store records the scorer and the analysis read, restricted to the fields that existed before the
 ContextPolicy layer (B7). The golden file `fixtures/f8_session_golden.json` was written by this module from the
-pre-B7 code (commit a85799f); `test_session_policy` compares the current code against it, so the layer is proved
+pre-B7 code (commit 6f30eda); `test_session_policy` compares the current code against it, so the layer is proved
 to change neither the views nor the records of CM0 and O-state.
 
 Message and tool-call IDs are random per run and are left out; everything else in a view is hashed.

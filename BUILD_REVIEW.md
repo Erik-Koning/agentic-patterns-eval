@@ -1,6 +1,6 @@
 # Independent review of the main-study and Study G build (BUILD_PLAN B12)
 
-**Date:** 2026-10-03. **Reviewed commit:** a576a2c (full suite: 944 passed, 2 skipped).
+**Date:** 2026-10-03. **Reviewed commit:** 6852fa5 (full suite: 944 passed, 2 skipped).
 
 ## Method
 

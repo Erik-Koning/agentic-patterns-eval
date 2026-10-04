@@ -60,7 +60,7 @@ COST_RATIO = 0.6  # H3b: S-CM* cost per solved item at most this share of M2's
 COST_METER = "cost_usd"  # cache-adjusted $ is primary (audit §5.1); tokens, calls and wall-clock are reported
 # D-043's sensitivity: capability as the tier rank, equally spaced, in place of measured capability.
 TIER_ORDER = {"luna-low": 1.0, "luna-high": 2.0, "sol-high": 3.0, "astra-high": 4.0}
-# S-4 (BUILD_REVIEW of a576a2c): at a nominal 0.025 the session-clustered t rejected true nulls at up to 0.037 (G-H3's
+# S-4 (BUILD_REVIEW of 6852fa5): at a nominal 0.025 the session-clustered t rejected true nulls at up to 0.037 (G-H3's
 # proportion tests, df ≈ 11, with arm-specific session variance), 0.040 (its cost clause, with heavy-tailed costs) and
 # 0.037 (G-H2a at Astra, df 3, with a wider O-state session spread): the variance is unbiased, but the statistic's tails
 # are heavier than t_df's. Neither the Bell–McCaffrey df, df = G_eff − 2, a kurtosis-aware df nor Johnson's skewness
