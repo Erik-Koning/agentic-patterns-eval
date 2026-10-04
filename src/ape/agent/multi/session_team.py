@@ -43,7 +43,9 @@ Inspect's `execute_tools` re-raises exceptions it does not map. T_abs triggers n
 calls and tokens with the orchestrator's. `mas_accounting` sums the per-call records by agent and role (calls; input,
 output, reasoning, cache-read, cache-write and total tokens; cost when priced): it is built from the session's own
 records, so it covers restored calls after a resume and sums exactly to `f8_usage`'s agent usage (probes are separate,
-kind `probe`). Each worker's wall-clock is in `mas_agents`.
+kind `probe`). A call that trips a token or cost limit is recorded too (from the transcript, flagged `limit`:
+`SessionContext.record_limit_call`), so both equal Inspect's own usage then. Each worker's wall-clock is in
+`mas_agents`.
 
 **Probes** go to the orchestrator's current view (it holds the session's state), as the loop does for every arm;
 they are never appended.
@@ -287,7 +289,13 @@ class SessionTeam(FullHistory):
                 if tokens > ctx.window:
                     status = "overflow"
                     raise SessionOverflow(ctx.overflow_position())
-                output = await ctx.agent_model.generate(messages, tools=tools)
+                try:
+                    output = await ctx.agent_model.generate(messages, tools=tools)
+                except LimitExceededError:
+                    # Inspect counted the call that tripped the limit: record it, so mas_accounting and f8_usage equal its usage.
+                    if (entry := ctx.record_limit_call("agent", ctx.agent_model, tokens, messages)) is not None:
+                        entry.update(agent=w["id"], role=w["role"])
+                    raise
                 ctx.record_call("agent", ctx.agent_model, tokens, output).update(agent=w["id"], role=w["role"])
                 messages.append(output.message)
                 w["turns"] += 1

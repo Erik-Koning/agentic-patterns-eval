@@ -77,6 +77,7 @@ from typing import Any, ClassVar
 
 from inspect_ai.model import ChatMessage, ChatMessageAssistant, ChatMessageSystem, ChatMessageUser, GenerateConfig, Model, ModelOutput, ModelUsage
 from inspect_ai.tool import Tool, ToolDef
+from inspect_ai.util import LimitExceededError
 from pydantic import BaseModel, TypeAdapter
 from pydantic_core import to_jsonable_python
 
@@ -136,6 +137,48 @@ def add_usage(total: dict | None, u: Mapping | None) -> dict | None:
         if isinstance(v, int | float):
             out[k] = out.get(k, 0) + v
     return out
+
+
+def limit_call_usage(input: Sequence[ChatMessage]) -> ModelUsage | None:
+    """The usage of the call a sample limit cut short. A token or cost limit raises inside `generate` after Inspect
+    completed the call's ModelEvent and counted its usage, so the call is in the sample's usage but its caller never got
+    the output to record. Found as the latest ModelEvent in the transcript whose input ends with `input`'s last message
+    (the same object: unambiguous also when a team's workers call concurrently)."""
+    from inspect_ai.log import transcript
+
+    if not input:
+        return None
+    last = input[-1]
+    for e in reversed(transcript().events):
+        if getattr(e, "event", None) != "model" or not e.input:
+            continue
+        if e.input[-1] is last or e.input[-1].id == last.id:
+            return e.output.usage if e.output is not None else None
+    return None
+
+
+def inspect_limit_hit() -> str | None:
+    """The limit Inspect is ending the sample for, when it does so by cancelling the solver rather than raising
+    LimitExceededError into it: a working limit (its monitor records the error on the active sample) or a time limit
+    (its cancel scope's deadline has passed). None otherwise (a user interrupt, an error elsewhere)."""
+    import anyio
+    from inspect_ai.log._samples import sample_active
+
+    active = sample_active()
+    if active is not None and active.limit_exceeded_error is not None:
+        return active.limit_exceeded_error.type
+    try:
+        from inspect_ai.util._limit import time_limit_tree
+
+        node = time_limit_tree.get()
+        while node is not None:
+            scope = getattr(node, "_cancel_scope", None)
+            if scope is not None and scope.cancel_called and anyio.current_time() >= scope.deadline:
+                return "time"
+            node = getattr(node, "parent", None)
+    except Exception:  # noqa: BLE001  (private Inspect internals: if they change, the session keeps its checkpoint, as before)
+        return None
+    return None
 
 
 def usage_by(records: Sequence[Mapping], key: str) -> dict[str, dict]:
@@ -233,9 +276,24 @@ class SessionContext:
         tokens = view_tokens(input)
         if tokens > self.window:
             raise SessionOverflow(self.overflow_position())
-        output = await self.cm_model.generate(list(input), tools=list(tools), config=config or GenerateConfig())
+        input = list(input)
+        try:
+            output = await self.cm_model.generate(input, tools=list(tools), config=config or GenerateConfig())
+        except LimitExceededError:
+            self.record_limit_call("cm", self.cm_model, tokens, input, purpose)
+            raise
         self.record_call("cm", self.cm_model, tokens, output, purpose)
         return output
+
+    def record_limit_call(self, kind: str, model: Model, tokens: int, input: Sequence[ChatMessage], purpose: str | None = None) -> dict | None:
+        """Record the call a sample limit cut short (`limit_call_usage`), flagged `limit`: Inspect counted its usage before
+        raising, so the session's records must too. None when the transcript holds no such call."""
+        usage = limit_call_usage(input)
+        if usage is None:
+            return None
+        entry = self.record_call(kind, model, tokens, usage, purpose)
+        entry["limit"] = True
+        return entry
 
     def log(self, event: str, **data: Any) -> None:
         """A management event (JSON-able data), attributed to the current item and stage."""
