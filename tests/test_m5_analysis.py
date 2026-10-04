@@ -310,3 +310,13 @@ def test_the_inheritance_file_is_read_when_the_freeze_has_none(tmp_path):
     assert analyze_m5.inherited(_fake_run(run_dir), {"frozen_at": "x"}) == {"main_run": "m-7", "token_caps": {"F2-10": 9}}
     assert analyze_m5.inherited(_fake_run(run_dir), {"inherited": {"main_run": "m-8"}}) == {"main_run": "m-8"}
     assert analyze_m5.role_context({"role": {"kind": "extension", "of": "r0"}})["primary_only"] is True
+
+
+def test_ledger_tokens_come_from_the_orchestrators_ledger_purpose():
+    """The arm (agent/multi/ledger.py) books ledger calls to the orchestrator, under `purposes.ledger`."""
+    from ape.analysis.m5_load import ledger_metrics
+
+    ledger = {"task_ledgers": [{}], "progress": [{"stalled": False}, {"stalled": True}], "replans": 0, "stalls_max": 1}
+    accounting = {"totals": {"total_tokens": 1000}, "agents": {"orchestrator": {"role": "orchestrator", "models": {"agent": {"total_tokens": 600}}, "purposes": {"ledger": {"total_tokens": 250}}}}}
+    m = ledger_metrics(ledger, accounting)
+    assert (m["ledger_rounds"], m["ledger_stalls"], m["ledger_replans"], m["ledger_tokens"], m["sample_tokens"]) == (2, 1, 0, 250, 1000)

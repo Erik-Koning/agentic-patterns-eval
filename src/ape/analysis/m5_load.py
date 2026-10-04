@@ -85,7 +85,9 @@ def _ledger_tokens(ledger: dict, accounting: dict | None) -> int | None:
             found = True
             total += int(rec.get("all_total_tokens") or rec.get("total_tokens") or 0)
             continue
-        for name, b in (rec.get("models") or {}).items():
+        # The arm (agent/multi/ledger.py) counts ledger calls as the orchestrator's, under its `purposes.ledger` bucket.
+        buckets = [*((rec.get("models") or {}).items()), *((rec.get("purposes") or {}).items())]
+        for name, b in buckets:
             if "ledger" in str(name).lower() and isinstance(b, dict):
                 found = True
                 total += int(b.get("total_tokens") or 0)

@@ -9,6 +9,7 @@ A pre-registered evaluation of agent architectures (single agents with different
 | **Gate** | Is APG (the Adaptive Prompt Graph, [EvolvingWisdomAgents](https://github.com/Erik-Koning/EvolvingWisdomAgents)) non-inferior to LightRAG? The winner becomes the main study's KG arm. | `GATE_PREREG.md` | $220 |
 | **Main** | Which mechanism drives multi-agent gains (decomposition, isolation, ensembling, communication, specialization), and does KG delivery substitute for a team? | `PREREGISTRATION_MAIN.md` | $827 |
 | **Study G** | Do context-management strategies (prune, summarise, todo, reset, native compaction) and topologies keep their value as models get stronger? | `PREREGISTRATION_G.md` | $1,950 |
+| **M5 add-on** (off by default) | Does a Magentic-style task/progress ledger help an orchestrator (M5 = M1 + ledger, M5-spec = M2 + ledger)? Runs on a frozen main run's test tasks with fresh controls. | `PREREGISTRATION_M5.md` | $123 when enabled |
 
 The program costs $2,996 conservative ($2,047 expected) against a $5,000 budget (`BUDGET.md`).
 
@@ -44,6 +45,7 @@ uv run python readiness/smoke.py                                   # live checks
 uv run python -m ape.run_gate all --run-id gate-1                  # stops at the freeze: fill and commit GATE_PREREG.md
 uv run python -m ape.run_study all --study main --run-id main-1 --gate-run-id gate-1
 uv run python -m ape.run_study all --study study_g --run-id g-1
+uv run python -m ape.run_study all --study m5 --run-id m5-1 --main-run-id main-1   # after enabling studies.m5's cells
 ```
 
 Every runner is resumable: re-run the same command to continue. Each phase is guarded by the study's budget, the program's spend ledger and a fresh smoke check. The test split is generated only after the freeze. Cost projections come from `uv run python -m ape.budget`.
