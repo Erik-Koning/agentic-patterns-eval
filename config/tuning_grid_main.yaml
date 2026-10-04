@@ -20,9 +20,10 @@
 #   mechanism is used, never generic advice on the task, which would help S1 as much (prompts.py).
 # - APE_MAS_<ARM>_CLIP (M1, M7): the cap on a worker's result or a member's rationale as another agent reads it
 #   (default 2,000 tokens). Available to the owners; no candidate below uses it.
-# M1s, M1k and M2 have no systems (`inherited` from M1; BUILD_REVIEW A-1): they read M1's knobs and run as M1's
-# selection, so the orchestrator chain M1s -> M1 -> M1k -> M2 runs one protocol variant and each step stays one switch
-# (CONC, DEL, SPEC). M1 therefore tunes on all four of its dev cells (Study A's and Study B's). The structural
+# S9, M1s, M1k and M2 have no systems (`inherited` from M1; BUILD_REVIEW A-1, D-047): they read M1's knobs and run as
+# M1's selection, so the chain S9 -> M1s -> M1 -> M1k -> M2 runs one protocol variant and each step stays one switch
+# (ISO, CONC, DEL, SPEC; M1's confirmatory contrast is M1 - S9). M1 therefore tunes on all four of its dev cells
+# (Study A's and Study B's). The structural
 # parameters (3 workers, 2 critique rounds, council k = 3; brief §4.2) are fixed a priori and never tuned.
 #
 # Not tuned here (`inherited`):
@@ -39,14 +40,14 @@
 # Sign-off. Each owner reviews their systems' candidates, and for the M arms the variant texts in
 # ape/agent/multi/prompts.py (drafts), then names themselves in `owners` and sets `signed_off` to true. Roles
 # (DECISIONS D-018; brief §7.3):
-# - S9, M1 (and so M1s, M1k, M2), M7: the M-arm prompt author, the independent team member who writes the M-arm prompts (brief
+# - M1 (and so S9, M1s, M1k, M2), M7: the M-arm prompt author, the independent team member who writes the M-arm prompts (brief
 #   §7.3); not the skeptic, who engineers the baselines these arms are compared with (S1, S3s).
 # - S1: the skeptic.
 # A live tune refuses until every system has an owner and a sign-off; PC6-style completeness counts every configuration
 # tried (archived tuning logs included) against budget_per_system, so a candidate replaced after a live tune still
 # counts. These keys are not candidates; the freeze hashes this whole file.
-owners: {S1: TODO, S9: TODO, M1: TODO, M7: TODO}
-signed_off: {S1: false, S9: false, M1: false, M7: false}
+owners: {S1: TODO, M1: TODO, M7: TODO}
+signed_off: {S1: false, M1: false, M7: false}
 budget_per_system: 4
 equal_budgets: true
 tie_pp: 1.0
@@ -55,17 +56,11 @@ inherited:
   S1: {source: fixed, owner: skeptic}
   S5: {source: gate, gate_key: "APG* (GO) or LGR* (NO_GO)"}
   S3s: {source: gate, gate_key: S3s}
+  S9: {source: M1, note: "reads M1's prompt variant: S9 -> M1s changes ISO only, and M1 - S9 is M1's contrast (D-047)"}
   M1k: {source: M1, note: "reads M1's knobs: M1 -> M1k changes DEL only (BUILD_REVIEW A-1)"}
   M2: {source: M1, note: "reads M1's knobs: M1k -> M2 changes SPEC only (BUILD_REVIEW A-1)"}
 
 systems:
-  S9:
-    dev_cells: [F1-32, F2-10]
-    candidates:
-      - {id: s9-default, arm: S9, env: {APE_MAS_S9_PROMPT: default}}
-      - {id: s9-concise, arm: S9, env: {APE_MAS_S9_PROMPT: concise}}
-      - {id: s9-structured, arm: S9, env: {APE_MAS_S9_PROMPT: structured}}
-      - {id: s9-verify, arm: S9, env: {APE_MAS_S9_PROMPT: verify}}
   M1:
     dev_cells: [F1-32, F2-10, F3-60, F7-1000]
     candidates:
