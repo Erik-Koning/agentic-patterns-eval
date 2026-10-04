@@ -475,7 +475,7 @@ def test_offline_study_g_runs_sessions_and_the_capability_anchor_on_its_own_worl
     assert {g.split("/")[0] for g in mp["log_dirs"]} >= {"study_g/t1/micro-pilot/g.pilot.luna", "study_g/t1/micro-pilot/g.pilot.topo"} or any("g.pilot.topo" in d for d in mp["log_dirs"])
     health = json.loads(run.session_health_path.read_text())["arms"]
     assert {"S1", "M1", "M2", "S-CM*", "CM0", "CM-sum"} <= set(health) and all(h["sessions"] > 0 for h in health.values())
-    assert health["CM0"]["overflow_expected"] and not health["CM-sum"]["overflow_expected"] and run_study.read_session_health(run)[1] == []
+    assert health["CM0"]["overflow_expected"] and health["CM-native"]["overflow_expected"] and not health["CM-sum"]["overflow_expected"] and run_study.read_session_health(run)[1] == []
     assert "config/session_health.json" in read_freeze(run)["files"] and read_freeze(run)["session_health"] == health
     # APE_SESSION_CHECKPOINTS reached the sessions: each sample saved there (a finished session deletes only its file).
     assert {p.parent.name for p in run.session_checkpoints_dir.glob("*/epoch-1")} >= {"F8-40-pilot-s22000", "F8-40-dev-s1000", "F8-40-test-s29000", "F8-20-o2250-test-s29000"}
@@ -744,7 +744,9 @@ def test_the_cap_hit_gate_doubles_the_multiple_for_every_arm_and_reruns_only_the
 
 def test_session_health_refuses_the_freeze_on_evidence_of_errors_limits_or_unexpected_overflows():
     """R-B5 (d): Study G's freeze applies the cap gate's rule to the micro-pilot's sessions: a lower bound over 10%
-    refuses; an arm whose overflowing W is its measured outcome (CM0, S1, M1, M2, CM-prune) never refuses on it."""
+    refuses; an arm whose overflowing W is its measured outcome (CM0, S1, M1, M2, CM-prune, CM-native) never refuses on
+    it, though its errors and limits still do."""
+    assert run_study.OVERFLOW_EXPECTED == ("CM0", "S1", "M1", "M2", "CM-prune", "CM-native")
     b = run_study._rate_bound
     ok = {"sessions": 20, "error": b(0, 20), "limit": b(0, 20), "overflow": b(0, 20)}
     health = {
@@ -752,11 +754,14 @@ def test_session_health_refuses_the_freeze_on_evidence_of_errors_limits_or_unexp
         "CM-sum": ok | {"overflow": b(8, 20), "overflow_expected": False},
         "M1": ok | {"error": b(8, 20), "overflow_expected": True},
         "O-state": ok | {"limit": b(3, 20), "overflow_expected": False},  # 15%: no evidence over 10%
+        # CM-native: the provider's compacted block not keeping the view under W is a finding about the arm, not a fault.
+        "CM-native": ok | {"overflow": b(12, 20), "limit": b(8, 20), "overflow_expected": True},
     }
     problems = run_study.session_health_problems(health)
     assert problems == [
         "CM-sum: overflows of the window W in 8 of 20 micro-pilot sessions (lower bound 19.1% > 10%)",
         "M1: harness errors in 8 of 20 micro-pilot sessions (lower bound 19.1% > 10%)",
+        "CM-native: Inspect limits (tokens, working time, cost guard) in 8 of 20 micro-pilot sessions (lower bound 19.1% > 10%)",
     ]
 
 
