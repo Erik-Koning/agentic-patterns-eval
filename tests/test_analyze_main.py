@@ -108,6 +108,37 @@ def test_the_cli_analyses_a_run(offline_main, tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "done" and (run.dir / "report" / "decision.json").is_file()
 
 
+def test_kg_build_failures_and_errored_attempts_reach_the_report(offline_main, tmp_path):
+    """BUILD_REVIEW S-3: a world whose KG build failed its check is named on every member using it; S-11: errored,
+    retried attempts' usage (in the usage ledgers, in no log) is reported per arm against the logged cost."""
+    run = _copy(offline_main, tmp_path, "flags")
+    frame, _ = am.load_test_rows(json.loads(run.manifest_path("test").read_text()), require_cost=False, tiers=am.profile_tiers(run.models_path), run_dir=run.dir)
+    test = json.loads(run.manifest_path("test").read_text())
+    g = test["cells"]["main.B.arms"]["groups"][0]
+    log = run_study.resolve_log(run.dir, g["log_files"][0])
+    rows = frame[frame["log_file"] == str(log)]
+    world = rows["world"].iloc[0]
+    bq = run.phase_dir("build-test") / "build_quality.json"
+    bq.parent.mkdir(parents=True, exist_ok=True)
+    bq.write_text(json.dumps({"worlds": [{"world_id": world, "apg": {"coverage": 0.5}, "errors": []}, {"world_id": "other", "apg": {"coverage": 1.0}, "errors": []}]}))
+    assert am.kg_build_failed_worlds(run, {"kg": {"system": "apg"}}) == ([world], None)
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    entries = [{"sample_uuid": rows["uuid"].iloc[0], "attempt": 1, "cost_usd": 0.5, "log": str(log), "model": "openai/gpt-6-luna"}, {"sample_uuid": rows["uuid"].iloc[0], "attempt": 2, "cost_usd": 0.0, "log": str(log), "model": "openai/gpt-6-luna"}]
+    (ledger / "usage_ledger.jsonl").write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+    g["log_dir"] = str(ledger)
+    run.manifest_path("test").write_text(json.dumps(test))
+    usage = am.errored_attempt_usage(test, frame.assign(usd=0.0), run.dir)
+    arm = rows["arm"].iloc[0]
+    assert usage["available"] and usage["arms"][arm]["unlogged_usd"] == pytest.approx(0.5) and usage["arms"][arm]["unlogged_share"] == pytest.approx(1.0)
+    am.analyze(run, reps=200, glmm=False)
+    d = json.loads((run.dir / "report" / "decision.json").read_text())
+    assert d["analysis"]["header"]["kg_build_failed_worlds"] == [world]
+    named = [mid for f in d["analysis"]["hypotheses"].values() if f for mid, m in f["members"].items() if world in (m.get("kg_build_failed_worlds") or [])]
+    assert named, "every member using the world names it"
+    assert "Errored attempts' usage" in (run.dir / "report" / "report.md").read_text()
+
+
 def test_tuning_summary_counts_candidates_and_selections(tmp_path):
     log = tmp_path / "tuning_log.jsonl"
     log.write_text("\n".join(json.dumps(r) for r in [

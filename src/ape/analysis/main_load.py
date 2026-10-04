@@ -29,9 +29,15 @@ this loader reads each log once and reuses the gate's per-sample pieces (`pipeli
 - **Cap hits** (`cap_hit_of`): a sample cut short by an Inspect limit; or, unanswered, a single agent at the eval's turn
   cap, or (multi-agent) any agent stopped at its turn cap or a limit. A multi-agent sample's `turns_used` is only its
   top agent's, so its own agents' stop reasons decide; `agent_cap_hits` counts capped agents even when the sample
-  answered (a diagnostic, not a cap hit).
+  answered (a diagnostic, not a cap hit). **A cap hit is a failure and casts no vote** (PREREGISTRATION_MAIN §2.1, §3.3,
+  §6; D-047): its `success` is 0 and its `answer_key` None whatever the scorer said. Inspect scores a sample after a
+  limit with its last state, so without this a capped F3 sample whose end state happened to equal the gold (or an
+  answer recorded in the turn a limit fired) would count as a success and vote in the S8 frontier. The scorer's value
+  is kept as `scored_success`.
 
-Errored samples are failures (success 0, `error` True, `error_label` "harness_error"), as in the gate.
+Errored samples are failures (success 0, `error` True, `error_label` "harness_error"), as in the gate. Each row carries
+the sample's `uuid` (one per sample and epoch run; a completed sample copied into a retry's log keeps it), so the same
+sample-epoch read from two log files is counted once (`main_stats.confirmatory_rows`).
 """
 
 import hashlib
@@ -53,8 +59,8 @@ SWITCHES_KEY = "mas_switches"
 AGENTS_KEY = "mas_agents"  # [{id, role, parent, turns, stop, ...}]
 CAPPED_STOPS = ("turn_cap", "limit")  # an agent's loop ended at its turn cap or on a sample limit
 COLUMNS = (
-    "plan_cell", "arm", "family", "level", "cell", "world", "task", "epoch", "tier", "model", "effort", "profile",
-    "success", "error", "error_label", "answered", "answer_key", "turns_used", "max_turns", "cap_hit", "limit_hit",
+    "plan_cell", "arm", "family", "level", "cell", "world", "task", "epoch", "uuid", "tier", "model", "effort", "profile",
+    "success", "scored_success", "error", "error_label", "answered", "answer_key", "turns_used", "max_turns", "cap_hit", "limit_hit",
     "tokens", "tokens_input", "tokens_cache_read", "tokens_cache_write", "tokens_output", "tokens_reasoning", "calls",
     "usd", "usd_list", "cost_usd", "wall", "total_time", "working_time", "multi_agent", "delivery", "split",
     "partial_credit", "evidence_recall", "pipeline_miss", "per_agent", "switches", "agents", "agent_stops",
@@ -206,6 +212,7 @@ def load_main(log_files: Sequence[str | Path], plan_cell: str | None = None, req
             meters = _usage(usage)
             per_agent = next((store[k] for k in store_keys if k in store), None)
             agents = store.get(AGENTS_KEY) if isinstance(store.get(AGENTS_KEY), list) else None
+            capped = cap_hit_of(errored, s.limit.type if s.limit is not None else None, answered, turns, max_turns, agents)
             rows.append(
                 {
                     "plan_cell": plan_cell or emd.get("plan_cell"),
@@ -216,18 +223,20 @@ def load_main(log_files: Sequence[str | Path], plan_cell: str | None = None, req
                     "world": md.get("world_id"),
                     "task": s.id,
                     "epoch": int(s.epoch),
+                    "uuid": getattr(s, "uuid", None),
                     "tier": tier,
                     "model": model,
                     "effort": effort,
                     "profile": f"{tier}-{effort}" if effort else tier,
-                    "success": success,
+                    "success": 0.0 if capped else success,  # a cap hit is a failure (module docstring)
+                    "scored_success": success,
                     "error": errored,
                     "error_label": ea.metadata.get("error") if ea is not None and ea.metadata else ("harness_error" if errored else None),
                     "answered": bool(answered),
-                    "answer_key": None if errored else answer_key(family, answer, calls),
+                    "answer_key": None if errored or capped else answer_key(family, answer, calls),  # a cap hit casts no vote
                     "turns_used": turns,
                     "max_turns": max_turns,
-                    "cap_hit": cap_hit_of(errored, s.limit.type if s.limit is not None else None, answered, turns, max_turns, agents),
+                    "cap_hit": capped,
                     "limit_hit": s.limit.type if s.limit is not None else None,
                     **meters,
                     "calls": _model_calls(s),

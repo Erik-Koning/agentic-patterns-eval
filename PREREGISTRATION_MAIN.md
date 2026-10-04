@@ -5,13 +5,13 @@
 - `[USER: …]` items need a decision (see `DECISIONS.md`).
 - This header is instructions and is never checked. From §1 on, any remaining marker blocks the freeze.
 - The table in §2.3 is generated. It is `ape.analysis.main_hypotheses.render_hypothesis_table()` pasted verbatim between its marker comments, and `tests/test_prereg_main.py` fails if the two differ. To change a hypothesis, change `main_hypotheses.py` and paste the new output.
-- Two `[PILOT: …]` labels are not in `prereg_items` yet: `cap multiple` (D-039, with the runner's B1 integration) and `pilot σ and power` (§2.6). Until the runner writes them, the analyst transcribes them from the pilot's cap-hit record and from `main_power`'s output (`tests/test_prereg_main.py` lists them as pending).
+- The runner writes every `[PILOT: …]` label into `prereg_items`, including `cap multiple` (the pilot's cap gate, D-039/D-045) and `pilot σ and power` (the in-process power re-simulation at the gate run's pilot σ, §2.6).
 
 **Freeze procedure** (as the gate's, GATE_PREREG.md):
 1. Run the study up to the freeze: `uv run --locked python -m ape.run_study all --study main --run-id <id> --gate-run-id <gate run>`. It runs preflight, build-dev, micro-pilot, tune and pilot, then stops at the freeze while a marker remains. (`--locked`: uv never rewrites `uv.lock`, which the freeze hashes.)
 2. Fill every `[PILOT: …]` and `[USER: …]` item in the body, set the status to FROZEN, and commit.
 3. Run `uv run --locked python -m ape.run_study freeze --study main --run-id <id>`.
-   - It refuses if a marker remains in the body, a tracked file has uncommitted changes, `ape.analyze_main` is missing, or a phase the freeze rests on (build-dev, micro-pilot, tune, pilot) is not current. It also refuses while any arm's pilot cap-hit rate is above 10% at the largest cap multiple (§6, D-039).
+   - It refuses if a marker remains in the body, a tracked file has uncommitted changes, `ape.analyze_main` is missing, or a phase the freeze rests on (build-dev, micro-pilot, tune, pilot) is not current. It also refuses while any arm's pilot cap-hit rate is shown to be above 10% (its one-sided 97.5% Clopper–Pearson lower bound, pooled over the arm's pilot cells) at the largest cap multiple (§6; D-039, D-045, D-047).
    - It records the following in `runs/main/<id>/freeze.json` and `PROVENANCE.md`:
      - the sha256 of this file;
      - `config/models.yaml`, `config/model_costs.yaml`, `config/run_plan.yaml` and `config/tuning_grid_main.yaml`;
@@ -48,7 +48,7 @@ Not addressed here:
 
 - **Outcome.** Task success: binary and programmatic (`scorers/success.py`), per sample and epoch.
   - A sample that still errors after its retries (`retry_on_error` = 2) counts as a **failure**.
-  - A **cap hit** also counts as a failure (§6).
+  - A **cap hit** also counts as a failure (§6), and casts no vote in the S8 frontier (§3.3), whatever the scorer read. Inspect scores a sample after a limit with its last state, so a capped F3 sample whose end state happened to equal the gold, or an answer recorded in the turn a limit fired, would otherwise count as a success; `main_load` sets its success to 0 and its answer key to none, and keeps the scorer's value for the record (D-047).
   - No LLM judge is used.
 - **Task value.** An arm's success on a task is the mean over its epochs. Every arm has 3 epochs. S1's 3 are the first 3 runs of its 8-run pool (§4.3).
 - **Contrast.** Each member of a hypothesis is a per-task contrast of task values, Σ coef × term (the table's "Contrast" column). It takes one of three forms:
@@ -57,7 +57,7 @@ Not addressed here:
   - an arm against the S8 frontier at that arm's realised mean cost in the same cell and tier (`S8@M1`, §3.3).
 - **Estimand.** The member's mean contrast:
   - within a cell, the mean over the tasks where every term ran (paired tasks);
-  - over a member's cells, the equally weighted mean of the cells.
+  - over a member's cells, the equally weighted mean of the cells. A pooled claim is therefore a claim about the **equal-weight average over its cells**, not about every cell: a cell near the ceiling, where no arm can differ much, dilutes it. Each cell's estimate is reported beside every pooled member (§9).
 - **Clusters.** Tasks within a world share its knowledge base (and its KG build), so worlds are the independent units.
   - F1 and F2 worlds with the same seed share one supplier registry, so they form **one cluster across Study A's cells**. A member pooled over Study A has 9 clusters, not 36.
   - F3 and F7 worlds are their own clusters. A member pooled over Study B has 36.
@@ -68,6 +68,13 @@ Not addressed here:
   - It is exact over all 2^G sign flips up to G = 20 clusters, and uses 10,000 Monte Carlo flips above that.
   - The non-inferiority and equivalence tests shift each cluster by the margin, weighted by its share of the estimate.
   - The smallest attainable one-sided p is 2^−G: 0.00195 at 9 worlds, below every Holm level in this design (the smallest is 0.0125).
+  - **Its condition is symmetric world contributions.** For superiority with exchangeable arms the test is exact. For the shifted nulls (NI, TOST), the differences in differences and the frontier contrasts it assumes that each world's contribution is symmetric about the null. Worlds that are catastrophic for one arm only (a broken KG build, say) or arms near the ceiling skew the world sums, and the level drifts above nominal. Sensitivities, from the independent review (10,000 simulated studies each) and `main_power`:
+    - one arm catastrophic in 15% of worlds (−3 logit): K1 0.075 and K2 0.036 (nominal 0.025), M5 0.075–0.078 (nominal 0.05), K2-NI 0.045 (0.025); M1 0.049–0.053 (0.025) with 10–15% of worlds at −3 to −4 logit;
+    - milder failures (10–20% of worlds at −1.5 to −2 logit): 0.023–0.032 against 0.025;
+    - ceiling cells at a TOST boundary: M3 at +6 pp, where M7 would succeed about 98% of the time in F1-2 and F2-2, 0.052–0.059 against 0.05 (0.047 with those two cells off the ceiling);
+    - heavy-tailed (t3) world effects, correlated epochs, unequal clusters and arm-specific world spreads keep the level at or below nominal (0.017–0.022 against 0.025).
+  - So every member reports its **per-world influence**: each world's contribution to the estimate, and the estimate and test without it. A supported claim that does not survive dropping one world, or that rests on a world whose KG build failed its quality check (`build-test/build_quality.json`), carries a §8 caveat.
+- **Frontier contrasts carry the matched cost's noise** (M2.frontier, M3, and the descriptive M2-F2 and T1). S8 is interpolated at the arm's realised mean cost over S1's mean run cost, both measured on the same worlds, so the interpolation weight is an estimate. Each task's delta-method influence on it, the frontier's slope times (the arm's task cost − r̂ × S1's task run cost) / S1's mean run cost, is added to the task's contrast value, centred within the cell so the estimate is unchanged, and the test, the intervals and the bootstrap all carry it. Without it, when failed runs cost more than successful ones (κ = 1–3, plausible with caps at 8 × B0), M3's TOST rejected at 0.073–0.10 against 0.05 and M2.frontier at 0.027–0.036 against 0.025 (§2.6).
 - **Test types**:
   - **superiority**: H0 Δ ≤ 0 against Δ > 0;
   - **less**: H0 Δ ≥ 0 against Δ < 0 (K2's interaction);
@@ -97,15 +104,15 @@ The confirmatory families, their members, contrasts, cells, tests, margins, α, 
 <!-- BEGIN GENERATED: main_hypotheses.render_hypothesis_table() -->
 | ID | Member | Source | Contrast | Cells | Test | Margin | Holm family (α, procedure) | Planned MDE / power | Status |
 |---|---|---|---|---|---|---|---|---|---|
-| M1 | M1.F1-32 | brief H1a | M1 − S9 | F1-32 | one-sided superiority (H0 Δ ≤ 0) | – | M1 (0.025, holm) | MDE ≈ 15 pp; type I 0.015; power 0.48 at +10 pp, 0.82 at +15 pp (1,000 simulated studies, gate σ priors) | confirmatory |
-| M2 | M2.gate | brief H1b | M1 − S1 | F1-32 | one-sided superiority (H0 Δ ≤ 0) | – | M2 (0.025, serial, stage 1) | MDE ≈ 15 pp; type I 0.013 (M1 = S1); the same single-cell design as M1.F1-32 (1,000 simulated studies, gate σ priors) | confirmatory |
-| M2 | M2.frontier | brief H1b | M1 − S8@M1 | F1-32 | one-sided superiority (H0 Δ ≤ 0) | – | M2 (0.025, serial, stage 2) | MDE ≈ 15 pp; false claims 0.025 at the frontier boundary; power 0.58 at +10 pp, 0.86 at +15 pp, after the gate (1,000 simulated studies, gate σ priors) | confirmatory |
-| M3 | M3.pooled | brief H1c; D-033 | M7 − S8@M7 | F1-2, F1-32, F2-2, F2-10 | equivalence, TOST (H0 Δ ≤ −margin or Δ ≥ margin) | ±6 pp | M3 (0.05, holm) | type I 0.049 / 0.041 at +6 / −6 pp (3,000 / 1,000 studies); power 0.87 at Δ = 0, 0.65 at +2 pp (1,000 simulated studies, gate σ priors) | confirmatory |
-| M5 | M5.pooled | brief H1e; D-033 | M2 − M1k | F3-5, F3-60, F7-10, F7-1000 | equivalence, TOST (H0 Δ ≤ −margin or Δ ≥ margin) | ±6 pp | M5 (0.05, holm) | type I 0.050 / 0.047 at +6 / −6 pp (4,000 / 3,000 studies); power 0.89 at Δ = 0, 0.69 at +2 pp (1,000 simulated studies, gate σ priors) | confirmatory |
-| K1 | K1.F7-1000 | brief H2-struct | S5 − S3s | F7-1000 | one-sided superiority (H0 Δ ≤ 0) | – | K1 (0.025, holm) | MDE ≈ 15 pp; family type I 0.015; power 0.42 at +10 pp, 0.82 at +15 pp (Holm of 2) (1,000 simulated studies, gate σ priors) | confirmatory |
-| K1 | K1.F3-60 | brief H2-struct | S5 − S3s | F3-60 | one-sided superiority (H0 Δ ≤ 0) | – | K1 (0.025, holm) | MDE ≈ 15 pp; family type I 0.015; power 0.47 at +10 pp, 0.87 at +15 pp (Holm of 2) (1,000 simulated studies, gate σ priors) | confirmatory |
-| K2 | K2.interaction | brief H2; D-033 | M1k − S5 − M1 + S1 | F3-5, F3-60, F7-10, F7-1000 | one-sided (H0 Δ ≥ 0, H1 Δ < 0) | – | K2 (0.025, holm) | MDE ≈ 8 pp; type I 0.023; power 0.44 at −5 pp, 0.82 at −8 pp, 0.94 at −10 pp (1,000 simulated studies, gate σ priors) | confirmatory |
-| K2-NI | K2-NI.pooled | brief H2 (operational clause); D-033 | S5 − M2 | F3-5, F3-60, F7-10, F7-1000 | one-sided non-inferiority (H0 Δ ≤ −margin); cost S5/M2 ≤ 0.5 (upper 95% ≤ 0.6) | 5 pp | K2-NI (0.025, holm) | type I 0.027 at −5 pp (4,000 studies); power 0.78 at Δ = 0, 0.36 at −2 pp, 0.99 at +3 pp, with the cost condition (1,000 simulated studies, gate σ priors) | confirmatory |
+| M1 | M1.F1-32 | brief H1a | M1 − S9 | F1-32 | one-sided superiority (H0 Δ ≤ 0) | – | M1 (0.025, holm) | MDE ≈ 15 pp; type I 0.015; power 0.50 at +10 pp, 0.86 at +15 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| M2 | M2.gate | brief H1b | M1 − S1 | F1-32 | one-sided superiority (H0 Δ ≤ 0) | – | M2 (0.025, serial, stage 1) | MDE ≈ 15 pp; type I 0.028 (M1 = S1); the same single-cell design as M1.F1-32 (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| M2 | M2.frontier | brief H1b | M1 − S8@M1 | F1-32 | one-sided superiority (H0 Δ ≤ 0) | – | M2 (0.025, serial, stage 2) | MDE ≈ 15 pp; false claims at the frontier boundary 0.019 / 0.029 / 0.023 with failed runs costing κ = 0 / 1 / 3 times more (κ 3, 3,000 studies: 0.027); power 0.56 at +10 pp, 0.92 at +15 pp (κ 3: 0.47 at +10 pp), after the gate (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| M3 | M3.pooled | brief H1c; D-033 | M7 − S8@M7 | F1-2, F1-32, F2-2, F2-10 | equivalence, TOST (H0 Δ ≤ −margin or Δ ≥ margin) | ±6 pp | M3 (0.05, holm) | type I at +6 / −6 pp: 0.052–0.059 / 0.044–0.049 over κ = 0–3 (3,000 studies each at +6 pp; the excess comes from the ceiling cells F1-2, F2-2: 0.047 off the ceiling); power 0.87 at Δ = 0 (κ 1: 0.78, κ 3: 0.67), 0.69 at +2 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| M5 | M5.pooled | brief H1e; D-033 | M2 − M1k | F3-5, F3-60, F7-10, F7-1000 | equivalence, TOST (H0 Δ ≤ −margin or Δ ≥ margin) | ±6 pp | M5 (0.05, holm) | type I 0.052 / 0.052 at +6 / −6 pp (4,000 studies); power 0.88 at Δ = 0, 0.72 at +2 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| K1 | K1.F7-1000 | brief H2-struct | S5 − S3s | F7-1000 | one-sided superiority (H0 Δ ≤ 0) | – | K1 (0.025, holm) | MDE ≈ 15 pp; family type I 0.010; power 0.41 at +10 pp, 0.83 at +15 pp (Holm of 2) (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| K1 | K1.F3-60 | brief H2-struct | S5 − S3s | F3-60 | one-sided superiority (H0 Δ ≤ 0) | – | K1 (0.025, holm) | MDE ≈ 15 pp; family type I 0.010; power 0.49 at +10 pp, 0.90 at +15 pp (Holm of 2) (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| K2 | K2.interaction | brief H2; D-033 | M1k − S5 − M1 + S1 | F3-5, F3-60, F7-10, F7-1000 | one-sided (H0 Δ ≥ 0, H1 Δ < 0) | – | K2 (0.025, holm) | MDE ≈ 8 pp; type I 0.023; power 0.47 at −5 pp, 0.87 at −8 pp, 0.96 at −10 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
+| K2-NI | K2-NI.pooled | brief H2 (operational clause); D-033 | S5 − M2 | F3-5, F3-60, F7-10, F7-1000 | one-sided non-inferiority (H0 Δ ≤ −margin); cost S5/M2 ≤ 0.6 at 97.5% confidence, point estimate ≤ 0.5 | 5 pp | K2-NI (0.025, holm) | type I 0.022 at −5 pp; power 0.79 at Δ = 0, 0.38 at −2 pp, 0.98 at +3 pp, with the cost condition (1,000 simulated studies at 108 tasks per cell, gate σ priors) | confirmatory |
 | T1 | T1.F1-32 | brief H6 (tier clause); D-028 #2; D-033 | M1[sol] − S8[pool 3]@M1[sol] − M1 + S8[pool 3]@M1 | F1-32 | estimate and intervals | – | – | – | descriptive |
 | T1 | T1.F7-100 | brief H6 (tier clause); D-028 #2; D-033 | M1[sol] − S8[pool 3]@M1[sol] − M1 + S8[pool 3]@M1 | F7-100 | estimate and intervals | – | – | – | descriptive |
 | T1 | T1.pooled | brief H6 (tier clause); D-028 #2; D-033 | M1[sol] − S8[pool 3]@M1[sol] − M1 + S8[pool 3]@M1 | F1-32, F7-100 | estimate and intervals | – | – | – | descriptive |
@@ -155,14 +162,14 @@ Each family gets one of four labels. "Not supported" never means "no effect": it
   - The F2 clause ("S8 at M1's cost ≥ M1") is descriptive (M2-F2).
 
 **M3, peer communication (brief H1c).**
-- **Test.** M3.pooled: equivalence of M7 − S8@M7 within **±6 pp** (D-033; the brief's ±3 pp had power 0.13), pooled over Study A's four cells, by TOST at 0.05 per side.
-- **Claim if supported:** at matched realised cost, the council (3 members, 2 critique rounds, a chair) is within 6 pp of compute-matched self-consistency, in either direction.
+- **Test.** M3.pooled: equivalence of M7 − S8@M7 within **±6 pp** (D-033; the brief's ±3 pp had power 0.13), averaged over Study A's four cells with equal weights, by TOST at 0.05 per side.
+- **Claim if supported:** at matched realised cost, the council (3 members, 2 critique rounds, a chair) is within 6 pp of compute-matched self-consistency in either direction, **averaged over the four cells with equal weights**; each cell's estimate is reported beside it.
 - **Not gated on M7 > S1.** Equivalence to the frontier is informative either way.
 - Cells where M7 costs more than S8(8) are left out and named. If every cell is, the member is "not evaluable".
 
 **M5, role specialization (brief H1e).**
-- **Test.** M5.pooled: equivalence of M2 − M1k within **±6 pp** (D-033; ±3 pp had power 0.05), pooled over Study B's four cells, by TOST at 0.05 per side.
-- **Claim if supported:** giving the KG workers specialist roles changes success by less than 6 pp.
+- **Test.** M5.pooled: equivalence of M2 − M1k within **±6 pp** (D-033; ±3 pp had power 0.05), averaged over Study B's four cells with equal weights, by TOST at 0.05 per side.
+- **Claim if supported:** giving the KG workers specialist roles changes success by less than 6 pp, **averaged over the four cells with equal weights**; each cell's estimate is reported beside it.
 
 **K1, graph structure (brief H2-struct).**
 - **Test.** Two members, Holm at 0.025: K1.F7-1000 and K1.F3-60, each S5 − S3s > 0.
@@ -172,15 +179,16 @@ Each family gets one of four labels. "Not supported" never means "no effect": it
 - The extraction-error gap (S5o − S5) is the gate's diagnostic. It is not re-run here.
 
 **K2, substitution (brief H2).**
-- **Test.** K2.interaction: (M1k − S5) − (M1 − S1) < 0, pooled over Study B's four cells, one-sided at 0.025. It is its own family since D-033.
-- **Claim if supported:** the multi-agent advantage shrinks under KG delivery.
+- **Test.** K2.interaction: (M1k − S5) − (M1 − S1) < 0, averaged over Study B's four cells with equal weights, one-sided at 0.025. It is its own family since D-033.
+- **Claim if supported:** the multi-agent advantage shrinks under KG delivery, averaged over the four cells with equal weights.
 
 **K2-NI, operational non-inferiority (brief H2, operational clause).**
-- **Test.** K2-NI.pooled: S5 − M2 > −5 pp, pooled over Study B's four cells, one-sided at 0.025. It is its own family since D-033 (the brief's 3 pp per family had power 0.12–0.16).
-- **Cost condition.** The claim also requires S5/M2's realised token cost ratio on the paired tasks to be **≤ 0.5**, with the upper end of its 95% world-clustered BCa interval **≤ 0.6**.
+- **Test.** K2-NI.pooled: S5 − M2 > −5 pp, averaged over Study B's four cells with equal weights, one-sided at 0.025. It is its own family since D-033 (the brief's 3 pp per family had power 0.12–0.16).
+- **Cost condition.** The claim also requires S5/M2's realised token cost ratio on the paired tasks to be **≤ 0.6 with 97.5% confidence** (its one-sided upper bound: the upper end of the two-sided 95% world-clustered BCa interval) and its **point estimate ≤ 0.5**.
+  - Realised cost is the logged final attempts' usage. An errored attempt that was retried is in no log (D-030), so its usage is not in the ratio; the report gives each arm's share of such usage from the usage ledgers.
   - This is an intersection-union condition, so it needs no extra α.
   - A rejection with a failed cost condition is "not supported", with the reason given.
-- **Claim if supported:** a single agent with the KG is no more than 5 pp worse than the specialist team, at half its cost or less.
+- **Claim if supported:** a single agent with the KG is no more than 5 pp worse than the specialist team, averaged over the four cells with equal weights (each cell's estimate reported beside it), at a cost ratio below 0.6 with 97.5% confidence and about half or less at its point estimate.
 
 ### 2.5 Descriptive analyses
 
@@ -223,12 +231,14 @@ Not in this study: ensembling as S8(k) − S1 (it is the frontier table), extrac
 
 ### 2.6 Power
 
-- **Planned power.** The table's planned power is from `ape.analysis.main_power`: 1,000 simulated studies per scenario through the real analysis path, at the planned sizes (§4.2).
+- **Planned power.** The table's planned power is from `ape.analysis.main_power`: 1,000 simulated studies per scenario (more at the null boundaries where stated) through the real analysis path, at the sizes the runner runs (§4.2: 9 worlds × 12 = 108 tasks per cell, 3 epochs, the 8-run S1 pool).
   - σ: the gate's priors (σ_w 0.5, σ_g 0.3, σ_u 1.5, σ_v 0.5).
   - Baselines: assumed S1 success per cell (F1-2 0.80, F1-32 0.40, F2-2 0.80, F2-10 0.50, F3-5 0.75, F3-60 0.60, F7-10 0.85, F7-100 0.65, F7-1000 0.45; Sol +0.5 on the logit scale).
-  - Cost multiples: the budget priors.
-  - Type I error is at or below nominal for every family, within Monte Carlo error.
-  - Power is below 0.8 at plausible effects for several members. D-033 records the owner's decisions on that: the TOST margins widened to ±6 pp, K2-NI separated out, T1 made descriptive, and the superiority members' planned MDE kept at about 15 pp.
+  - Cost multiples: the budget priors (`config/budget_assumptions.yaml`: M1 2.5, M7 5.0, S9 1.3).
+  - **Cost that depends on success.** Each run costs (1 + κ (1 − success)) times its base, so with κ > 0 a failed run costs more (with caps at 8 × B0, a failing run that wanders to its cap is the plausible case). M2.frontier and M3 are simulated at κ = 0, 1 and 3. Their frontier nulls are fixed points: the arm's success equals S8 at its own expected cost ratio, which then moves with its success. The population frontier is computed exactly (the vote's multinomial integrated over task difficulty), so a null boundary carries no Monte Carlo error of its own.
+  - **Type I error** is at or below nominal within Monte Carlo error at every null boundary, with one exception: M3 at its +6 pp boundary runs at 0.052–0.059 against 0.05 over κ = 0–3. The excess comes from Study A's ceiling cells: at that boundary M7 would succeed about 98% of the time in F1-2 and F2-2, which skews the world sums (§2.2's condition); with those two cells off the ceiling it is 0.047. Without the matched-cost correction (§2.2) it was 0.095 at κ = 3. M2.frontier: 0.019 / 0.029 / 0.023 at κ = 0 / 1 / 3 (0.036 at κ = 3 without the correction).
+  - Power is below 0.8 at plausible effects for several members. D-033 records the owner's decisions on that: the TOST margins widened to ±6 pp, K2-NI separated out, T1 made descriptive, and the superiority members' planned MDE kept at about 15 pp. Power falls with κ for the frontier members (M3 at Δ = 0: 0.87, 0.78, 0.67 at κ = 0, 1, 3), because the correction makes them carry the matched cost's noise.
+  - The sign flip's sensitivity to asymmetric world contributions is in §2.2.
 - **Pilot re-simulation.** Before the freeze the power is re-simulated with σ_w and σ_g from the gate run's pilot (`runs/<gate run>/pilot/power.json`, `variance_components`: 8 worlds per F3/F7 cell, D-026). The main pilot's 2 worlds per cell cannot estimate them. The command is `uv run --locked python -m ape.analysis.main_power --reps 1000 --pilot <those variance components as JSON> --out runs/main/<id>/pilot/power.json`.
   - Result: [PILOT: pilot σ and power].
 - **The re-simulation is reported, not a decision.** The sizes are fixed by the budget (D-035). A member keeps its test whatever its re-simulated power, and the report gives its achieved MDE.
@@ -381,12 +391,12 @@ Exact model IDs and snapshots are those `readiness/probe_openai.py` confirmed an
 ## 5. Tuning (dev split only; equal budget)
 
 - **Grid.** `python -m ape.run_study tune --study main --run-id <id>` evaluates the candidates declared in `config/tuning_grid_main.yaml` on dev worlds only (seeds 1000+). The freeze hashes the whole grid file. Its rules (D-041):
-  - **What is tuned.** The multi-agent arms S9, M1, M7, M1k and M2, each on its own protocol text: variants of the role notes the arm adds on top of the base prompt every agent gets. A variant never adds generic task advice that would help S1 as much.
-  - **Dev cells.** Each tuned system is named for the plan arm it tunes and tunes on its own dev cells, which are cells of the run plan's tuning cells (`main.tune.a`: F1-32, F2-10; `main.tune.b`: F3-60, F7-1000). M1 tunes on all four, with one selection. Each cell uses 2 worlds × 12 tasks and 1 epoch.
+  - **What is tuned.** The multi-agent arms S9, M1 and M7, each on its own protocol text: variants of the role notes the arm adds on top of the base prompt every agent gets. A variant never adds generic task advice that would help S1 as much.
+  - **Dev cells.** Each tuned system is named for the plan arm it tunes and tunes on its own dev cells, which are cells of the run plan's tuning cells (`main.tune.a`: F1-32, F2-10; `main.tune.b`: F3-60, F7-1000, where M1 alone tunes). M1 tunes on all four, with one selection. Each cell uses 2 worlds × 12 tasks and 1 epoch.
   - **Equal budget:** every tuned system declares exactly `budget_per_system` candidates (the count the run plan prices), before any dev run.
   - **Own knobs only.** A candidate sets only its own arm's knobs; no knob is shared across systems. `tuning.study_grid_problems` checks the grid against the plan before any dev run.
   - **Not tuned.** The structural parameters (§3.2) are not knobs.
-  - **M1s** has no system: it runs as M1's selection, so M1 and M1s stay identical in what the model sees.
+  - **M1s, M1k and M2** have no system: they run as M1's selection (D-047), so the chain M1s → M1 → M1k → M2 shares one protocol variant and its single-switch steps (ISO/CONC, DEL, SPEC) differ in nothing else. Separate picks would have been near-arbitrary at the tune's resolution (below).
   - **Sol** cells run the Luna selections.
   - **Known limit** (D-041). With about 40 dev tasks per candidate, the standard error of a difference between two candidates is about 11 pp. So the tune catches broken variants, not small gains.
 - **Records.**
@@ -403,7 +413,7 @@ Exact model IDs and snapshots are those `readiness/probe_openai.py` confirmed an
   - **S1** has no text of its own: its prompt is the base every agent of every arm gets, as the skeptic engineered it in the gate.
   - The gate tuned S5's systems and S3s under its own equal-budget rule (GATE_PREREG §5) on the gate's dev cells, which include this grid's F3-60 and F7-1000 dev worlds. It gave S5's systems 6 configurations each and S3s 3, against 4 per system here.
 - **Owners and sign-off.** The grid's `owners` and `signed_off` name each system's owner and record their sign-off. A live tune refuses a placeholder grid, or any system without an owner and a sign-off (D-036). The roles (brief §7.3; D-018):
-  - **M-arm prompt author** (an independent team member, not the skeptic). Writes the M-arm prompts and owns the S9, M1, M7, M1k and M2 candidates: [USER: M-arm prompt author]
+  - **M-arm prompt author** (an independent team member, not the skeptic). Writes the M-arm prompts and owns the S9, M1 and M7 candidates (M1s, M1k and M2 run as M1's selection): [USER: M-arm prompt author]
   - **Skeptic.** Engineers the baselines S1 and S3s, including caching, to be as strong as possible, and signs off that S1 runs as engineered: [USER: skeptic]
   - **Analyst.** Owns this freeze: [USER: analyst]
 
@@ -418,11 +428,14 @@ Exact model IDs and snapshots are those `readiness/probe_openai.py` confirmed an
   - **One cap per task cell, for every arm:** C_max = ⌈m × B0⌉ total tokens, with m the cap multiple.
   - **Enforcement** is on total tokens over every model call of the sample: every agent and the `kg` role (Inspect's `token_limit`). All four meters are reported.
   - The final caps: [PILOT: token caps].
-- **Cap multiple** (D-039). m starts at 8. After the pilot, each arm's cap-hit rate is computed per cell.
-  - If any arm exceeds 10%, m doubles for **all** arms (8 → 16, and at most once more, to 32). That arm's pilot cells re-run under the new caps, and the check repeats.
-  - The freeze records the final multiple and every pilot cap-hit rate. It refuses while any arm is above 10% at 32 × B0.
+- **Cap multiple** (D-039, D-045, D-047). m starts at 8. After the pilot, each arm's token-limit hit rate (an Inspect token limit, or an agent stopped on `limit`) is computed over its pilot cells.
+  - The decision uses the **one-sided 97.5% Clopper–Pearson lower bound, pooled over the arm's pilot cells** (the gate's PC5 rule), not point estimates per arm and cell, which would escalate or refuse by chance at true rates of 2–5%.
+  - If any arm's lower bound exceeds 10%, m doubles for **all** arms (8 → 16, and at most once more, to 32). That arm's pilot cells re-run under the new caps, and the check repeats.
+  - Turn-cap hits and other limits (the working-time and cost guards) are gated the same way but never re-run: the freeze refuses when an arm's lower bound for them exceeds 10%.
+  - Arms the pilot does not run get projected rates: M1s takes M1's, S8k3 is projected from resampled triples of S1 pilot samples, and Sol cells take the Luna rates.
+  - The freeze records the final multiple and every pilot rate (`config/cap_gate.json`). It refuses while any arm's lower bound is above 10% at 32 × B0.
   - The final multiple: [PILOT: cap multiple].
-- **Cap hits are failures** (success 0) in every analysis.
+- **Cap hits are failures** (success 0) in every analysis, and cast no vote in the S8 frontier, whatever the scorer read (§2.1).
   - **What counts as a cap hit:** any Inspect sample limit; or an unanswered sample whose single agent reached its turn cap; or, for a multi-agent arm, an unanswered sample in which any agent stopped at its turn cap or on a limit.
   - Cap-hit rates are reported per arm and cell, with the token-cap share and Clopper–Pearson bounds.
 - **Other limits.**
@@ -438,6 +451,7 @@ Exact model IDs and snapshots are those `readiness/probe_openai.py` confirmed an
   - **Cache-adjusted $ and list $,** computed from token counts × `config/model_costs.yaml`, never from billed amounts.
   - **Wall-clock:** Inspect working time, which leaves out rate-limit waits; total time is kept too.
   - Every agent of a multi-agent arm is included, with per-agent accounting (`mas_accounting`).
+  - **Realised cost is the logged final attempts' usage.** An errored attempt that Inspect retried is in no log (D-030); its usage is in the run's usage ledgers (`<log dir>/usage_ledger.jsonl`), counted in spend, and the report gives each arm's share of it. Realised cost, the frontier matching and K2-NI's cost ratio exclude it.
   - Build and embedding costs are metered in the ledger and reported per build, outside per-sample cost.
 
 ## 7. Fairness and validity controls
@@ -477,7 +491,8 @@ These are the brief's §4.4 invariants and the harness checks.
 | H2 | Cap hits per arm and cell | `harness_rates`, `caps_table` | The pilot gate (§6) keeps these at or below 10%. At test, a lower bound above 10% is reported as a caveat on every member using that arm and cell. It does not block, since cap hits are pre-registered failures. |
 | H3 | The frozen caps were the caps applied | `analyze_main.caps_table` (`consistent`) | Any inconsistency is a violation. |
 | H4 | Coverage: every confirmatory plan cell ran, and every row was read | `analyze_main` (`coverage`, `problems`) | Missing cells make members "not evaluable", named. A cell missing for any reason other than a budget stop is a violation. |
-| H5 | Rows are counted once | `main_stats.confirmatory_rows` | Duplicate sample-epochs are dropped and counted. |
+| H5 | Rows are counted once | `main_stats.confirmatory_rows` | Duplicate sample-epochs are dropped and counted: rows with the same sample uuid and epoch, whichever log file holds them (a completed sample copied into a retry's log keeps its uuid). |
+| W1 | No supported claim rests on one world, or on a world whose KG build failed its quality check (§2.2) | `main_stats.world_influence`, `caveats`; `analyze_main` reads `build-test/build_quality.json` | Not a block: the claim is reported with the caveat, the influential world and the result without it. The analyst diagnoses the world from its logs (a harness or build defect is a deviation, §10). |
 
 **Not checked**, because the arms are not in this study:
 - S5 ≈ M3 (handoff) and M1 with one worker ≈ S1: Tier B.
@@ -497,6 +512,8 @@ These are the brief's §4.4 invariants and the harness checks.
   - clusters and tasks;
   - its label and the reason for it;
   - for K2-NI, the cost ratio with its interval;
+  - for a pooled member, each cell's estimate and interval beside the pooled one;
+  - its per-world influence (the most influential worlds, and the estimate and test without each) and any §8 caveat;
   - the cells left out.
 - **Descriptive results are labelled "descriptive"** wherever they appear, and carry no claim (§2.5).
 - **Mechanism claims cite a single-switch contrast.** Anything else is labelled a bundle contrast (§2.5).

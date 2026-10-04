@@ -139,29 +139,29 @@ HYPOTHESES: tuple[Hypothesis, ...] = (
     Hypothesis(
         "M1", "brief H1a", "Context isolation drives multi-agent gains on breadth tasks: M1 − S9 > 0 on F1-high (M1 stands in for M1s in the MVS).",
         "confirmatory",
-        (Member("M1.F1-32", _t(("M1", 1), ("S9", -1)), ("F1-32",), "superiority", mde=SUPERIORITY_MDE, power="type I 0.015; power 0.48 at +10 pp, 0.82 at +15 pp (1,000 simulated studies, gate σ priors)"),),
-        note="Valid only if M1 ≈ M1s (M4, descriptive since D-028). M1s − S9 on M1s's 50 tasks is reported alongside (`contrasts`).",
+        (Member("M1.F1-32", _t(("M1", 1), ("S9", -1)), ("F1-32",), "superiority", mde=SUPERIORITY_MDE, power="type I 0.015; power 0.50 at +10 pp, 0.86 at +15 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),),
+        note="Valid only if M1 ≈ M1s (M4, descriptive since D-028). M1s − S9 on M1s's 60 tasks (5 worlds × 12) is reported alongside (`contrasts`).",
     ),
     Hypothesis(
         "M2", "brief H1b", "Ensembling vs coordination: on F1-high M1 beats S8 at M1's realised cost, tested only after M1 beats S1 (serial gatekeeping).",
         "confirmatory",
         (
-            Member("M2.gate", _t(("M1", 1), ("S1", -1)), ("F1-32",), "superiority", stage=1, mde=SUPERIORITY_MDE, power="type I 0.013 (M1 = S1); the same single-cell design as M1.F1-32 (1,000 simulated studies, gate σ priors)", note="gate: a multi-agent arm meets the S8 frontier only after beating S1 (brief §7.4)"),
-            Member("M2.frontier", (Term("M1"), Term("S8", -1, match="M1")), ("F1-32",), "superiority", stage=2, mde=SUPERIORITY_MDE, power="false claims 0.025 at the frontier boundary; power 0.58 at +10 pp, 0.86 at +15 pp, after the gate (1,000 simulated studies, gate σ priors)"),
+            Member("M2.gate", _t(("M1", 1), ("S1", -1)), ("F1-32",), "superiority", stage=1, mde=SUPERIORITY_MDE, power="type I 0.028 (M1 = S1); the same single-cell design as M1.F1-32 (1,000 simulated studies at 108 tasks per cell, gate σ priors)", note="gate: a multi-agent arm meets the S8 frontier only after beating S1 (brief §7.4)"),
+            Member("M2.frontier", (Term("M1"), Term("S8", -1, match="M1")), ("F1-32",), "superiority", stage=2, mde=SUPERIORITY_MDE, power="false claims at the frontier boundary 0.019 / 0.029 / 0.023 with failed runs costing κ = 0 / 1 / 3 times more (κ 3, 3,000 studies: 0.027); power 0.56 at +10 pp, 0.92 at +15 pp (κ 3: 0.47 at +10 pp), after the gate (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),
         ),
         procedure="serial",
     ),
     Hypothesis(
-        "M3", "brief H1c; D-033", "Communication adds ≈ 0 at matched cost: M7 − S8 (at M7's realised cost) within ±6 pp, Study A's four cells pooled.",
+        "M3", "brief H1c; D-033", "Communication adds ≈ 0 at matched cost: M7 − S8 (at M7's realised cost) within ±6 pp, averaged over Study A's four cells with equal weights (each cell's estimate is reported beside it).",
         "confirmatory",
-        (Member("M3.pooled", (Term("M7"), Term("S8", -1, match="M7")), STUDY_A_CELLS, "tost", TOST_MARGIN, power="type I 0.049 / 0.041 at +6 / −6 pp (3,000 / 1,000 studies); power 0.87 at Δ = 0, 0.65 at +2 pp (1,000 simulated studies, gate σ priors)"),),
+        (Member("M3.pooled", (Term("M7"), Term("S8", -1, match="M7")), STUDY_A_CELLS, "tost", TOST_MARGIN, power="type I at +6 / −6 pp: 0.052–0.059 / 0.044–0.049 over κ = 0–3 (3,000 studies each at +6 pp; the excess comes from the ceiling cells F1-2, F2-2: 0.047 off the ceiling); power 0.87 at Δ = 0 (κ 1: 0.78, κ 3: 0.67), 0.69 at +2 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),),
         alpha=ALPHA_TOST,
         note="Margin ±6 pp (D-033; the brief's ±3 pp had power 0.13). Not gated on M7 > S1: equivalence to the frontier is informative whether or not M7 beats S1. Cells where M7 costs more than S8(8) are left out and named.",
     ),
     Hypothesis(
-        "M5", "brief H1e; D-033", "Role specialization adds ≈ 0: M2 − M1k within ±6 pp, Study B's four cells pooled.",
+        "M5", "brief H1e; D-033", "Role specialization adds ≈ 0: M2 − M1k within ±6 pp, averaged over Study B's four cells with equal weights (each cell's estimate is reported beside it).",
         "confirmatory",
-        (Member("M5.pooled", _t(("M2", 1), ("M1k", -1)), STUDY_B_CELLS, "tost", TOST_MARGIN, power="type I 0.050 / 0.047 at +6 / −6 pp (4,000 / 3,000 studies); power 0.89 at Δ = 0, 0.69 at +2 pp (1,000 simulated studies, gate σ priors)"),),
+        (Member("M5.pooled", _t(("M2", 1), ("M1k", -1)), STUDY_B_CELLS, "tost", TOST_MARGIN, power="type I 0.052 / 0.052 at +6 / −6 pp (4,000 studies); power 0.88 at Δ = 0, 0.72 at +2 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),),
         alpha=ALPHA_TOST,
         note="Margin ±6 pp (D-033; the brief's ±3 pp had power 0.05).",
     ),
@@ -169,20 +169,20 @@ HYPOTHESES: tuple[Hypothesis, ...] = (
         "K1", "brief H2-struct", "Graph structure beats engineered flat retrieval: S5 > S3s on F7-high and F3-high.",
         "confirmatory",
         (
-            Member("K1.F7-1000", _t(("S5", 1), ("S3s", -1)), ("F7-1000",), "superiority", mde=SUPERIORITY_MDE, power="family type I 0.015; power 0.42 at +10 pp, 0.82 at +15 pp (Holm of 2) (1,000 simulated studies, gate σ priors)"),
-            Member("K1.F3-60", _t(("S5", 1), ("S3s", -1)), ("F3-60",), "superiority", mde=SUPERIORITY_MDE, power="family type I 0.015; power 0.47 at +10 pp, 0.87 at +15 pp (Holm of 2) (1,000 simulated studies, gate σ priors)"),
+            Member("K1.F7-1000", _t(("S5", 1), ("S3s", -1)), ("F7-1000",), "superiority", mde=SUPERIORITY_MDE, power="family type I 0.010; power 0.41 at +10 pp, 0.83 at +15 pp (Holm of 2) (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),
+            Member("K1.F3-60", _t(("S5", 1), ("S3s", -1)), ("F3-60",), "superiority", mde=SUPERIORITY_MDE, power="family type I 0.010; power 0.49 at +10 pp, 0.90 at +15 pp (Holm of 2) (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),
         ),
     ),
     Hypothesis(
-        "K2", "brief H2; D-033", "KG delivery substitutes for multi-agent specialization: the delivery × architecture interaction (M1k − S5) − (M1 − S1) is negative, Study B's four cells pooled.",
+        "K2", "brief H2; D-033", "KG delivery substitutes for multi-agent specialization: the delivery × architecture interaction (M1k − S5) − (M1 − S1) is negative, averaged over Study B's four cells with equal weights.",
         "confirmatory",
-        (Member("K2.interaction", _t(("M1k", 1), ("S5", -1), ("M1", -1), ("S1", 1)), STUDY_B_CELLS, "less", mde=0.08, power="type I 0.023; power 0.44 at −5 pp, 0.82 at −8 pp, 0.94 at −10 pp (1,000 simulated studies, gate σ priors)"),),
+        (Member("K2.interaction", _t(("M1k", 1), ("S5", -1), ("M1", -1), ("S1", 1)), STUDY_B_CELLS, "less", mde=0.08, power="type I 0.023; power 0.47 at −5 pp, 0.87 at −8 pp, 0.96 at −10 pp (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),),
         note="Its own family since D-033 (the operational NI is K2-NI).",
     ),
     Hypothesis(
-        "K2-NI", "brief H2 (operational clause); D-033", "Operationally, the single KG agent matches the specialists at half the cost: S5 ≥ M2 − 5 pp, Study B's four cells pooled, at a realised cost ratio S5/M2 ≤ 0.5 (upper 95% CI ≤ 0.6).",
+        "K2-NI", "brief H2 (operational clause); D-033", "Operationally, the single KG agent is within 5 pp of the specialists at no more than about half their cost: S5 ≥ M2 − 5 pp averaged over Study B's four cells with equal weights, with the realised token cost ratio S5/M2 ≤ 0.6 at 97.5% confidence and its point estimate ≤ 0.5.",
         "confirmatory",
-        (Member("K2-NI.pooled", _t(("S5", 1), ("M2", -1)), STUDY_B_CELLS, "ni", NI_MARGIN, cost_ratio=CostRatio("S5", "M2", 0.5, 0.6), power="type I 0.027 at −5 pp (4,000 studies); power 0.78 at Δ = 0, 0.36 at −2 pp, 0.99 at +3 pp, with the cost condition (1,000 simulated studies, gate σ priors)"),),
+        (Member("K2-NI.pooled", _t(("S5", 1), ("M2", -1)), STUDY_B_CELLS, "ni", NI_MARGIN, cost_ratio=CostRatio("S5", "M2", 0.5, 0.6), power="type I 0.022 at −5 pp; power 0.79 at Δ = 0, 0.38 at −2 pp, 0.98 at +3 pp, with the cost condition (1,000 simulated studies at 108 tasks per cell, gate σ priors)"),),
         note="D-033: one member pooled over F3 and F7 at 5 pp, its own family (the brief's 3 pp per family inside K2's Holm had power 0.12-0.16). The claim needs the NI rejection and the cost-ratio condition (intersection-union: no extra adjustment).",
     ),
     # ---- descriptive ----
@@ -213,7 +213,7 @@ HYPOTHESES: tuple[Hypothesis, ...] = (
         note="No margin in the brief.",
     ),
     Hypothesis(
-        "M4", "brief H1d; D-028 #3", "Concurrency is latency-only: M1 − M1s accuracy and the wall-clock ratio M1/M1s on F1-32 (M1s: 50 tasks), with intervals.",
+        "M4", "brief H1d; D-028 #3", "Concurrency is latency-only: M1 − M1s accuracy and the wall-clock ratio M1/M1s on F1-32 (M1s: 60 tasks), with intervals.",
         "descriptive", (Member("M4.F1-32", _t(("M1", 1), ("M1s", -1)), ("F1-32",), "descriptive"),), estimator="m4",
     ),
     Hypothesis(
@@ -306,7 +306,7 @@ def render_hypothesis_table(hypotheses=HYPOTHESES) -> str:
         stage = "" if r["stage"] is None else f", stage {r['stage']}"
         fam = f"{r['family']} ({r['alpha']:g}, {r['procedure']}{stage})" if r["status"] == "confirmatory" else "–"
         margin = "–" if r["margin"] is None else f"±{100 * r['margin']:g} pp" if r["test"] == "tost" else f"{100 * r['margin']:g} pp"
-        extra = f"; cost {r['cost_ratio']['num']}/{r['cost_ratio']['den']} ≤ {r['cost_ratio']['max_point']} (upper 95% ≤ {r['cost_ratio']['max_upper']})" if r.get("cost_ratio") else ""
+        extra = f"; cost {r['cost_ratio']['num']}/{r['cost_ratio']['den']} ≤ {r['cost_ratio']['max_upper']} at 97.5% confidence, point estimate ≤ {r['cost_ratio']['max_point']}" if r.get("cost_ratio") else ""
         test = TEST_TEXT.get(r["test"], r["test"] or "–") + extra
         planned = "; ".join(x for x in ((f"MDE ≈ {100 * r['mde']:g} pp" if r.get("mde") else ""), r.get("planned_power") or "") if x) or "–"
         out.append(f"| {r['id']} | {r['member']} | {r['source']} | {r['contrast'] or r['statement']} | {', '.join(r['cells'] or []) or '–'} | {test} | {margin} | {fam} | {planned} | {r['status']} |")
