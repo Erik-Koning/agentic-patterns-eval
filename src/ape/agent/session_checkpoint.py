@@ -25,7 +25,9 @@ stale file is left alone, never read.
 **Layout.** `<dir>/<sample id>/epoch-<n>/<key[:24]>.json` (temporary files `*.tmp-<pid>` next to it).
 
 **Lifecycle.** A session that ends normally (report phase done, or overflow) or by an Inspect limit deletes its
-checkpoint: the sample is complete, and a later run of the same task never resumes stale state. An error keeps it,
+checkpoint: the sample is complete, and a later run of the same task never resumes stale state. That includes a time
+or working limit, which ends the sample by cancelling the solver rather than raising into it
+(`context_policy.inspect_limit_hit`; review A-6). An error, a user interrupt or a cancelled run keeps it,
 with the failure recorded (its error and the usage of the calls made since the last save), so the retry resumes. A
 process kill keeps it too, without the failure record.
 

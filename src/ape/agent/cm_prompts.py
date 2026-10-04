@@ -51,16 +51,20 @@ TODO_EXTRACT_PROMPT = (
     "Update the todo list for this support shift.\n"
     "Read the message below and return the complete updated todo list: keep every existing entry with its "
     "status, add an entry for each case, memo or follow-up the message introduces, and mark memos the message "
-    "withdraws as completed. Reply with only a JSON array of objects "
+    "withdraws as completed. If the message opens a case, mark any case still in_progress as completed (a case "
+    "ends with its answer) and the case it opens as in_progress. Reply with only a JSON array of objects "
     '{"content": "...", "status": "pending" | "in_progress" | "completed"}.'
 )
 
+# A case ends the moment its answer (submit_decision or finish) is recorded: the loop gives no later turn in it, so
+# the list is updated at the start of the next case (review A-3). The same text for every arm with a todo list.
 TODO_ADDENDUM = (
     "## Todo list\n"
-    "Keep a todo list for this shift with the todo_write tool: an entry for each case in the queue (in_progress "
-    "while you work on it, completed when it is done), and entries for the memos in force and the cases waiting "
-    "for a follow-up. Update it as you work. Your current todo list is shown to you with each case, also when "
-    "earlier parts of the shift are no longer shown."
+    "Keep a todo list for this shift with the todo_write tool: an entry for each case in the queue, and entries for "
+    "the memos in force and the cases waiting for a follow-up. A case ends as soon as you submit its answer, with no "
+    "later turn in it, so update the list at the start of each case: first mark the previous case completed and this "
+    "one in_progress, then work on the case. Your current todo list is shown to you with each case, also when earlier "
+    "parts of the shift are no longer shown."
 )
 
 NATIVE_MOCK_PROMPT = (
