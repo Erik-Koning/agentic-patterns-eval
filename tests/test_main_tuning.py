@@ -1,7 +1,7 @@
 """The main study's tuning grid and the multi-agent arms' tuning knobs (BUILD_PLAN B3): the default prompt variant is
 B2's notes byte for byte; every variant keeps the protocol rules; the knobs are per arm, validated when a solver is
-built and recorded in the task metadata (M1s, M1k and M2 read M1's, so the orchestrator chain runs one protocol
-variant: BUILD_REVIEW A-1); every candidate of `config/tuning_grid_main.yaml` builds its
+built and recorded in the task metadata (S9, M1s, M1k and M2 read M1's, so the chain runs one protocol variant:
+BUILD_REVIEW A-1, D-047); every candidate of `config/tuning_grid_main.yaml` builds its
 solver and runs its own text through the real loop; the grid's static checks (equal budgets, own knobs, priced by the
 plan); and a live tune refuses an unsigned grid. The offline tune over this grid runs in `tests/test_run_study.py`'s
 offline `all`."""
@@ -106,13 +106,14 @@ def test_every_variant_keeps_the_protocol_rules(name):
 
 def test_knobs_are_per_tuned_arm_and_the_orchestrator_chain_reads_m1s():
     env = {"APE_MAS_M1_PROMPT": "verify", "APE_MAS_M1_CLIP": "500", "APE_MAS_M7_PROMPT": "structured", "APE_MAS_S9_PROMPT": ""}
-    assert K.resolve("M1", env) == K.resolve("M1s", env) == K.resolve("M1k", env) == K.resolve("M2", env) == K.Knobs("verify", 500)
-    assert K.resolve("M7", env) == K.Knobs("structured") and K.resolve("S9", env) == K.Knobs(), "an empty value counts as unset"
+    chain = ("S9", "M1s", "M1", "M1k", "M2")
+    assert {K.resolve(a, env) for a in chain} == {K.Knobs("verify", 500)}, "an empty APE_MAS_S9_PROMPT counts as unset, not as a knob"
+    assert K.resolve("M7", env) == K.Knobs("structured")
     assert K.resolve("S8k3", env) == K.Knobs() and K.arm_knobs("S8k3") == []
-    assert K.arm_knobs("S9") == ["APE_MAS_S9_PROMPT"]
-    assert K.arm_knobs("M1s") == K.arm_knobs("M1k") == K.arm_knobs("M2") == K.arm_knobs("M1") == ["APE_MAS_M1_PROMPT", "APE_MAS_M1_CLIP"]
-    assert set(K.KNOBS) == {f"APE_MAS_{a}_PROMPT" for a in ("S9", "M1", "M7")} | {f"APE_MAS_{a}_CLIP" for a in ("M1", "M7")}
-    for stale in ("APE_MAS_M1K_PROMPT", "APE_MAS_M2_PROMPT", "APE_MAS_M1K_CLIP", "APE_MAS_M2_CLIP"):  # the chain has no knobs of its own
+    assert all(K.arm_knobs(a) == ["APE_MAS_M1_PROMPT", "APE_MAS_M1_CLIP"] for a in chain)
+    assert set(K.KNOBS) == {f"APE_MAS_{a}_PROMPT" for a in ("M1", "M7")} | {f"APE_MAS_{a}_CLIP" for a in ("M1", "M7")}
+    no_knobs = ("APE_MAS_S9_PROMPT", "APE_MAS_S9_CLIP", "APE_MAS_M1K_PROMPT", "APE_MAS_M2_PROMPT", "APE_MAS_M1K_CLIP", "APE_MAS_M2_CLIP")
+    for stale in no_knobs:  # the chain has no knobs of its own
         with pytest.raises(ValueError, match=f"{stale} is not a multi-agent knob"):
             K.resolve("M1k", {stale: "concise"})
 
@@ -139,7 +140,7 @@ def test_candidate_env_checks():
     assert K.candidate_problems("M1", {"APE_MAS_M1_PROMPT": "concise", "APE_MAS_M1_CLIP": 1000}) == []
     assert K.candidate_problems("M1k", {"APE_MAS_M1_PROMPT": "concise"}) == []  # M1k reads M1's knobs (it has no system)
     assert K.candidate_problems("M7", {"APE_MAS_M1_PROMPT": "concise"}) == ["M7 candidates set only M7's knobs (APE_MAS_M7_PROMPT, APE_MAS_M7_CLIP), not APE_MAS_M1_PROMPT"]
-    assert K.candidate_problems("S9", {"APE_S3S_BUDGET": "1000"}) == ["S9 candidates set only S9's knobs (APE_MAS_S9_PROMPT), not APE_S3S_BUDGET"]
+    assert K.candidate_problems("M7", {"APE_S3S_BUDGET": "1000"}) == ["M7 candidates set only M7's knobs (APE_MAS_M7_PROMPT, APE_MAS_M7_CLIP), not APE_S3S_BUDGET"]
     assert K.candidate_problems("S3s", {"APE_S3S_BUDGET": "1000"}) == []
     assert K.candidate_problems("S3s", {"APE_MAS_M7_PROMPT": "verify"}) == ["S3s is not a multi-agent arm, so it sets no APE_MAS_* knob (APE_MAS_M7_PROMPT)"]
     assert K.candidate_problems("M7", {"APE_MAS_M7_PROMPT": "nope"}) == ["APE_MAS_M7_PROMPT='nope' is not a prompt variant (default, concise, structured, verify)"]
@@ -288,6 +289,27 @@ def test_the_orchestrator_chain_runs_one_variant_byte_for_byte(env, no_mas_env, 
     assert seen["M1k"]["system"] == seen["M2"]["system"]
 
 
+@pytest.mark.parametrize("variant", sorted(P.VARIANTS))
+def test_s9_runs_m1s_variant(env, no_mas_env, variant):
+    """D-047: S9 joins the chain (M1's contrast is M1 - S9, the ISO step M1s - S9). Under each M1 variant S9 and M1s record
+    the same variant and text hash, and S9's planning note is that variant's (`RoleNotes.s9`), no other's."""
+    no_mas_env.setenv("APE_MAS_M1_PROMPT", variant)
+    params, shown = {}, {}
+    for arm in ("S9", "M1s"):
+        rec = Recorder(env / "worlds")
+        _, s = _run(env, arm, rec, "F1", "8")
+        params[arm], shown[arm] = s.store["mas_params"], "\n".join(rec.seen)
+    assert params["S9"]["prompt_variant"] == params["M1s"]["prompt_variant"] == variant
+    assert params["S9"]["prompt_sha"] == params["M1s"]["prompt_sha"] == P.VARIANTS[variant].sha()
+    assert "result_clip_tokens" not in params["S9"] and params["M1s"]["result_clip_tokens"] == 2000
+    mine = P.VARIANTS[variant]
+    assert all(lit in shown["S9"] for lit in _literals(mine.s9)), "S9 ran the variant's planning note"
+    assert all(lit in shown["M1s"] for lit in _literals(mine.orchestrator)), "M1s ran the variant's orchestrator note"
+    for other, notes in P.VARIANTS.items():
+        if notes.s9 != mine.s9:
+            assert not all(lit in shown["S9"] for lit in _literals(notes.s9)), f"{other}'s planning note was shown"
+
+
 class ChainRecorder(GoldMulti):
     """The gold mock, keeping the system prompt and the first user message the orchestrator and a worker are shown."""
 
@@ -312,8 +334,8 @@ def test_the_main_grid_gives_every_b3_system_an_equal_budget_or_a_reason():
     grid = _grid()
     systems, inherited = grid["systems"], grid["inherited"]
     assert set(systems) | set(inherited) >= B3_SYSTEMS and not set(systems) & set(inherited)
-    assert set(systems) == {"S9", "M1", "M7"}
-    assert {a: inherited[a]["source"] for a in inherited} == {"S1": "fixed", "S5": "gate", "S3s": "gate", "M1k": "M1", "M2": "M1"}  # A-1
+    assert set(systems) == {"M1", "M7"}
+    assert {a: inherited[a]["source"] for a in inherited} == {"S1": "fixed", "S5": "gate", "S3s": "gate", "S9": "M1", "M1k": "M1", "M2": "M1"}  # A-1, D-047
     assert systems["M1"]["dev_cells"] == ["F1-32", "F2-10", "F3-60", "F7-1000"], "M1's selection is the whole chain's: it tunes on Study A's and B's cells"
     assert grid["equal_budgets"] is True and grid["budget_per_system"] == 4 and "placeholder" not in grid
     for name, s in systems.items():
@@ -327,10 +349,11 @@ def test_the_main_grid_gives_every_b3_system_an_equal_budget_or_a_reason():
 def test_the_main_grid_passes_its_static_checks_against_the_plan():
     grid, planned = _grid(), _planned()
     problems = tuning.study_grid_problems(grid, planned, K.candidate_problems)
-    # Until run_plan.yaml's main.tune.b drops them, it may still price arms this grid inherits (S3s from the gate; M1k
-    # and M2 from M1, BUILD_REVIEW A-1): each is a redundant spend; once dropped, none.
-    source = {"S3s": "gate", "M1k": "M1", "M2": "M1"}
-    redundant = [f"{a} is inherited ({source[a]}), yet main.tune.b prices tuning it: a redundant spend; drop it from the plan" for a in planned if a in source]
+    # Until run_plan.yaml's tuning cells drop them, they may still price arms this grid inherits (S3s from the gate; S9,
+    # M1k and M2 from M1, BUILD_REVIEW A-1, D-047): each is a redundant spend; once dropped, none.
+    source = {"S3s": "gate", "S9": "M1", "M1k": "M1", "M2": "M1"}
+    redundant = [f"{a} is inherited ({source[a]}), yet {', '.join(planned[a]['candidates'])} prices tuning it: a redundant spend; drop it from the plan"
+                 for a in planned if a in source]
     assert problems == redundant
     for arm in source:
         planned.pop(arm, None)
@@ -347,18 +370,18 @@ def _edit(grid: dict, system: str, i: int, **cand) -> dict:
 
 def test_the_static_checks_catch_what_the_tune_or_the_pilot_would_find_too_late():
     grid, planned = _grid(), _planned()
-    for arm in ("S3s", "M1k", "M2"):  # inherited (see above)
+    for arm in ("S3s", "S9", "M1k", "M2"):  # inherited (see above)
         planned.pop(arm, None)
 
     def problems(g, p=planned):
         return tuning.study_grid_problems(g, p, K.candidate_problems)
 
-    assert problems(_edit(grid, "S9", 1, env={"APE_MAS_M1_PROMPT": "concise"})) == [
-        "S9: candidate s9-concise: S9 candidates set only S9's knobs (APE_MAS_S9_PROMPT), not APE_MAS_M1_PROMPT",
+    assert problems(_edit(grid, "M7", 1, env={"APE_MAS_M1_PROMPT": "concise"})) == [
+        "M7: candidate m7-concise: M7 candidates set only M7's knobs (APE_MAS_M7_PROMPT, APE_MAS_M7_CLIP), not APE_MAS_M1_PROMPT",
     ]  # each arm runs under exactly its own selection's knobs (D-042): the arm's own-knob check is the rule, not a shared name
     assert problems(_edit(grid, "M7", 2, env={"APE_MAS_M7_PROMPT": "fancy"})) == ["M7: candidate m7-structured: APE_MAS_M7_PROMPT='fancy' is not a prompt variant (default, concise, structured, verify)"]
     assert problems(_edit(grid, "M1", 0, arm="M1k")) == ["M1: candidate m1-default runs M1k, not M1 (a system's candidates run as the plan arm it is named for)"]
-    assert problems(_edit(grid, "S9", 3, id="s9-default")) == ["S9: candidate ids ['s9-default'] are declared more than once"]
+    assert problems(_edit(grid, "M1", 3, id="m1-default")) == ["M1: candidate ids ['m1-default'] are declared more than once"]
     short = json.loads(json.dumps(grid))
     short["systems"]["M7"]["candidates"].pop()
     assert problems(short) == ["M7: 3 candidates; equal budgets give every system budget_per_system (4)", "M7: 3 candidates, but run_plan.yaml prices {'main.tune.a': 4}"]

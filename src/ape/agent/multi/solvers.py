@@ -18,8 +18,9 @@ arm's delivery, so DEL stays one switch: M1 to M1k changes it for all agents at 
 and whether the planner holds the knowledge.)
 
 **Tuning knobs** (`knobs.py`, BUILD_PLAN B3): each factory reads its arm's `APE_MAS_<ARM>_*` variables when it is built
-(the prompt variant of the role notes, and the clip on a worker's result or a member's rationale); M1s, M1k and M2 read
-M1's, so the orchestrator chain runs one protocol variant and each of its steps stays one switch (BUILD_REVIEW A-1).
+(the prompt variant of the role notes, and the clip on a worker's result or a member's rationale); S9, M1s, M1k and M2
+read M1's, so the chain S9 -> M1s -> M1 -> M1k -> M2 runs one protocol variant and each step stays one switch
+(BUILD_REVIEW A-1, D-047).
 
 **Records** (sample store): `mas_switches` (the brief's full switch vector, §4.1), `mas_params` (fixed structure:
 workers, rounds, k, turn caps, and how parallel units are scheduled; and the arm's knobs: `prompt_variant`, the hash
@@ -75,7 +76,7 @@ def _params(arm: str, max_turns: int, knobs: K.Knobs) -> dict:
     p: dict = {"max_turns": max_turns}
     if arm in K.KNOB_ARM:
         p |= {"prompt_variant": knobs.prompt, "prompt_sha": knobs.notes.sha()}
-        if K.KNOB_ARM[arm] in K.CLIP_ARMS:
+        if K.KNOB_ARM[arm] in K.CLIP_ARMS and arm not in K.NO_CLIP:
             p["result_clip_tokens"] = knobs.clip
     if REGISTRY[arm].get("ISO"):
         p |= {"n_workers": N_WORKERS, "worker_turns": max_turns, "workers_scheduled": "concurrent" if REGISTRY[arm]["CONC"] else "serial"}
