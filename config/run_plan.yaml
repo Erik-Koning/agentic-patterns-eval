@@ -26,8 +26,9 @@ budget:
   # right-sized plan's conservative projection plus headroom (gate 214, main 1,013, study_g 3,483 -> 4,710); were the
   # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells. R-B4
   # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,126.8 + the D-039 pilot re-runs the
-  # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225).
-  allocations: {gate: 300, main: 1225, study_g: 3600}
+  # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225). m5: the M5 add-on study (off by default; its
+  # enabled cells project ~$123 conservative, the ledger arms at 1.5 x their team).
+  allocations: {gate: 300, main: 1225, study_g: 3600, m5: 150}
   contingency_usd: 1000
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
@@ -194,6 +195,25 @@ studies:
         - {id: g.topo.astra, kind: session, enabled: false, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2,
            knobs: {output_tokens: 2250},
            note: "D-051 (user): not run. It fed only G-H1's descriptive S1-pre sensitivity at Astra; G-H1's S-CM* reference and G-H3 never used Astra (-$939 conservative)"}
+
+  # ------------------------------------------------------------------------------------------------
+  # The M5 add-on study (user-approved): a Magentic-style ledger orchestrator, M5 = M1 + ledger and M5-spec = M2 +
+  # ledger. OFF by default (every cell `enabled: false`): enabled, it runs on its own, beside or after the main study,
+  # with `python -m ape.run_study <phase> --study m5 --run-id <id> --main-run-id <frozen main run>`. It inherits the
+  # frozen main run's design (test-seed block, token caps and their multiple, gate resolution, M1's selection, the
+  # working- and cost-limit rules) and runs on the main run's pilot and test worlds, paired on the same tasks; it
+  # builds no worlds. Fresh concurrent M1 and M2 controls run with it.
+  m5:
+    profile: main_luna
+    phases:
+      pilot:
+        - {id: m5.pilot.a, enabled: false, arms: [M5], cells: [F2-10], n_tasks: 20, epochs: 1, note: "on main's pilot worlds, at main's frozen caps"}
+        - {id: m5.pilot.b, enabled: false, arms: [M5-spec], cells: [F3-60], n_tasks: 20, epochs: 1, note: "on main's pilot worlds, at main's frozen caps"}
+      test:
+        - {id: m5.test.a, enabled: false, arms: [M5, M1], cells: [F1-2, F1-32, F2-2, F2-10], n_tasks: 100, epochs: 3,
+           note: "M5 with a fresh concurrent M1 control, on main's test worlds (Study A's cells)"}
+        - {id: m5.test.b, enabled: false, arms: [M5-spec, M2], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 100, epochs: 3,
+           note: "M5-spec with a fresh concurrent M2 control, on main's test worlds (Study B's cells)"}
 
 # Right-sizing cuts (FX-5), applied IN ORDER while the conservative total exceeded budget.total_usd, stopping as
 # soon as it fit. `applied` cuts are already reflected in the cells above. Never cut: gate primary sizes, epochs of

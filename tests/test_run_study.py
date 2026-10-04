@@ -1437,6 +1437,169 @@ def test_an_extension_names_a_frozen_primary_run_of_the_same_study(clean_env):
     assert run_study.role_problems(StudyRun("study_g", "m1", offline=True, runs_root=runs, extension_of="m1"), {"kind": "extension", "of": "m1"}) == ["--extension-of names this run itself"]
 
 
+# --- The M5 add-on study ------------------------------------------------------------------------------------------
+
+
+def _m5_config(tmp: Path, enabled: bool = True) -> Path:
+    """A copy of config/ with the m5 cells enabled (off by default in run_plan.yaml)."""
+    cfg = tmp / "config-m5"
+    shutil.copytree(ROOT / "config", cfg)
+    raw = yaml.safe_load((cfg / "run_plan.yaml").read_text())
+    for cells in raw["studies"]["m5"]["phases"].values():
+        for c in cells:
+            c["enabled"] = enabled
+    (cfg / "run_plan.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+    return cfg
+
+
+def _snapshot(d: Path) -> dict:
+    return {str(p.relative_to(d)): (p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(d.rglob("*")) if p.is_file()}
+
+
+def test_m5_is_off_by_default_and_priced_when_enabled(tmp_path):
+    """The M5 add-on study's cells are all disabled in the plan, so the program's totals are unchanged; enabled they
+    cost about $123 conservative (M5 = M1 x 1.5, M5-spec = M2 x 1.5, plus fresh M1 and M2 controls)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("readiness_smoke_m5", ROOT / "readiness" / "smoke.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    from ape.budget import estimate, load_plan, projected_cost
+
+    plan = load_plan()
+    m5 = [c for c in plan.cells if c.study == "m5"]
+    assert {c.id for c in m5} == {"m5.pilot.a", "m5.pilot.b", "m5.test.a", "m5.test.b"} and not any(c.enabled for c in m5)
+    assert projected_cost(study="m5") == 0 and plan.budget["allocations"]["m5"] == 150
+    est = estimate(load_plan(_m5_config(tmp_path) / "run_plan.yaml"), measured=[])
+    assert 115 < est.total(study="m5") < 130 and est.total(cell="m5.test.a", arm="M5") == pytest.approx(1.5 * est.total(cell="m5.test.a", arm="M1"), rel=0.02), "M5 is 1.5 x M1"
+    assert est.total(study="m5") < plan.budget["allocations"]["m5"]
+    assert STUDIES["m5"].depends_on == "main" and STUDIES["m5"].phases == ("preflight", "pilot", "freeze", "test", "analyze")
+    assert set(smoke.ADDON_CHECKS) <= set(STUDIES["m5"].smoke_checks), "a live m5 run requires the ledger's smoke check (and its controls')"
+
+
+def test_the_m5_offline_rehearsal_inherits_the_frozen_main_run_and_never_writes_into_it(offline, tmp_path):
+    """`run_study all --study m5 --offline --main-run-id t1` on the offline main rehearsal: the m5 cells run on the main
+    run's pilot and test worlds (its frozen test block), at its frozen caps, under M1's selection, with the KG arm it
+    froze; m5 builds no worlds, freezes the inherited design, and the main run's directory is left untouched. Until the
+    M5 arms are registered they are skipped as unbuilt, and the M1 and M2 controls run."""
+    from inspect_ai.log import read_eval_log
+
+    cfg = _m5_config(tmp_path)
+    main_run_ = _run(offline, "main")
+    before = _snapshot(main_run_.dir)
+    argv = ["all", "--study", "m5", "--run-id", "m5a", "--offline", "--runs-dir", str(offline["runs"]), "--config-dir", str(cfg), "--main-run-id", "t1"]
+    assert main(argv) == 0
+    assert _snapshot(main_run_.dir) == before, "nothing is written under the main run's directory"
+    run = StudyRun("m5", "m5a", offline=True, runs_root=offline["runs"], config_dir=cfg)
+    mfreeze, freeze = read_freeze(main_run_), read_freeze(run)
+    assert {p: _manifest(run, p)["status"] for p in STUDIES["m5"].phases} == dict.fromkeys(STUDIES["m5"].phases, "done")
+    inh = freeze["inherited"]
+    assert freeze["test_seeds"]["base"] == mfreeze["test_seeds"]["base"] and inh["main_run"] == "t1" and inh["token_caps"] == mfreeze["token_caps"] and inh["cap_multiple"] == mfreeze["cap_multiple"]
+    assert inh["selected"] == yaml.safe_load(main_run_.selected_path.read_text()) == yaml.safe_load(run.selected_path.read_text())
+    assert freeze["kg"]["arm"] == mfreeze["kg"]["arm"] and freeze["kg"]["source"].startswith("main run t1")
+    assert {"main/freeze.json", "config/main_inheritance.json", "config/selected.yaml", "config/pilot_health.json"} <= set(freeze["files"])
+    assert not (run.work_dir / "worlds").exists(), "m5 builds no worlds"
+    test = _manifest(run, "test")
+    groups = [g for c in test["cells"].values() for g in c["groups"]]
+    built = run_study.arm_built("M5")
+    for g in groups:
+        assert g["seed_base"] == mfreeze["test_seeds"]["base"] and g["caps"] == {tc: mfreeze["token_caps"][tc] for tc in g["cells"]}
+        assert g["name"] == "sel-M1" and g["env"] == {k: str(v) for k, v in (inh["selected"]["M1"].get("env") or {}).items()}, "M5, M5-spec and the controls run under M1's selection"
+        assert {a["run"] for a in g["arms"]} & {"M1", "M2"} and (built or {s["run"] for s in g["skipped"]} <= {"M5", "M5-spec"})
+    for f in sorted((run.dir / "test").rglob("*.eval")):
+        args = read_eval_log(str(f), header_only=True).eval.task_args
+        assert args["seed_base"] == mfreeze["test_seeds"]["base"] and args["split"] == "test" and args["plan_cell"].startswith("m5.test.")
+    health = json.loads(run.pilot_health_path.read_text())
+    assert health["multiple"] == mfreeze["cap_multiple"] and health["passed"] and run_study.read_pilot_health(run)[1] == []
+    # A second invocation needs no --main-run-id (run.json), and one naming another main run is refused.
+    assert main(argv[:-2]) == 0
+    with pytest.raises(PhaseError, match="inherits from main run 't1' .*not 'other'"):
+        run_phases(StudyRun("m5", "m5a", offline=True, runs_root=offline["runs"], config_dir=cfg, main_run_id="other"), "pilot")
+
+
+def _fake_main(root: Path, rid: str = "mm", *, offline: bool = False, frozen: bool = True, test_started: bool = True, caps: dict | None = None) -> StudyRun:
+    m = StudyRun("main", rid, offline=offline, runs_root=root)
+    if frozen:
+        run_gate._write_json(m.freeze_path, {
+            "frozen_at": "then", "offline": offline, "files": {}, "code_commit": "abc", "test_seeds": {"base": 13000, "count": 9},
+            "token_caps": caps or {"F1-2": 1000}, "cap_multiple": 8, "kg": {"needed": True, "arm": "APG-q", "env": {}, "system": "apg", "files": {}}, "design_env": {},
+        })  # fmt: skip
+    if test_started:
+        run_gate._write_json(m.manifest_path("test"), {"phase": "test", "status": "running"})
+    m.out_config_dir.mkdir(parents=True, exist_ok=True)
+    m.selected_path.write_text(yaml.safe_dump({"M1": {"arm": "M1", "env": {"APE_MAS_M1_PROMPT": "concise"}}}))
+    return m
+
+
+def test_a_live_m5_run_refuses_without_a_frozen_main_run_whose_test_has_started(clean_env):
+    """Live, the add-on study refuses without --main-run-id, on an unfrozen main run, one of the other mode, or one whose
+    test has not started; it copies the inherited design once and refuses a main run whose design changed since."""
+    root = clean_env / "runs"
+    with pytest.raises(PhaseError, match="runs on a frozen main run: pass --main-run-id"):
+        run_study.inheritance(StudyRun("m5", "x", runs_root=root))
+    _fake_main(root, "nf", frozen=False)
+    with pytest.raises(PhaseError, match="main run 'nf' is not frozen"):
+        run_study.inheritance(StudyRun("m5", "x", runs_root=root, main_run_id="nf"))
+    _fake_main(root, "off", offline=True)
+    with pytest.raises(PhaseError, match="main run 'off' is an offline run; a live m5 run inherits from a run of its own mode"):
+        run_study.inheritance(StudyRun("m5", "x", runs_root=root, main_run_id="off"))
+    _fake_main(root, "nt", test_started=False)
+    with pytest.raises(PhaseError, match="has not started its test"):
+        run_study.inheritance(StudyRun("m5", "x", runs_root=root, main_run_id="nt"))
+    m = _fake_main(root, "mm")
+    run = StudyRun("m5", "x", runs_root=root, main_run_id="mm")
+    inh = run_study.inheritance(run)
+    assert inh["test_seeds"] == {"base": 13000, "count": 9} and inh["token_caps"] == {"F1-2": 1000} and run_study._caps_params(run, "pilot") == {"F1-2": 1000}
+    assert json.loads(run.inheritance_path.read_text())["main_run"] == "mm" and yaml.safe_load(run.selected_path.read_text())["M1"]["env"] == {"APE_MAS_M1_PROMPT": "concise"}
+    assert run_study.choose_test_seed_base(run) == (13000, []) and run_study.test_seed_count(run) == 9 and run_study.split_seed_base(run, "pilot") == STUDY_SEEDS["main"]["pilot"]
+    assert run_study.env_group("M5", "M5", yaml.safe_load(run.selected_path.read_text())) == ("sel-M1", {"APE_MAS_M1_PROMPT": "concise"})
+    # The main run's design changes after this run copied it: refused live.
+    _fake_main(root, "mm", caps={"F1-2": 2000})
+    with pytest.raises(PhaseError, match=r"main run 'mm''s design changed since this run copied it at .* \(freeze_sha256, token_caps\)"):
+        run_study.inheritance(StudyRun("m5", "x", runs_root=root, main_run_id="mm"))
+    assert m.dir.is_dir() and not (m.dir / "m5").exists()
+
+
+def test_m5_reads_only_its_main_runs_worlds_and_never_builds_or_unlocks_the_test_split(clean_env, tmp_path):
+    """m5 has no build phase and never sets the test split's lock, which guards building only: it reads the one block
+    its main run froze, from that run's worlds (offline: its work/), and refuses when the worlds its cells read are not
+    there or the limit rules differ from the main run's frozen ones."""
+    from ape.worlds.generate import TestSplitLocked, require_test_split_unlocked
+
+    assert not {"build-dev", "micro-pilot", "build-test"} & set(STUDIES["m5"].phases)
+    cfg = _m5_config(tmp_path)
+    root = clean_env / "runs"
+    m = _fake_main(root, "mo", offline=True)
+    run = StudyRun("m5", "w", offline=True, runs_root=root, config_dir=cfg, main_run_id="mo")
+    problems = run_study.inheritance_problems(run, m, read_freeze(m))
+    assert any("m5.test.a reads 1 test world(s) of F1-2; main run 'mo' built 0" in p for p in problems) and any("m5.pilot.a reads 1 pilot world(s) of F2-10" in p for p in problems)
+    with run_study.run_environment(run):
+        assert os.environ["APE_WORLDS"] == str(m.work_dir / "worlds") and os.environ["APE_INDICES"] == str(m.work_dir / "indices") and os.environ["APE_CACHE"] == str(run.work_dir / "cache")
+        assert TEST_SPLIT_ENV not in os.environ
+        with pytest.raises(TestSplitLocked):
+            require_test_split_unlocked("test", "m5")
+    # The limit rules: this run's plan must say what the main run's frozen plan says.
+    frozen_plan = clean_env / "main-plan.yaml"
+    raw = yaml.safe_load((cfg / "run_plan.yaml").read_text())
+    raw["budget"]["sample_working_limit"]["agent_s"] = 99
+    frozen_plan.write_text(yaml.safe_dump(raw))
+    fz = read_freeze(m) | {"files": {"config/run_plan.yaml": {"path": str(frozen_plan), "sha256": run_gate._sha256(frozen_plan)}}}
+    run_gate._write_json(m.freeze_path, fz)
+    inh = run_study.inheritance(StudyRun("m5", "w2", offline=True, runs_root=root, config_dir=cfg, main_run_id="mo"))
+    assert any("budget.sample_working_limit differ from main run 'mo''s frozen run_plan.yaml" in n for n in inh["notes"])
+
+
+def test_m5_pilot_health_refuses_the_freeze_on_evidence_and_never_escalates():
+    """The add-on pilot's gate (D-045/D-050 lower bounds, per arm): evidence of token-cap, turn-cap or other-limit hits
+    refuses the freeze; the caps are the main run's and frozen, so there is no escalation."""
+    run = StudyRun("m5", "h", offline=True)
+    b = run_study._rate_bound
+    health = {"multiple": 8, "over": {"M5": ["F2-10"]}, "turn_over": {"M5-spec": ["F3-60"]}, "other_over": {}, "units": {"M5": {"token": b(8, 20)}}}
+    problems = run_study.pilot_health_problems(run, health)
+    assert problems[0].startswith("['M5'] show token-cap-hit evidence over 10% at the main run's frozen caps (8 x B0): the caps are frozen, so the m5 study cannot escalate them")
+    assert problems[1].startswith("['M5-spec'] show turn-cap-hit evidence over 10%") and run_study.pilot_health_problems(run, {"over": {}, "turn_over": {}, "other_over": {}}) == []
+
+
 def test_a_short_budget_stops_the_test_after_the_primary_cells(offline, monkeypatch):
     """As the gate's: the test phase guards the primary groups at its start and every other group before it runs, so a
     budget stop leaves the primary evidence complete. (Last in this module: it leaves the shared run's test failed.)"""

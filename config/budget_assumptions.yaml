@@ -82,6 +82,11 @@ arms:
   M1k: {like: APG*, multiplier: 2.5, cache: multi_agent}
   M2: {like: M1k}
   M7: {like: S1, multiplier: 5.0, cache: multi_agent}    # council k=3, 2 critique rounds, chair [measured, B2 gold mock: 3.4-5.8x S1 tokens; was 3.0]
+  # The M5 add-on study: a Magentic-style ledger on the team (task and progress ledgers each round). 1.5 x the team:
+  # with the gold mock the ledger costs 1.2-1.7 x its team (each orchestrator turn adds a ledger call carrying the
+  # orchestrator's full view).
+  M5: {like: M1, multiplier: 3.75, cache: multi_agent}
+  M5-spec: {like: M2, multiplier: 3.75, cache: multi_agent}
 
 # Per-compile kg-role calls, at the kg role's effort (low). [given]
 kg_calls:
