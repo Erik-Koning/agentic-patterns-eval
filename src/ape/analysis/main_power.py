@@ -15,22 +15,33 @@
   first 3 runs, as in `main_stats.build_tables`;
 - each S1 run submits an answer: right; or, when wrong, nothing (prob `abstain`), the task's one attractor wrong answer
   (prob `rho`) or a wrong answer of its own. The S8 frontier is then built from these keys by `frontier` itself;
-- each sample costs arm-multiple × task multiplier × run noise (lognormal CVs); S1 runs cost 1 on average.
+- each run costs arm multiple × task multiplier × run noise (lognormal CVs) × (1 + κ (1 − success)): with κ > 0 a
+  failed run costs more than a successful one (`Settings.kappa`; BUILD_REVIEW S-2: with caps at 8 × B0 a failing run
+  that wanders to its cap is the plausible case). S1 runs cost 1 on average when they succeed.
 
 σ defaults are the gate's priors (`pilot.py`: σ_w 0.5, σ_g 0.3, σ_u 1.5, σ_v 0.5); `sigmas_from_pilot` takes a
-`pilot.variance_components` result instead. Baselines (S1's success per cell) and cost multiples (budget priors,
-`config/budget_assumptions.yaml`) are assumptions to replace with the micro-pilot's numbers.
+`pilot.variance_components` result instead. Baselines (S1's success per cell) are assumptions to replace with the
+micro-pilot's numbers; cost multiples are the budget priors (`config/budget_assumptions.yaml` arms' `multiplier`,
+`cost_multiples`).
+
+**Frontier nulls.** An arm at the S8 frontier's boundary has marginal success p* = S8(r(p*)) + offset, with
+r(p) = m_arm (1 + κ (1 − p)) / (1 + κ (1 − p_S1)) its expected cost over S1's expected run cost: a fixed point once
+cost depends on success. The population curve S8(k) is computed exactly (`population_s8`: the vote's multinomial over
+right, attractor, abstaining and own-wrong answers, integrated over task difficulty by Gauss–Hermite), so a null
+boundary carries no Monte Carlo error of its own (BUILD_REVIEW S-8: a 20,000-task Monte Carlo curve put M3's +6 pp
+boundary 0.0617 against 0.05).
 
 **The real path.** Each replicate builds `main_stats.Tables` (task means, task-mean costs, S1 pools) and runs
 `main_stats.evaluate_family`, the function `main_report` runs: the same contrasts, frontier interpolation at the
-arm's realised cost, sign-flip tests, Holm and gatekeeping. `Draw.frame()` emits the same replicate as the
-loader's tidy frame, and a test checks that `build_tables` on it equals the direct `Draw.tables()`.
+arm's realised cost with its matched-cost correction, sign-flip tests, Holm and gatekeeping. `Draw.frame()` emits the
+same replicate as the loader's tidy frame, and a test checks that `build_tables` on it equals the direct
+`Draw.tables()`.
 
 **Scenarios** per family: its null boundary (type I error; must not exceed the nominal α beyond Monte Carlo error)
-and plausible effects (power). Sizes come from `config/run_plan.yaml` (`planned_sizes`): 100 tasks per cell over 9
-test worlds (main.build.kg: 9 test + 2 pilot worlds per KG condition), 3 epochs, the 8-run S1 pool, Sol 100.
-`min_p_table` gives the smallest p the exact world-level sign flip can attain at each test's cluster count and
-whether it reaches the test's smallest Holm level.
+and plausible effects (power); M2 and M3 also at κ = 1 and 3. Sizes are the runner's (`planned_sizes`): a cell of n
+tasks runs ⌈n / 12⌉ whole worlds of 12 tasks (`run_study.TASKS_PER_WORLD`), so 100 tasks are 9 × 12 = 108 (M1s 60,
+Study C 24), 3 epochs, the 8-run S1 pool. `min_p_table` gives the smallest p the exact world-level sign flip can
+attain at each test's cluster count and whether it reaches the test's smallest Holm level.
 """
 
 import argparse
@@ -54,16 +65,34 @@ from .main_stats import EXACT_MAX_CLUSTERS, S1_EPOCHS, Pool, Tables, evaluate_fa
 
 RUN_PLAN = ROOT / "config" / "run_plan.yaml"
 MODELS = ROOT / "config" / "models.yaml"
+BUDGET_ASSUMPTIONS = ROOT / "config" / "budget_assumptions.yaml"
 TEST_WORLDS = 9  # main.build.kg: 11 worlds per KG condition = 9 test + 2 pilot (BUILD_PLAN; run_plan.yaml note)
-WORLD_SEED = 4000  # BUILD_PLAN B1's proposed main test seed base (labels only)
+TASKS_PER_WORLD = 12  # run_study.TASKS_PER_WORLD (a test checks they agree)
+WORLD_SEED = 4000  # labels only
 # S1's success per Luna cell. F3/F7: the gate's power baselines (D-023); F1/F2/F7-100: assumptions until the
 # micro-pilot (F1-32 and F2-10 are the hard endpoints). Sol adds SOL_SHIFT on the logit scale.
 BASELINES = {"F1-2": 0.80, "F1-32": 0.40, "F2-2": 0.80, "F2-10": 0.50, "F3-5": 0.75, "F3-60": 0.60, "F7-10": 0.85, "F7-100": 0.65, "F7-1000": 0.45}
 SOL_SHIFT = 0.5
-# Mean cost per sample relative to one S1 run (budget_assumptions.yaml multipliers; S5 per-step KG ≈ S1 on tokens).
-COST = {"S1": 1.0, "S3s": 1.0, "S5": 1.0, "S7": 1.0, "S9": 1.3, "M1": 2.5, "M1s": 2.5, "M1k": 2.5, "M2": 2.5, "M7": 3.0, "S8k3": 3.0}
 _GH_X, _GH_W = np.polynomial.hermite_e.hermegauss(48)
 _GH_W = _GH_W / _GH_W.sum()
+
+
+def cost_multiples(path: Path = BUDGET_ASSUMPTIONS) -> dict[str, float]:
+    """Each arm's mean cost per sample relative to one S1 run: the budget priors' `multiplier` (`like:` resolved; 1 for
+    arms without one, e.g. S5 per-step KG ≈ S1 on tokens)."""
+    arms = (yaml.safe_load(path.read_text()) or {}).get("arms") or {}
+
+    def mult(name: str, seen: frozenset = frozenset()) -> float:
+        a = arms.get(name) or {}
+        if "multiplier" in a:
+            return float(a["multiplier"])
+        like = a.get("like")
+        return mult(like, seen | {name}) if like and like not in seen else 1.0
+
+    return {name: mult(name) for name in arms}
+
+
+COST = cost_multiples()
 
 
 @dataclass(frozen=True)
@@ -95,11 +124,13 @@ class Settings:
     sol_shift: float = SOL_SHIFT
     flip_reps: int = 2000  # Monte Carlo sign flips above EXACT_MAX_CLUSTERS clusters
     exact_max: int = EXACT_MAX_CLUSTERS
+    kappa: float = 0.0  # a failed run costs (1 + kappa) x a successful one (every arm)
 
 
 @dataclass(frozen=True)
 class S8Target:
-    """An arm whose marginal success is the population S8 frontier at `ratio` S1-run costs, plus `offset`."""
+    """An arm at the population S8 frontier (plus `offset`), at its own expected cost: `ratio` is its cost multiple
+    (its expected cost per sample over S1's when both succeed; with κ the ratio moves with success, a fixed point)."""
 
     ratio: float
     offset: float = 0.0
@@ -109,7 +140,8 @@ class S8Target:
 
 
 def planned_sizes(path: Path = RUN_PLAN, models: Path = MODELS) -> dict[tuple[str, str, str], dict]:
-    """(tier, cell, arm) -> {n_tasks, epochs, plan_cell} for the main study's test phases (Studies A, B and F)."""
+    """(tier, cell, arm) -> {n_tasks, worlds, epochs, plan_cell} for the main study's test phases (Studies A, B and F),
+    as the runner runs them: ⌈n / 12⌉ whole worlds of 12 tasks (100 -> 9 × 12 = 108; 50 -> 60)."""
     plan = yaml.safe_load(path.read_text())
     profiles = (yaml.safe_load(models.read_text()) or {}).get("profiles", {})
     main = plan["studies"]["main"]
@@ -119,9 +151,10 @@ def planned_sizes(path: Path = RUN_PLAN, models: Path = MODELS) -> dict[tuple[st
         for cell in main["phases"].get(phase) or []:
             prof = cell.get("profile", default)
             tier = tier_of(((profiles.get(prof) or {}).get("agent") or {}).get("model"))
+            worlds = math.ceil(int(cell["n_tasks"]) / TASKS_PER_WORLD)
             for arm in cell["arms"]:
                 for c in cell["cells"]:
-                    out[(tier, c, arm)] = {"n_tasks": int(cell["n_tasks"]), "epochs": int(cell["epochs"]), "plan_cell": cell["id"]}
+                    out[(tier, c, arm)] = {"n_tasks": worlds * TASKS_PER_WORLD, "worlds": worlds, "epochs": int(cell["epochs"]), "plan_cell": cell["id"]}
     return out
 
 
@@ -151,21 +184,35 @@ def _answer_codes(rng: np.random.Generator, ok: np.ndarray, rho: float, abstain:
     return np.where(ok, 0, codes)
 
 
+def vote_success(k: int, p: np.ndarray, rho: float, abstain: float) -> np.ndarray:
+    """E[success of a k-run plurality vote] for tasks whose runs succeed with probability `p` (array), under the
+    answer model (`_answer_codes`), exactly: the sum over the multinomial of right (c), attractor (a), abstaining (b)
+    and own-wrong (u) answers of the vote's expected success (ties: the share of the tied answers that is right)."""
+    p = np.asarray(p, dtype=float)
+    q = 1 - p
+    probs = (p, q * (1 - abstain) * rho, q * abstain, q * (1 - abstain) * (1 - rho))  # right, attractor, abstain, own
+    out = np.zeros_like(p)
+    for c in range(k + 1):
+        for a in range(k + 1 - c):
+            for b in range(k + 1 - c - a):
+                u = k - c - a - b
+                top = max(c, a, 1 if u else 0)
+                if top == 0 or c != top:
+                    continue
+                tied = 1 + (a == top) + (u if top == 1 else 0)
+                coef = math.factorial(k) / (math.factorial(c) * math.factorial(a) * math.factorial(b) * math.factorial(u))
+                out += coef * probs[0] ** c * probs[1] ** a * probs[2] ** b * probs[3] ** u / tied
+    return out
+
+
 @cache
-def population_s8(x_s1: float, s: float, rho: float, abstain: float, K: int = 8, tasks: int = 20_000, seed: int = 7) -> tuple[float, ...]:
-    """The population S8(k) success, k = 1..K, under the model (Monte Carlo over `tasks` tasks, exact over subsets)."""
-    rng = np.random.default_rng(seed)
-    acc = np.zeros(K)
-    done = 0
-    while done < tasks:
-        n = min(2000, tasks - done)
-        p = expit(x_s1 + s * rng.standard_normal(n))
-        ok = rng.random((n, K)) < p[:, None]
-        codes = _answer_codes(rng, ok, rho, abstain)
-        ts, _ = fr.s8_success(codes, ok.astype(float))
-        acc += ts.sum(axis=0)
-        done += n
-    return tuple((acc / tasks).tolist())
+def population_s8(x_s1: float, s: float, rho: float, abstain: float, K: int = 8) -> tuple[float, ...]:
+    """The population S8(k) success, k = 1..K, under the model, exactly (`vote_success` integrated over the tasks'
+    logit-normal success, 96-point Gauss–Hermite)."""
+    x, w = np.polynomial.hermite_e.hermegauss(96)
+    w = w / w.sum()
+    p = expit(x_s1 + s * x)
+    return tuple(float(w @ vote_success(k, p, rho, abstain)) for k in range(1, K + 1))
 
 
 def s8_at(curve: tuple[float, ...], ratio: float) -> float:
@@ -178,6 +225,18 @@ def s8_at(curve: tuple[float, ...], ratio: float) -> float:
     k = int(math.floor(ratio))
     lam = ratio - k
     return (1 - lam) * curve[k - 1] + lam * curve[k]
+
+
+def frontier_target(curve: tuple[float, ...], target: S8Target, p_s1: float, kappa: float) -> float:
+    """The arm's marginal success at the frontier (module docstring): p = S8(r(p)) + offset, by fixed-point iteration."""
+    p = s8_at(curve, target.ratio) + target.offset
+    for _ in range(200):
+        r = target.ratio * (1 + kappa * (1 - p)) / (1 + kappa * (1 - p_s1))
+        nxt = s8_at(curve, r) + target.offset
+        if abs(nxt - p) < 1e-12:
+            break
+        p = nxt
+    return p
 
 
 def _world_id(cell: str, seed: int) -> str:
@@ -261,7 +320,7 @@ def simulate(spec: dict, n_tasks: dict, epochs: dict, sigmas: Sigmas, settings: 
         for arm, target in arms.items():
             if isinstance(target, S8Target):
                 curve = population_s8(round(x_s1, 9), round(s, 9), settings.rho, settings.abstain)
-                target = s8_at(curve, target.ratio) + target.offset
+                target = frontier_target(curve, target, s1_target, settings.kappa)
             x = location(float(target), s)
             g = rng.normal(0, sigmas.g, settings.worlds)[wi]
             p = expit(x + u + g + v + rng.normal(0, sigmas.v, n))
@@ -269,7 +328,8 @@ def simulate(spec: dict, n_tasks: dict, epochs: dict, sigmas: Sigmas, settings: 
             ok = rng.random((n, E)) < p[:, None]
             draw.runs[(tier, cell, arm)] = ok.astype(float)
             sd = math.sqrt(math.log1p(settings.cost_cv_run**2))
-            draw.cost[(tier, cell, arm)] = COST.get(arm, 1.0) * tau[:, None] * rng.lognormal(-0.5 * sd**2, sd, (n, E))
+            fail = 1.0 + settings.kappa * (1.0 - ok)  # a failed run costs (1 + kappa) x (BUILD_REVIEW S-2)
+            draw.cost[(tier, cell, arm)] = COST.get(arm, 1.0) * tau[:, None] * rng.lognormal(-0.5 * sd**2, sd, (n, E)) * fail
             if arm == "S1":
                 draw.codes[(tier, cell)] = _answer_codes(rng, ok, settings.rho, settings.abstain)
     return draw
@@ -291,6 +351,7 @@ class Scenario:
     name: str
     spec: dict
     nulls: tuple[str, ...] = ()
+    kappa: float | None = None  # overrides Settings.kappa (cost depending on success)
 
     @property
     def kind(self) -> str:
@@ -309,16 +370,21 @@ def scenarios(hyp_id: str, baselines: dict = BASELINES, settings: Settings = Set
         out.append(Scenario("global null: M1 = S1 (below the frontier)", {(L, "F1-32"): {"S1": b("F1-32"), "M1": b("F1-32")}}, ("M2.gate", "M2.frontier")))
         for d in (0.0, 0.05, 0.10, 0.15):
             out.append(Scenario(f"M1 − S8@M1 = {d:+.2f} (M1 > S1)", {(L, "F1-32"): {"S1": b("F1-32"), "M1": S8Target(COST["M1"], d)}}, ("M2.frontier",) if d == 0 else ()))
+        for kappa in (1.0, 3.0):  # cost depending on success (BUILD_REVIEW S-2)
+            out.append(Scenario(f"M1 − S8@M1 = +0.00, κ {kappa:g}", {(L, "F1-32"): {"S1": b("F1-32"), "M1": S8Target(COST["M1"], 0.0)}}, ("M2.frontier",), kappa))
+            out.append(Scenario(f"M1 − S8@M1 = +0.10, κ {kappa:g}", {(L, "F1-32"): {"S1": b("F1-32"), "M1": S8Target(COST["M1"], 0.10)}}, (), kappa))
     elif hyp_id in ("M3", "M5"):
         m = TOST_MARGIN
-        for d in (m, -m, 0.0, 0.02, 0.03):
-            if hyp_id == "M3":
-                spec = {(L, c): {"S1": b(c), "M7": S8Target(COST["M7"], d)} for c in STUDY_A_CELLS}
-                name = f"M7 − S8@M7 = {d:+.2f}"
-            else:
-                spec = {(L, c): {"M1k": b(c) + 0.03, "M2": b(c) + 0.03 + d} for c in STUDY_B_CELLS}
-                name = f"M2 − M1k = {d:+.2f}"
-            out.append(Scenario(name, spec, (f"{hyp_id}.pooled",) if abs(d) >= m else ()))
+        kappas = (None, 1.0, 3.0) if hyp_id == "M3" else (None,)
+        for kappa in kappas:
+            for d in (m, -m, 0.0, 0.02, 0.03) if kappa is None else (m, -m, 0.0):
+                if hyp_id == "M3":
+                    spec = {(L, c): {"S1": b(c), "M7": S8Target(COST["M7"], d)} for c in STUDY_A_CELLS}
+                    name = f"M7 − S8@M7 = {d:+.2f}" + ("" if kappa is None else f", κ {kappa:g}")
+                else:
+                    spec = {(L, c): {"M1k": b(c) + 0.03, "M2": b(c) + 0.03 + d} for c in STUDY_B_CELLS}
+                    name = f"M2 − M1k = {d:+.2f}"
+                out.append(Scenario(name, spec, (f"{hyp_id}.pooled",) if abs(d) >= m else (), kappa))
     elif hyp_id == "K1":
         cells = ("F7-1000", "F3-60")
         for d in (0.0, 0.05, 0.10, 0.15):
@@ -363,6 +429,8 @@ def simulate_family(hyp: Hypothesis, scenario: Scenario, reps: int, seed: int = 
     with its cost condition), the rate of any and all claims, and the family-wise false-claim rate over the scenario's
     true nulls."""
     sizes = planned_sizes() if sizes is None else sizes
+    if scenario.kappa is not None:
+        settings = replace(settings, kappa=scenario.kappa)
     n_tasks, epochs = _sizes_for(scenario.spec, sizes, settings)
     rng = np.random.default_rng(seed)
     hits = {m.id: 0 for m in hyp.members}
