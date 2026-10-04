@@ -33,8 +33,21 @@ from .main_stats import DETERMINISM_PREFIX, EXACT_MAX_CLUSTERS, REPS, S1_EPOCHS,
 CHOICES = (
     "Decision: the world-clustered sign-flip test on the per-task contrast (exact over all 2^G flips up to "
     f"{EXACT_MAX_CLUSTERS} clusters, else 10,000 Monte Carlo flips); NI and TOST shift each cluster by the margin. "
-    "Simulated at the planned 9 worlds per cell it holds α (single-cell superiority 2.6% at 2.5%; every family's null "
-    "boundary in `main_power`), where the gate's cluster-t ran at 3.1-3.3%; cluster-t is reported as a cross-check.",
+    "Simulated at the planned 9 worlds per cell it holds α at every family's null boundary (`main_power`; the hypothesis "
+    "table gives each member's simulated type I, e.g. M1 0.015 at 0.025), where the gate's cluster-t ran at 3.1-3.3% in a "
+    "single-cell check; cluster-t is reported as a cross-check.",
+    "The sign flip's condition is symmetric world contributions (BUILD_REVIEW S-3): worlds catastrophic for one arm only "
+    "(e.g. a broken KG build in 15% of worlds) push the level to about 0.075 (independent review: K1 and M5). Every member "
+    "reports its per-world influence (contribution, the estimate and test without each world); a supported claim that one "
+    "world carries, or that rests on a world whose KG build failed its quality check, carries a §8 caveat.",
+    "Frontier contrasts (M2.frontier, M3, M2-F2, T1) carry the matched cost's noise (BUILD_REVIEW S-2): each task's "
+    "delta-method influence on the interpolation weight (realised arm cost over S1's run cost, both from the same worlds) "
+    "is added to its contrast value, centred so the estimate is unchanged. Without it, cost that depends on success "
+    "(failed runs costing more) pushed M3's TOST to 0.09 and M2.frontier to 0.036.",
+    "Pooled members (M3, M5, K2, K2-NI) are equal-weight averages over their cells; each reports its per-cell estimates "
+    "beside the pooled one (BUILD_REVIEW S-6).",
+    "Cap hits are failures and cast no vote (D-047): a capped sample's success is 0 and its answer key None whatever the "
+    "scorer read (Inspect scores after a limit). Rows are counted once: duplicates by sample uuid across log files.",
     "Headline interval: the sign-flip test inverted (consistent with the decision; 94-96% coverage at a nominal 95% with 9 "
     "worlds in simulation). The brief's world-clustered BCa bootstrap is reported too, but with 9 clusters it covered "
     "only 88% (percentile: 88%), so no decision rests on it. BCa over percentile because skewed success rates near 0/1 "
@@ -56,9 +69,11 @@ CHOICES = (
     "first, then M1 > S8 at matched cost). Superiority, NI and `less` families at one-sided α = 0.025; TOST families at "
     "0.05 per one-sided test (the 90% interval). No correction across families (brief §7.4).",
     "D-033 (the owner's decision on the power findings): M3 and M5 TOST margins ±6 pp; K2's interaction is its own "
-    "family; H2's operational NI is family K2-NI, one member pooled over Study B's four cells at 5 pp (S5 ≥ M2 − 5 pp), "
-    "which also needs S5/M2's realised cost ratio ≤ 0.5 with the upper end of its 95% world-clustered BCa interval ≤ 0.6 "
-    "(intersection-union: no extra α); T1 (the brief's H6 tier clause) is descriptive; the superiority members' planned MDE is ~15 pp.",
+    "family; H2's operational NI is family K2-NI, one member averaged over Study B's four cells with equal weights at 5 pp "
+    "(S5 ≥ M2 − 5 pp), which also needs S5/M2's realised token cost ratio ≤ 0.6 with 97.5% confidence (the one-sided "
+    "bound of the world-clustered BCa interval) and a point estimate ≤ 0.5 (intersection-union: no extra α); realised cost "
+    "is the logged final attempts' usage, so errored attempts' usage (D-030) is not in it (its share is reported per arm); "
+    "T1 (the brief's H6 tier clause) is descriptive; the superiority members' planned MDE is ~15 pp.",
     "H1a's and H1b's F2 clauses have no margin in the brief: reported descriptively.",
     "T1 (descriptive; the brief's H6 tier clause): the coordination payoff M1 − S8 (matched cost) from 3-run frontiers in both tiers, Sol "
     "minus Luna on the same tasks, per cell (F1-32, F7-100) and pooled.",
@@ -135,9 +150,12 @@ def main_report(
     glmm: bool = True,
     coverage: Sequence[dict] | None = None,
     frontier_reps: int = 2000,
+    flagged_worlds: Sequence[str] | None = None,
 ) -> dict:
     """Every section of the main-study report as one JSON-serialisable dict (module docstring). `alpha` overrides every
-    family's one-sided α (default: the table's); `reps` sets the bootstrap and Monte Carlo sign-flip resamples."""
+    family's one-sided α (default: the table's); `reps` sets the bootstrap and Monte Carlo sign-flip resamples;
+    `flagged_worlds`: test worlds whose KG build failed its quality check (`analyze_main` reads them from build-test)."""
+    flagged = set(flagged_worlds or ())
     meters = dict(METERS if meters is None else meters)
     errors: list = []
     frame = frame.copy()
@@ -164,14 +182,16 @@ def main_report(
     fams = {}
     for i, h in enumerate(hypotheses):
         if h.members:
-            fams[h.id] = _safe(errors, f"hypothesis {h.id}", evaluate_family, tables, h, alpha, reps, seed + 101 * i)
+            fams[h.id] = _safe(errors, f"hypothesis {h.id}", evaluate_family, tables, h, alpha, reps, seed + 101 * i, flagged_worlds=flagged)
     d["hypotheses"] = fams
     d["summary"] = [
-        {"family": fid, "member": mid, "contrast": m.get("contrast"), "cells": m.get("cells") or m.get("cells_planned"), "test": m.get("test"), "margin": m.get("margin"), "est": m.get("est"), "ci": m.get("ci"), "p": m.get("p"), "holm_level": m.get("holm_level"), "label": m.get("label"), "reason": m.get("reason") or m.get("why")}
+        {"family": fid, "member": mid, "contrast": m.get("contrast"), "cells": m.get("cells") or m.get("cells_planned"), "test": m.get("test"), "margin": m.get("margin"), "est": m.get("est"), "ci": m.get("ci"), "p": m.get("p"), "holm_level": m.get("holm_level"), "label": m.get("label"), "reason": m.get("reason") or m.get("why"), "caveats": m.get("caveats") or [], "per_cell": m.get("per_cell")}
         for fid, f in fams.items()
         if f and f.get("status") == "confirmatory"
         for mid, m in f["members"].items()
     ]
+    d["caveats"] = [f"{s['member']}: {c}" for s in d["summary"] for c in s["caveats"]]
+    d["header"]["kg_build_failed_worlds"] = sorted(flagged)
     d["descriptive"] = {
         "K4": _safe(errors, "K4", desc.k4_slopes, tables, reps=reps, seed=seed),
         "M4": _safe(errors, "M4", desc.m4, tables, reps=reps, seed=seed),
@@ -218,6 +238,10 @@ def _ci(ci: Any) -> str:
     return "–" if not ci or ci[0] is None or ci[1] is None else f"[{_pp(ci[0])}, {_pp(ci[1])}]"
 
 
+def _per_cell(per_cell: dict | None) -> str:
+    return "; ".join(f"{c} {_pp(x.get('est'))} {_ci(x.get('ci'))}" for c, x in per_cell.items()) if per_cell else "–"
+
+
 def _table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
     if not rows:
         return "_none_\n"
@@ -234,8 +258,10 @@ def render_main(d: dict) -> str:
     if h.get("coverage"):
         bad = [c for c in h["coverage"] if c.get("reason")]
         L += [f"- Plan cells: {len(h['coverage'])}, missing or unreadable: {len(bad)}" + (": " + "; ".join(f"{c['plan_cell']} ({c['reason']})" for c in bad) if bad else ".")]
-    L += ["", "## Confirmatory tests", "", "Interval: the sign-flip test inverted (two-sided 1 − 2α). Labels: supported / not supported (never 'no effect') / not tested (Holm stopped or the gate stage failed) / not evaluable (data missing).", ""]
-    L += [_table(["Member", "Contrast", "Cells", "Test", "Δ", "Interval", "p", "Holm level", "Result"], [[s["member"], s["contrast"], ", ".join(s["cells"] or []), TEST_TEXT.get(s["test"], s["test"]) + (f", margin {100 * s['margin']:g} pp" if s.get("margin") else ""), _pp(s["est"]), _ci(s["ci"]), _f(s["p"], 4), _f(s["holm_level"], 4), (s["label"] or "–") + (f" ({s['reason']})" if s.get("reason") else "")] for s in d["summary"]])]
+    L += ["", "## Confirmatory tests", "", "Interval: the sign-flip test inverted (two-sided 1 − 2α). Labels: supported / not supported (never 'no effect') / not tested (Holm stopped or the gate stage failed) / not evaluable (data missing). A pooled member is the equal-weight average over its cells; its per-cell estimates follow.", ""]
+    L += [_table(["Member", "Contrast", "Cells", "Test", "Δ", "Interval", "p", "Holm level", "Result", "Per cell"], [[s["member"], s["contrast"], ", ".join(s["cells"] or []), TEST_TEXT.get(s["test"], s["test"]) + (f", margin {100 * s['margin']:g} pp" if s.get("margin") else ""), _pp(s["est"]), _ci(s["ci"]), _f(s["p"], 4), _f(s["holm_level"], 4), (s["label"] or "–") + (f" ({s['reason']})" if s.get("reason") else "") + (" ⚠ caveat" if s.get("caveats") else ""), _per_cell(s.get("per_cell"))] for s in d["summary"]])]
+    if d.get("caveats"):
+        L += ["**§8 caveats on supported claims** (the sign flip assumes symmetric world contributions):", ""] + [f"- {c}" for c in d["caveats"]] + [""]
 
     L += ["## Hypothesis families", ""]
     for fid, f in (d.get("hypotheses") or {}).items():
@@ -253,6 +279,14 @@ def render_main(d: dict) -> str:
             miss = (m.get("coverage") or {}).get("missing_cells") or []
             if miss:
                 L += [f"- {mid}: cells left out: " + "; ".join(f"{c} ({m['coverage']['cells'][c].get('reason')})" for c in miss)]
+            if m.get("per_cell"):
+                L += [f"- {mid} per cell (equal weights): {_per_cell(m['per_cell'])}"]
+            infl = m.get("influence") or []
+            if infl:
+                top = "; ".join(f"{r['cluster']} {_pp(r['contribution'])}" + (f" (without it Δ {_pp(r['est_without'])}" + (f", p {_f(r['p_without'], 4)}" if r.get("p_without") is not None else "") + ")") + (" KG build failed" if r.get("kg_build_failed") else "") for r in infl[:3])
+                L += [f"- {mid} most influential worlds (contribution to Δ): {top}"]
+            for c in m.get("caveats") or []:
+                L += [f"- {mid} **caveat (§8):** {c}"]
         L += [""]
 
     desc_ = d.get("descriptive") or {}

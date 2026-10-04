@@ -159,6 +159,69 @@ def caps_table(frame: pd.DataFrame, test: dict | None, freeze: dict | None) -> l
     return out
 
 
+def kg_build_failed_worlds(run, freeze: dict | None) -> tuple[list[str], str | None]:
+    """Test worlds whose KG build failed its quality check (build-test/build_quality.json, `ape.build_quality`): a world
+    with build errors, or whose coverage in the KG arm's system is below the D-017 threshold. A supported claim resting
+    on one is a §8 caveat (BUILD_REVIEW S-3)."""
+    from .build_quality import THRESHOLD
+
+    report = _read_json(run.phase_dir("build-test") / "build_quality.json")
+    if report is None:
+        return [], "build-test/build_quality.json missing: no per-world KG build check"
+    system = ((freeze or {}).get("kg") or {}).get("system") or "apg"
+    out = []
+    for row in report.get("worlds") or []:
+        cov = (row.get(system) or {}).get("coverage")
+        if row.get("errors") or (cov is not None and cov < THRESHOLD):
+            out.append(str(row.get("world_id")))
+    return sorted(out), None
+
+
+def errored_attempt_usage(test: dict | None, frame: pd.DataFrame, run_dir: Path | None = None) -> dict:
+    """Per arm: the cost of errored, retried attempts (in the groups' usage ledgers, `ape.usage_ledger`; in no log, so not
+    in realised cost, the D-030 gap) against the logged cost (BUILD_REVIEW S-11). `run_dir` resolves run-relative paths."""
+    from .run_study import resolve_log
+    from .usage_ledger import LEDGER_NAME, read_entries, unlogged_spend
+
+    if frame.empty or "uuid" not in frame.columns:
+        return {"available": False, "reason": "no rows with sample uuids"}
+    by_log = {str(Path(f).resolve()): a for f, a in frame.groupby("log_file")["arm"].first().items()}
+    entries: dict[str, list] = {}
+    ledgers = 0
+    for cell in ((test or {}).get("cells") or {}).values():
+        for g in cell.get("groups") or []:
+            if not g.get("log_dir"):
+                continue
+            path = (resolve_log(run_dir, g["log_dir"]) if run_dir is not None else _resolve(g["log_dir"])) / LEDGER_NAME
+            if not path.is_file():
+                continue
+            ledgers += 1
+            for e in read_entries([path]):
+                arm = by_log.get(str(Path(e["log"]).resolve())) if e.get("log") else None
+                entries.setdefault(arm or "unattributed", []).append(e)
+    if not ledgers:
+        return {"available": False, "reason": "no usage ledgers in the test groups' log dirs"}
+    out = {}
+    for arm, es in entries.items():
+        rows = frame[frame["arm"] == arm]
+        logged = rows.groupby("uuid")["usd"].sum().to_dict() if len(rows) else {}
+        try:
+            u = unlogged_spend(es, logged)
+        except ValueError as e:
+            out[arm] = {"reason": str(e)}
+            continue
+        total = float(rows["usd"].sum()) + u["unlogged_usd"]
+        out[arm] = {"logged_usd": float(rows["usd"].sum()), "unlogged_usd": u["unlogged_usd"], "unlogged_share": u["unlogged_usd"] / total if total > 0 else None, "retried_samples": u["retried_samples"]}
+    return {"available": True, "ledgers": ledgers, "arms": out}
+
+
+def _usage_or_error(test: dict | None, frame: pd.DataFrame, run_dir: Path | None = None) -> dict:
+    try:
+        return errored_attempt_usage(test, frame, run_dir)
+    except Exception as e:  # noqa: BLE001  (a diagnostic: reported, never fatal)
+        return {"available": False, "reason": f"{type(e).__name__}: {e}"}
+
+
 def tuning_summary(log_path: Path) -> dict:
     """Per system: the candidates tried (ok / failed) and the selection (tune/tuning_log.jsonl)."""
     if not log_path.is_file():
@@ -209,7 +272,10 @@ def analyze(run, reps: int | None = None, glmm: bool = True) -> dict:
         problems.append(f"test rows unreadable: {type(e).__name__}: {e}")
     problems += [f"{c['plan_cell']} ({c['group']}): {c['reason']}" for c in coverage if c["reason"] and not str(c["reason"]).startswith("group skipped")]
     try:
-        report = main_report(frame, alpha=role.get("alpha"), reps=reps or (OFFLINE_REPS if run.offline else REPS), coverage=coverage, glmm=glmm)
+        flagged, note = kg_build_failed_worlds(run, freeze)
+        if note and freeze is not None:
+            problems.append(note)
+        report = main_report(frame, alpha=role.get("alpha"), reps=reps or (OFFLINE_REPS if run.offline else REPS), coverage=coverage, glmm=glmm, flagged_worlds=flagged)
     except Exception as e:  # noqa: BLE001
         report = {"errors": [{"section": "main_report", "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc(limit=6)}], "summary": []}
     kg = (freeze or {}).get("kg") or (test or {}).get("kg") or {}
@@ -224,7 +290,7 @@ def analyze(run, reps: int | None = None, glmm: bool = True) -> dict:
     decision = _clean({
         "header": header, "problems": problems, "coverage": coverage,
         "caps": caps_table(frame, test, freeze) if len(coverage) or freeze else [],
-        "tuning": tuning_summary(run.phase_dir("tune") / "tuning_log.jsonl"), "analysis": report,
+        "tuning": tuning_summary(run.phase_dir("tune") / "tuning_log.jsonl"), "errored_attempt_usage": _usage_or_error(test, frame, run.dir), "analysis": report,
     })  # fmt: skip
     (out_dir / "decision.json").write_text(json.dumps(decision, indent=1, allow_nan=False))
     (out_dir / "report.md").write_text(render(decision))
@@ -269,6 +335,12 @@ def render(d: dict) -> str:
         L += [_table(["System", "Candidates", "Failed", "Selected"], [[s, x["candidates"], x["failed"], x["selected"] or "–"] for s, x in sorted((t.get("systems") or {}).items())])]
     else:
         L += [f"_not available: {t.get('reason')}_", ""]
+    u = d.get("errored_attempt_usage") or {}
+    L += ["## Errored attempts' usage (not in realised cost)", "", "Realised cost (every meter, the frontier matching and K2-NI's cost ratio) is the logged final attempts' usage. An errored attempt that Inspect retried is in no log (D-030); the usage ledgers hold it.", ""]
+    if u.get("available"):
+        L += [_table(["Arm", "Logged $", "Errored attempts' $", "Share", "Retried samples"], [[a, _f(x.get("logged_usd"), 4), _f(x.get("unlogged_usd"), 4), _f(x.get("unlogged_share")), x.get("retried_samples", x.get("reason", "–"))] for a, x in sorted((u.get("arms") or {}).items())])]
+    else:
+        L += [f"_not available: {u.get('reason')}_", ""]
     body = render_main(d["analysis"]) if d.get("analysis", {}).get("header") else "\n".join(f"- {e['section']}: {e['error']}" for e in d.get("analysis", {}).get("errors") or [])
     L += [body.split("\n", 1)[1] if body.startswith("# ") else body]
     return "\n".join(L) + "\n"
