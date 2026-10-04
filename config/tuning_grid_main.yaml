@@ -18,11 +18,12 @@
 #   detail); `verify` a check at each hand-off (results against subtasks, re-delegating what is missing; a critique
 #   that revises only on evidence; a chair that keeps a unanimous answer). Variants change only how the arm's own
 #   mechanism is used, never generic advice on the task, which would help S1 as much (prompts.py).
-# - APE_MAS_<ARM>_CLIP (M1, M1K, M2, M7): the cap on a worker's result or a member's rationale as another agent reads it
+# - APE_MAS_<ARM>_CLIP (M1, M7): the cap on a worker's result or a member's rationale as another agent reads it
 #   (default 2,000 tokens). Available to the owners; no candidate below uses it.
-# M1s has no system: it reads M1's knobs, so it runs as M1's selection (M1 and M1s differ in CONC only and must give
-# the model identical inputs). The structural parameters (3 workers, 2 critique rounds, council k = 3; brief §4.2) are
-# fixed a priori and never tuned.
+# M1s, M1k and M2 have no systems (`inherited` from M1; BUILD_REVIEW A-1): they read M1's knobs and run as M1's
+# selection, so the orchestrator chain M1s -> M1 -> M1k -> M2 runs one protocol variant and each step stays one switch
+# (CONC, DEL, SPEC). M1 therefore tunes on all four of its dev cells (Study A's and Study B's). The structural
+# parameters (3 workers, 2 critique rounds, council k = 3; brief §4.2) are fixed a priori and never tuned.
 #
 # Not tuned here (`inherited`):
 # - S1, the monolith, has no text of its own: its whole prompt (kb_react BASE_SYSTEM, the knowledge note and the
@@ -38,14 +39,14 @@
 # Sign-off. Each owner reviews their systems' candidates, and for the M arms the variant texts in
 # ape/agent/multi/prompts.py (drafts), then names themselves in `owners` and sets `signed_off` to true. Roles
 # (DECISIONS D-018; brief §7.3):
-# - S9, M1, M7, M1k, M2: the M-arm prompt author, the independent team member who writes the M-arm prompts (brief
+# - S9, M1 (and so M1s, M1k, M2), M7: the M-arm prompt author, the independent team member who writes the M-arm prompts (brief
 #   §7.3); not the skeptic, who engineers the baselines these arms are compared with (S1, S3s).
 # - S1: the skeptic.
 # A live tune refuses until every system has an owner and a sign-off; PC6-style completeness counts every configuration
 # tried (archived tuning logs included) against budget_per_system, so a candidate replaced after a live tune still
 # counts. These keys are not candidates; the freeze hashes this whole file.
-owners: {S1: TODO, S9: TODO, M1: TODO, M7: TODO, M1k: TODO, M2: TODO}
-signed_off: {S1: false, S9: false, M1: false, M7: false, M1k: false, M2: false}
+owners: {S1: TODO, S9: TODO, M1: TODO, M7: TODO}
+signed_off: {S1: false, S9: false, M1: false, M7: false}
 budget_per_system: 4
 equal_budgets: true
 tie_pp: 1.0
@@ -54,6 +55,8 @@ inherited:
   S1: {source: fixed, owner: skeptic}
   S5: {source: gate, gate_key: "APG* (GO) or LGR* (NO_GO)"}
   S3s: {source: gate, gate_key: S3s}
+  M1k: {source: M1, note: "reads M1's knobs: M1 -> M1k changes DEL only (BUILD_REVIEW A-1)"}
+  M2: {source: M1, note: "reads M1's knobs: M1k -> M2 changes SPEC only (BUILD_REVIEW A-1)"}
 
 systems:
   S9:
@@ -77,17 +80,3 @@ systems:
       - {id: m7-concise, arm: M7, env: {APE_MAS_M7_PROMPT: concise}}
       - {id: m7-structured, arm: M7, env: {APE_MAS_M7_PROMPT: structured}}
       - {id: m7-verify, arm: M7, env: {APE_MAS_M7_PROMPT: verify}}
-  M1k:
-    dev_cells: [F3-60, F7-1000]
-    candidates:
-      - {id: m1k-default, arm: M1k, env: {APE_MAS_M1K_PROMPT: default}}
-      - {id: m1k-concise, arm: M1k, env: {APE_MAS_M1K_PROMPT: concise}}
-      - {id: m1k-structured, arm: M1k, env: {APE_MAS_M1K_PROMPT: structured}}
-      - {id: m1k-verify, arm: M1k, env: {APE_MAS_M1K_PROMPT: verify}}
-  M2:
-    dev_cells: [F3-60, F7-1000]
-    candidates:
-      - {id: m2-default, arm: M2, env: {APE_MAS_M2_PROMPT: default}}
-      - {id: m2-concise, arm: M2, env: {APE_MAS_M2_PROMPT: concise}}
-      - {id: m2-structured, arm: M2, env: {APE_MAS_M2_PROMPT: structured}}
-      - {id: m2-verify, arm: M2, env: {APE_MAS_M2_PROMPT: verify}}
