@@ -13,6 +13,9 @@ is offered (never by prompt prose, which is meant to be rewritten):
 - the answer tool alone -> chair: submits the majority of the proposals it is shown.
 - `select_answer` -> S8k3 aggregator: picks the candidate equal to the gold.
 - anything else -> a single agent (an S8k3 attempt): lookups, then the gold answer.
+- a ledger call (M5, M5-spec; a `task_ledger` or `progress_ledger` response schema) -> a fixed, well-formed ledger
+  (progress made, not in a loop). Every other role ignores the ledger block the harness puts at the end of the
+  orchestrator's latest message (`ledger.strip_ledger`), so M5's orchestrator acts exactly as M1's would.
 
 Every output is a deterministic function of the conversation it is given (tool-call IDs included), so two runs that
 give the model the same inputs get the same outputs: the M1-vs-M1s identity test relies on it.
@@ -27,6 +30,7 @@ from pathlib import Path
 from inspect_ai.model import ChatCompletionChoice, ChatMessageAssistant, ChatMessageTool, ModelOutput
 from inspect_ai.tool import ToolCall
 
+from ..agent.multi.ledger import PROGRESS_LEDGER, TASK_LEDGER, strip_ledger
 from ..agent.multi.specialists import specialists
 from ..worlds.gen_registry import rate
 from ..worlds.spec import TaskItem, World
@@ -81,6 +85,9 @@ class GoldMulti:
         self.customers = {t.tags["customer_id"]: (w, t) for w, t in self.tasks if t.family == "F7"}
 
     def __call__(self, messages, tools, tool_choice, config) -> ModelOutput:
+        if config.response_schema is not None and config.response_schema.name in (TASK_LEDGER, PROGRESS_LEDGER):
+            return self.ledger(config.response_schema.name)
+        messages = strip_ledger(messages)
         names = {t.name for t in tools}
         info = {t.name: t for t in tools}
         if "report" in names:
@@ -101,6 +108,20 @@ class GoldMulti:
         if names == {task.answer_tool}:
             return self.chair(messages, task)
         return out(messages, self.single(messages, world, task, names))
+
+    # -- the ledger (M5) -----------------------------------------------------------------------------------------------
+
+    @staticmethod
+    def ledger(name: str) -> ModelOutput:
+        """A well-formed ledger. Its text names no ID or rating, so nothing in it can be read as a worker's result."""
+        if name == TASK_LEDGER:
+            value = {"given_facts": ["The task as stated"], "facts_to_look_up": ["The records the task names"],
+                     "facts_to_derive": ["What the company rules give for them"], "educated_guesses": [],
+                     "plan": ["Delegate the lookups", "Derive the answer from the results", "Submit the answer"]}
+        else:
+            value = {"request_satisfied": False, "in_loop": False, "progress_being_made": True, "next_action": "Continue with the plan",
+                     "instruction": "Carry on with the next step of the plan", "reason": "The latest step produced new results."}
+        return ModelOutput.from_content(MODEL, json.dumps(value))
 
     # -- finding the task ---------------------------------------------------------------------------------------------
 

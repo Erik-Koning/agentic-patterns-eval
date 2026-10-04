@@ -1,7 +1,7 @@
 """One solver per arm id, for the main study's task (`tasks/main.py`): the seam between the task and the arms.
 
 Single-agent delivery arms (S1, S3s, S5, S6, S7, the APG/LightRAG arms) all run the one `kb_agent` loop; only the
-delivery arm differs (`agent/arms.py`). Multi-agent and ensemble arms (BUILD_PLAN B2: S8k3, S9, M1, M1s, M1k, M2, M7)
+delivery arm differs (`agent/arms.py`). Multi-agent and ensemble arms (BUILD_PLAN B2: S8k3, S9, M1, M1s, M1k, M2, M7; M5, M5-spec)
 register their solver factory in MULTI_AGENT_ARMS (`agent/multi/solvers.py`); every factory takes the same keywords
 as `kb_agent` (exposure, max_turns, delivery).
 """
@@ -17,7 +17,7 @@ from .multi.solvers import ARM_FACTORIES
 # arm id -> factory(arm, *, exposure, max_turns, delivery) -> Solver.
 MULTI_AGENT_ARMS: dict[str, Callable[..., Solver]] = dict(ARM_FACTORIES)
 # Arms in run_plan.yaml that are not single-agent delivery arms; until their factory is registered they are refused.
-PLANNED_MULTI_AGENT_ARMS = ("S8k3", "S9", "M1", "M1s", "M1k", "M2", "M7")
+PLANNED_MULTI_AGENT_ARMS = ("S8k3", "S9", "M1", "M1s", "M1k", "M2", "M5", "M5-spec", "M7")
 
 
 def is_multi_agent(arm: str) -> bool:
