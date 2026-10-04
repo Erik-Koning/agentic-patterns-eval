@@ -490,6 +490,8 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Selections and tuning:** S9, M1s, M1k and M2 run under M1's selection; `main.tune.a` = {M1, M7}, `main.tune.b` = {M1}.
 - **Smaller:** build-ledger entries carry their run's spend label; the runner index is read for the latest run's tasks only, and the working-limit config is in each group's key; each tuning system gets its own per-sample cost limit; the gate clears a shell `APE_CACHE_NONCE`; the freeze records each test group's per-sample cost limit and, with CM-native cells, the native support record. A parsed-YAML cache cut the offline rehearsals to 113 s (main) and 54 s (Study G).
 
+**D-051 (2026-10-04, user: reduce cost).** The Astra topology cell `g.topo.astra` (S1 and M2 at Astra, 5 sessions × 2 epochs) is **switched off by default** (`enabled: false` in `config/run_plan.yaml`); the cell definition and every code path stay, so setting `enabled: true` restores it. It fed only G-H1's descriptive S1-pre sensitivity at Astra: G-H1's S-CM* reference and G-H3's pooled points (Luna-low, Luna-high, Sol) never used Astra. −$939 conservative / −$586 expected: **$3,897 / $2,664**, contingency $1,103 (22%). Considered and not taken: Study F Sol at 60 tasks (−$300), dropping CM-todo at Astra (−$284, a core arm at the top tier), 24 Luna topology sessions (+$51), and probing a cheaper service tier.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

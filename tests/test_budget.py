@@ -38,7 +38,7 @@ MOCK_PRICE = {"input": 1.0, "output": 2.0, "input_cache_write": 1.0, "input_cach
 # (priors only, no measured calibration). Update the docs with these when the plan or the priors change.
 # R-B4 (2026-10-03): whole worlds as the runners run them (100 -> 108, 20 -> 24, 15 -> 24), M1k/M2/S9 no longer tuned
 # (D-047), the g.pilot.topo cell. Were 214 / 1,025 / 3,486 / 4,725 / 3,168.
-DOCUMENTED = {"gate": 220, "main": 1127, "study_g": 3490, "total": 4836, "expected": 3249}
+DOCUMENTED = {"gate": 220, "main": 1127, "study_g": 2551, "total": 3897, "expected": 2664}
 
 
 @pytest.fixture(autouse=True)
@@ -144,12 +144,16 @@ def test_real_plan_fits_the_budget_with_the_documented_allocation():
         assert f"{DOCUMENTED[key]:,}" in budget_md, f"BUDGET.md does not show the {key} figure ${DOCUMENTED[key]:,}"
 
 
-def test_cuts_are_the_in_order_minimum_and_protected_cells_are_untouched():
+def test_cuts_are_applied_in_order_and_protected_cells_are_untouched():
+    """The in-order minimum is C1 since D-051 switched the Astra topology cell off; C2 and C3 stay applied by choice
+    (cost), so the plan's cuts are the minimum plus the next ones in order, never a skip."""
     plan = load_plan()
     before = load_plan(uncut_plan=True)
     assert estimate(before, measured=[]).total() > plan.budget["total_usd"], "the cuts must have been needed"
     resized, applied = right_size(before, measured=[])
-    assert applied == plan.applied_cuts == ["C1", "C2", "C3"]
+    assert applied == ["C1"] and plan.applied_cuts == ["C1", "C2", "C3"]
+    for cut_id in plan.applied_cuts[len(applied):]:
+        resized = apply_cut(resized, cut_id)
     assert [c.spec for c in resized.cells] == [c.spec for c in plan.cells]
     # Never cut: gate primary sizes and epochs, the S7 placebo's epochs.
     for cell_id in ("gate.test.f7", "gate.test.f3"):

@@ -28,7 +28,7 @@ budget:
   # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,126.8 + the D-039 pilot re-runs the
   # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225).
   allocations: {gate: 300, main: 1225, study_g: 3600}
-  contingency_usd: 160
+  contingency_usd: 1000
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
   # ends with limit "cost" and counts as a cap hit (PC5). Only applied when every model of the run is priced.
@@ -191,8 +191,9 @@ studies:
            knobs: {output_tokens: 2250}, note: "D-033: a fourth topology capability point (Luna-low), for G-H3 and the G-H1 estimate"}
         - {id: g.topo.sol, kind: session, profile: study_g_sol, arms: [S1, M1, M2, S-CM*], N: 20, sessions: 8, epochs: 2,
            knobs: {output_tokens: 2250}}
-        - {id: g.topo.astra, kind: session, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2,
-           knobs: {output_tokens: 2250}}
+        - {id: g.topo.astra, kind: session, enabled: false, profile: study_g_astra, arms: [S1, M2], N: 20, sessions: 5, epochs: 2,
+           knobs: {output_tokens: 2250},
+           note: "D-051 (user): not run. It fed only G-H1's descriptive S1-pre sensitivity at Astra; G-H1's S-CM* reference and G-H3 never used Astra (-$939 conservative)"}
 
 # Right-sizing cuts (FX-5), applied IN ORDER while the conservative total exceeded budget.total_usd, stopping as
 # soon as it fit. `applied` cuts are already reflected in the cells above. Never cut: gate primary sizes, epochs of

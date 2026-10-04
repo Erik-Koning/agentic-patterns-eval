@@ -128,7 +128,7 @@ No decision rests on these. Each is an estimate with its 95% interval (session-c
 
 - **G-H1 (convergence; descriptive since D-033).**
   - **Reference: S-CM\*.** The estimand is the slope of the per-session gap logit(M2) − logit(S-CM\*) on measured capability (§5.2; OLS over sessions), and the change along the fitted line over the capability span. It covers Luna-low, Luna-high and Sol-high.
-  - S-CM\* does not run at Astra. Adding it to `g.topo.astra` (about +$284 conservative, `g_hypotheses.OPEN_CHOICES`) is not planned.
+  - Neither S-CM\* nor any topology arm runs at Astra: the Astra topology cell `g.topo.astra` (S1, M2) is off by default (D-051; `enabled: false`, switchable back on), so G-H1 and its S1-pre sensitivity span Luna-low, Luna-high and Sol.
   - **Sensitivity: S1-pre,** M2 − S1 on the items before S1's overflow in each session, at all four points. It does not drift under a constant mechanism.
   - **S1 as scored: descriptive only.** Its gap carries CM0's overflow rule, so it drifts by +0.67 logit over the span even when nothing changes; S-CM\*'s drifts by +0.24.
   - **G-H1-M1:** the same with M1, at the three points where M1 runs.
@@ -278,7 +278,7 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 | `g.topo.luna-low` | Luna-low | S1, M1, M2, S-CM\* | 20 | `output_tokens` 2,250 | 16 × 2 | 44 |
 | `g.topo.luna` | Luna-high | S1, M1, M2, S-CM\* | 20 | `output_tokens` 2,250 | 16 × 2 | 60 |
 | `g.topo.sol` | Sol-high | S1, M1, M2, S-CM\* | 20 | `output_tokens` 2,250 | 8 × 2 | 595 |
-| `g.topo.astra` | Astra-high | S1, M2 | 20 | `output_tokens` 2,250 | 5 × 2 | 939 |
+| `g.topo.astra` (off by default, D-051) | Astra-high | S1, M2 | 20 | `output_tokens` 2,250 | not run (5 × 2 if enabled) | 0 (939 if enabled) |
 | `g.cap.luna-low`, `g.cap.luna-high`, `g.cap.sol-high`, `g.cap.astra-high` | one each | S1 (agent tasks, §5.2) | — | F7-10 and F3-5 | 48 tasks per cell (4 worlds × 12) × 1 epoch | 51 in all |
 | `g.pilot.luna` (micro-pilot) | Luna-high | CM0, CM-prune, CM-sum, CM-todo, CM-reset, CM-native, O-state | 40 | default | 3 × 1 (pilot split) | 11 |
 | `g.tune.luna` (tuning) | Luna-high | CM-prune, CM-sum, CM-todo, CM-reset, S-CM\* | 40 | default | 3 × 1 per candidate (dev split) | 26 |
@@ -336,7 +336,7 @@ The current case is never compacted, summarised or dropped. When a view exceeds 
 | Luna-low | `openai/gpt-6-luna` (`study_g_luna`) | low (cell override) | `g.cm.luna-low` | `g.topo.luna-low` | `g.cap.luna-low` |
 | Luna-high | `openai/gpt-6-luna` (`study_g_luna`) | high | `g.cm.luna-high`, `g.cm.luna-n10` | `g.topo.luna` | `g.cap.luna-high` |
 | Sol-high | `openai/gpt-6-sol` (`study_g_sol`) | high | `g.cm.sol-high` | `g.topo.sol` | `g.cap.sol-high` |
-| Astra-high | `openai/gpt-6-astra` (`study_g_astra`) | high | `g.cm.astra-high` | `g.topo.astra` | `g.cap.astra-high` |
+| Astra-high | `openai/gpt-6-astra` (`study_g_astra`) | high | `g.cm.astra-high` | – (`g.topo.astra` off, D-051) | `g.cap.astra-high` |
 
 - **The point** is `<tier>-<effort>`, from each cell's profile and effort (`g_load`).
 - **Self-summarisation.** No profile sets a `cm` role, so management calls use the agent's own model and effort. No profile sets a `probe` role either, so the probes ask the model that is in the session.
