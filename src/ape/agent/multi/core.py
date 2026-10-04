@@ -17,7 +17,9 @@ orchestrator or a council member sees knowledge exactly as a single agent of the
 generations and the `kg` role's classify calls made while compiling its context) belongs to the nearest enclosing
 agent span. Inspect completes the event, with its usage, before it records the usage and checks the token limit, so
 the call that trips a limit is counted too. Per agent: calls, input / output / reasoning / cache-read / cache-write /
-total tokens and model seconds per model role, plus the agent's wall-clock. Cache-hit events (`cache="read"`) are left
+total tokens and model seconds per model role, plus the agent's wall-clock, and per purpose (`Team.purpose`: a nested
+span marking an agent's side calls, e.g. M5's ledger calls) the calls made for it, a subset of the agent's own. Cache-hit
+events (`cache="read"`) are left
 out, as Inspect leaves them out of the sample's usage. Calls outside every agent span would land in `unattributed`
 (none do: the solvers open an agent span before any model call); the per-agent totals plus `unattributed` equal the
 sample's `model_usage` exactly.
@@ -142,6 +144,7 @@ class Team:
         self.records: dict[str, Any] = {}
         self.top: AgentRecord | None = None  # the agent whose turns are the sample's `turns_used`
         self._spans: dict[str, str] = {}
+        self._purposes: dict[str, str] = {}
         self._pending_error: Exception | None = None
         self._t0 = time.perf_counter()
 
@@ -162,6 +165,14 @@ class Team:
         finally:
             agent.wall_s += time.perf_counter() - t0
 
+    @asynccontextmanager
+    async def purpose(self, name: str):
+        """A span inside the running agent's: its calls stay the agent's, and are also counted under `purposes[name]`
+        (M5's ledger calls are the orchestrator's calls, with purpose `ledger`)."""
+        async with span(name=f"purpose:{name}", type="purpose"):
+            self._purposes[current_span_id()] = name
+            yield
+
     def note_error(self, error: Exception) -> None:
         """A limit or an error inside a tool (a worker run by `delegate`): `execute_tools` may turn it into a tool error,
         so it is kept here and re-raised once the tool call returns."""
@@ -180,31 +191,38 @@ class Team:
     def accounting(self) -> dict:
         events = list(transcript().events)
         parents = {e.id: e.parent_id for e in events if isinstance(e, SpanBeginEvent)}
-        owner_of: dict[str | None, str | None] = {}
+        owner_of: dict[str | None, tuple[str | None, str | None]] = {}
 
-        def owner(span_id: str | None) -> str | None:
+        def owner(span_id: str | None) -> tuple[str | None, str | None]:
+            """The nearest enclosing agent span's agent, and the nearest purpose span below it (if any)."""
             if span_id not in owner_of:
-                seen, sid = set(), span_id
+                seen, sid, purpose = set(), span_id, None
                 while sid is not None and sid not in self._spans and sid not in seen:
                     seen.add(sid)
+                    purpose = purpose or self._purposes.get(sid)
                     sid = parents.get(sid)
-                owner_of[span_id] = self._spans.get(sid) if sid is not None else None
+                owner_of[span_id] = (self._spans.get(sid) if sid is not None else None, purpose)
             return owner_of[span_id]
 
-        per: dict[str, dict] = {aid: {"role": a.role, "parent": a.parent, "models": {}, "wall_s": round(a.wall_s, 3)} for aid, a in self.agents.items()}
+        per: dict[str, dict] = {aid: {"role": a.role, "parent": a.parent, "models": {}, "purposes": {}, "wall_s": round(a.wall_s, 3)} for aid, a in self.agents.items()}
         unattributed: dict[str, dict] = {}
-        for e in events:
-            if not isinstance(e, ModelEvent) or e.pending or e.cache == "read" or e.output is None or e.output.usage is None:
-                continue
-            aid = owner(e.span_id)
-            models = per[aid]["models"] if aid is not None else unattributed
-            bucket = models.setdefault(e.role or AGENT_MODEL, {"calls": 0, **dict.fromkeys(TOKEN_FIELDS, 0), "model_seconds": 0.0})
+
+        def add(buckets: dict, key: str, e: ModelEvent) -> None:
+            bucket = buckets.setdefault(key, {"calls": 0, **dict.fromkeys(TOKEN_FIELDS, 0), "model_seconds": 0.0})
             bucket["calls"] += 1
             for f in TOKEN_FIELDS:
                 bucket[f] += getattr(e.output.usage, f) or 0
             bucket["model_seconds"] += e.working_time or 0.0
+
+        for e in events:
+            if not isinstance(e, ModelEvent) or e.pending or e.cache == "read" or e.output is None or e.output.usage is None:
+                continue
+            aid, purpose = owner(e.span_id)
+            add(per[aid]["models"] if aid is not None else unattributed, e.role or AGENT_MODEL, e)
+            if aid is not None and purpose is not None:
+                add(per[aid]["purposes"], purpose, e)
         for rec in [*per.values(), {"models": unattributed}]:
-            for b in rec["models"].values():
+            for b in [*rec["models"].values(), *rec.get("purposes", {}).values()]:
                 b["model_seconds"] = round(b["model_seconds"], 3)
         for rec in per.values():
             mine = rec["models"].get(AGENT_MODEL, {})
@@ -302,11 +320,13 @@ async def react_loop(
     done: Callable[[], bool],
     nudge: str,
     first_tool: str | None = None,
+    before_generate: Callable[[list[ChatMessage], int], Awaitable[list[ChatMessage]]] | None = None,
 ) -> ModelOutput | None:
     """Turns of one agent over `messages` (appended in place) until `done()`, a second text-only reply in a row, or
     `max_turns` (module docstring). `ctx` is the delivery for the first turn; with a per-step arm and `ctx=None` the
     first turn compiles too (a history that continues, e.g. a council member's next round). `first_tool` forces the
-    first turn's tool choice (the planning step)."""
+    first turn's tool choice (the planning step). `before_generate(view, turn)` may make side calls and returns the
+    view to send instead (M5's ledger: the view with the current ledger at its end, never stored in the history)."""
     nudges, streak, output, turn, stop = 0, False, None, -1, "turn_cap"
     base = agent.turns
     try:
@@ -317,6 +337,8 @@ async def react_loop(
             exposed = exposed_tools(tools, cur, exposure, list(always))
             agent.steps.append({"turn": base + turn, "exposed_tools": [t.name for t in exposed]})
             view = step_view(messages, cur.text) if delivery.per_step else messages
+            if before_generate is not None:
+                view = await before_generate(view, turn)
             choice = ToolFunction(name=first_tool) if turn == 0 and first_tool and any(t.name == first_tool for t in exposed) else None
             output = agent.output = await team.model.generate(view, tools=exposed, tool_choice=choice)
             messages.append(output.message)

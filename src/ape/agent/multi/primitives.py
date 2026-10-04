@@ -55,6 +55,7 @@ from ...worlds.spec import TaskItem
 from ..kb_react import COMPILE_LOG, STEP_LOG
 from . import prompts as P
 from .core import TEXT_MAX_TOKENS, AgentRecord, Delivery, Team, as_json, clip, env_data, last_assistant_text, merge_env, react_loop, run_isolated
+from .ledger import Ledger
 from .specialists import N_WORKERS, Specialist
 
 CRITIQUE_ROUNDS = 2  # fixed a priori (brief §4.2)
@@ -69,7 +70,8 @@ class TeamConfig:
     `tools` replaces `worker_tools` (the task's non-terminal tools) for teams whose environment is not
     `env_tools.build_tools`, e.g. Study G's sessions (B9). `notes` (the role notes of the arm's prompt variant) and
     `clip_tokens` (the cap on a worker's result or a member's rationale as another agent reads it) are the arm's tuning
-    knobs (`knobs.py`); the defaults are B2's."""
+    knobs (`knobs.py`); the defaults are B2's. `ledger_stall` gives the orchestrator M5's ledger (`ledger.py`) with that
+    stall threshold; None (M1, M1s, M1k, M2) runs without one."""
 
     delivery: Delivery
     exposure: str
@@ -81,6 +83,7 @@ class TeamConfig:
     tools: Callable[[Team, Specialist | None], tuple[dict[str, ToolDef], list[str]]] | None = None
     notes: P.RoleNotes = P.VARIANTS[P.DEFAULT_VARIANT]
     clip_tokens: int = TEXT_MAX_TOKENS
+    ledger_stall: int | None = None
 
     def worker_tools(self, team: Team, specialist: Specialist | None = None) -> tuple[dict[str, ToolDef], list[str]]:
         return (self.tools or worker_tools)(team, specialist)
@@ -262,12 +265,13 @@ async def run_orchestrator(team: Team, cfg: TeamConfig, *, prompt: str | None = 
     plans, rounds = team.records.setdefault("mas_plan", []), team.records.setdefault("mas_rounds", [])
     tools = {"plan": plan_tool(orch, plans), "delegate": delegate_tool(team, orch, cfg, rounds), answer.name: answer}
     note = cfg.notes.orchestrator.format(n_workers=cfg.n_workers, answer_tool=answer.name, team=team_text(team, cfg))
+    ledger = Ledger(team, orch, cfg.ledger_stall) if cfg.ledger_stall else None
     async with team.running(orch):
         ctx = await cfg.delivery.compile(orch, prompt, 0)
         team.state.messages = [cfg.delivery.system(ctx), ChatMessageUser(content=f"{prompt}\n\n{note}")]
         await react_loop(team, orch, team.state.messages, delivery=cfg.delivery, ctx=ctx, query=prompt, tools=tools, always=list(tools),
                          exposure=cfg.exposure, max_turns=cfg.max_turns, done=done or team.answered, nudge=P.NUDGE_TASK.format(answer_tool=answer.name),
-                         first_tool="plan")
+                         first_tool="plan", before_generate=ledger.before_generate if ledger else None)
 
 
 # --- council --------------------------------------------------------------------------------------------------------

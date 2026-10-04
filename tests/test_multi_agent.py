@@ -292,13 +292,14 @@ class _Arm:
 
 @pytest.mark.parametrize("a,b,switch", [
     ("S9", "S1", "DEC"), ("M1s", "S9", "ISO"), ("M1", "M1s", "CONC"), ("M1k", "M1", "DEL"), ("M2", "M1k", "SPEC"),
-    ("M7", "S8k3", "COMM"), ("S8k3", "S1", "ENS"),
+    ("M7", "S8k3", "COMM"), ("S8k3", "S1", "ENS"), ("M5", "M1", "STATE"), ("M5-spec", "M2", "STATE"),
 ])
 def test_each_mechanism_contrast_differs_in_exactly_one_switch(a, b, switch):
     def vec(arm):
         if arm == "S1":
             return dict(S1_SWITCHES)
-        sw = switch_vector(arm, _Arm("APG-s" if arm in ("M1k", "M2") else "S1", True if arm in ("M1k", "M2") else False))
+        kg = arm in ("M1k", "M2", "M5-spec")
+        sw = switch_vector(arm, _Arm("APG-s" if kg else "S1", kg))
         return {k: v for k, v in sw.items() if k in S1_SWITCHES}
 
     va, vb = vec(a), vec(b)

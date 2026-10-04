@@ -111,7 +111,7 @@ def test_knobs_are_per_tuned_arm_and_the_orchestrator_chain_reads_m1s():
     assert K.resolve("M7", env) == K.Knobs("structured")
     assert K.resolve("S8k3", env) == K.Knobs() and K.arm_knobs("S8k3") == []
     assert all(K.arm_knobs(a) == ["APE_MAS_M1_PROMPT", "APE_MAS_M1_CLIP"] for a in chain)
-    assert set(K.KNOBS) == {f"APE_MAS_{a}_PROMPT" for a in ("M1", "M7")} | {f"APE_MAS_{a}_CLIP" for a in ("M1", "M7")}
+    assert set(K.KNOBS) == {f"APE_MAS_{a}_PROMPT" for a in ("M1", "M7")} | {f"APE_MAS_{a}_CLIP" for a in ("M1", "M7")} | {"APE_MAS_M5_STALL"}  # M5's own (tests/test_ledger.py)
     no_knobs = ("APE_MAS_S9_PROMPT", "APE_MAS_S9_CLIP", "APE_MAS_M1K_PROMPT", "APE_MAS_M2_PROMPT", "APE_MAS_M1K_CLIP", "APE_MAS_M2_CLIP")
     for stale in no_knobs:  # the chain has no knobs of its own
         with pytest.raises(ValueError, match=f"{stale} is not a multi-agent knob"):

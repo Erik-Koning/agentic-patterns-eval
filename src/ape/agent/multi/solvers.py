@@ -9,6 +9,8 @@ arm runs push delivery only, as `tasks.main` already requires for arms without a
 | M1s | DEC=1, ISO=1, CONC=0 | as M1, workers one after another | S1 (MONO) |
 | M1k | M1 + DEL=KGs | as M1 | S5: the gate-selected KG arm (`arms.kg_arm_name`) |
 | M2 | M1k + SPEC=1 | as M1k with 3 specialists (`specialists.py`) | S5 |
+| M5 | M1 + STATE=text-ledger | as M1, the orchestrator keeping a task and progress ledger (`ledger.py`) | S1 (MONO) |
+| M5-spec | M2 + STATE=text-ledger | as M2, with the ledger | S5 |
 | M7 | ENS=3, COMM=real | 3 council members, 2 critique rounds, a chair | S1 (MONO) |
 | S8k3 | ENS=3 | 3 independent S1 attempts (`kb_agent`), vote, aggregator on ties | S1 (MONO) |
 
@@ -20,21 +22,22 @@ and whether the planner holds the knowledge.)
 **Tuning knobs** (`knobs.py`, BUILD_PLAN B3): each factory reads its arm's `APE_MAS_<ARM>_*` variables when it is built
 (the prompt variant of the role notes, and the clip on a worker's result or a member's rationale); S9, M1s, M1k and M2
 read M1's, so the chain S9 -> M1s -> M1 -> M1k -> M2 runs one protocol variant and each step stays one switch
-(BUILD_REVIEW A-1, D-047).
+(BUILD_REVIEW A-1, D-047). M5 and M5-spec read M1's too (M1 -> M5 and M2 -> M5-spec change STATE only), plus their
+ledger's stall threshold `APE_MAS_M5_STALL`.
 
 **Records** (sample store): `mas_switches` (the brief's full switch vector, §4.1), `mas_params` (fixed structure:
 workers, rounds, k, turn caps, and how parallel units are scheduled; and the arm's knobs: `prompt_variant`, the hash
 of its texts `prompt_sha`, and `result_clip_tokens` where one agent reads another's text), `mas_agents` (per agent:
 id, role, parent, turns, nudges, how it stopped, its tool calls in order, its result or error), `mas_accounting` (per
 agent and role: calls, input / output / reasoning / cache-read / cache-write / total tokens, model seconds, wall-clock;
-`core`), and per arm `mas_plan` and `mas_rounds` (planner and orchestrator arms), `mas_council` (M7) or
-`mas_ensemble` (S8k3).
+`core`), and per arm `mas_plan` and `mas_rounds` (planner and orchestrator arms), `mas_ledger` (M5, M5-spec),
+`mas_council` (M7) or `mas_ensemble` (S8k3).
 The single-agent keys are written too (`compile_log` over every agent, so `delivered_evidence` scores the union of
 what any agent was delivered; `step_log`; `turns_used` and `nudges` of the top agent: the planner, the orchestrator,
 the chair or the winning attempt).
 
-**Where each arm applies.** Every arm runs on F1, F2, F3 and F7, except M2 (no specialization on F2: `specialists`) and
-M7 (its members attempt the task in parallel, and F3's tools change the environment). A sample outside these fails
+**Where each arm applies.** Every arm runs on F1, F2, F3 and F7, except M2 and M5-spec (no specialization on F2:
+`specialists`) and M7 (its members attempt the task in parallel, and F3's tools change the environment). A sample outside these fails
 with a clear error.
 """
 
@@ -48,6 +51,7 @@ from ..kb_react import kb_agent
 from . import knobs as K
 from . import prompts as P
 from .core import Delivery, Team, react_loop
+from .ledger import ledger_sha
 from .primitives import COUNCIL_K, CRITIQUE_ROUNDS, ENSEMBLE_K, TeamConfig, plan_tool, run_council, run_ensemble, run_orchestrator, worker_tools
 from .specialists import N_WORKERS, specialists
 
@@ -58,11 +62,14 @@ REGISTRY = {  # differences from S1 (brief §4.2); "KG" resolves to KGs or KGq b
     "M1s": {"DEC": 1, "ISO": 1, "CONC": 0},
     "M1k": {"DEC": 1, "ISO": 1, "CONC": 1, "DEL": "KG"},
     "M2": {"DEC": 1, "ISO": 1, "CONC": 1, "DEL": "KG", "SPEC": 1},
+    "M5": {"DEC": 1, "ISO": 1, "CONC": 1, "STATE": "text-ledger"},
+    "M5-spec": {"DEC": 1, "ISO": 1, "CONC": 1, "DEL": "KG", "SPEC": 1, "STATE": "text-ledger"},
     "M7": {"ENS": COUNCIL_K, "COMM": "real"},
     "S8k3": {"ENS": ENSEMBLE_K},
 }
-DELIVERY_ARM = {"S9": "S1", "M1": "S1", "M1s": "S1", "M1k": "S5", "M2": "S5", "M7": "S1", "S8k3": "S1"}
-NOT_ON = {"M2": ("F2", "F5"), "M7": ("F3",)}
+DELIVERY_ARM = {"S9": "S1", "M1": "S1", "M1s": "S1", "M1k": "S5", "M2": "S5", "M5": "S1", "M5-spec": "S5", "M7": "S1", "S8k3": "S1"}
+NOT_ON = {"M2": ("F2", "F5"), "M5-spec": ("F2", "F5"), "M7": ("F3",)}
+LEDGER_ARMS = tuple(a for a, sw in REGISTRY.items() if sw.get("STATE") == "text-ledger")
 
 
 def switch_vector(arm: str, delivery: DeliveryArm) -> dict:
@@ -80,6 +87,8 @@ def _params(arm: str, max_turns: int, knobs: K.Knobs) -> dict:
             p["result_clip_tokens"] = knobs.clip
     if REGISTRY[arm].get("ISO"):
         p |= {"n_workers": N_WORKERS, "worker_turns": max_turns, "workers_scheduled": "concurrent" if REGISTRY[arm]["CONC"] else "serial"}
+    if arm in LEDGER_ARMS:
+        p |= {"ledger": "task + progress (Magentic-One style)", "ledger_stall": knobs.stall, "ledger_sha": ledger_sha()}
     if arm == "M7":
         p |= {"council_k": COUNCIL_K, "critique_rounds": CRITIQUE_ROUNDS, "members_scheduled": "concurrent"}
     if arm == "S8k3":
@@ -137,7 +146,8 @@ def plan_execute(arm: str = "S9", exposure: str = "retrieved", max_turns: int = 
 
 @solver
 def orchestrated(arm: str = "M1", exposure: str = "retrieved", max_turns: int = 12, delivery: str = "push") -> Solver:
-    """M1, M1s, M1k, M2: an orchestrator delegating to three workers in fresh contexts."""
+    """M1, M1s, M1k, M2, and M5, M5-spec (with the ledger): an orchestrator delegating to three workers in fresh
+    contexts."""
     knobs = _check(arm, delivery)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
@@ -149,7 +159,7 @@ def orchestrated(arm: str = "M1", exposure: str = "retrieved", max_turns: int = 
             if specs is not None:
                 team.records["mas_specialists"] = [{"name": s.name, "covers": list(s.covers), "tools": list(s.tools) if s.tools else None} for s in specs]
             cfg = TeamConfig(dlv, exposure, max_turns, worker_turns=max_turns, concurrent=bool(REGISTRY[arm]["CONC"]), specialists=specs,
-                             notes=knobs.notes, clip_tokens=knobs.clip)
+                             notes=knobs.notes, clip_tokens=knobs.clip, ledger_stall=knobs.stall if arm in LEDGER_ARMS else None)
             await run_orchestrator(team, cfg)
         finally:
             team.finish(dlv, exposure)
@@ -195,4 +205,5 @@ def self_consistency(arm: str = "S8k3", exposure: str = "retrieved", max_turns: 
     return solve
 
 
-ARM_FACTORIES = {"S9": plan_execute, "M1": orchestrated, "M1s": orchestrated, "M1k": orchestrated, "M2": orchestrated, "M7": council, "S8k3": self_consistency}
+ARM_FACTORIES = {"S9": plan_execute, "M1": orchestrated, "M1s": orchestrated, "M1k": orchestrated, "M2": orchestrated, "M5": orchestrated,
+                 "M5-spec": orchestrated, "M7": council, "S8k3": self_consistency}

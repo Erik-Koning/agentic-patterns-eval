@@ -25,6 +25,9 @@ built it. Variants follow the rules above, and two more:
 - **The data formats stay fixed:** `WORKER_SUBTASK`, `RESULT_LINE`, `PROPOSAL_LINE` and the tool descriptions are the
   same in every variant, and a variant keeps each note's fields (S9's and the orchestrator's name the tools that follow
   the planning turn).
+M5's ledger prompts (`TASK_LEDGER_PROMPT`, `REPLAN_PROMPT`, `PROGRESS_LEDGER_PROMPT` and the block's labels) are one
+fixed variant, the same under every variant of the role notes: M5 runs M1's notes plus the ledger, so M1 -> M5 changes
+STATE only.
 The variants below are drafts; the M-arm prompt author (an independent team member, brief §7.3) reviews or replaces
 them, and the candidates in `config/tuning_grid_main.yaml`, before signing off. A text edited after a live tune changes
 what that tune measured: `mas_params.prompt_sha` records the text each sample ran.
@@ -124,6 +127,45 @@ AGGREGATOR_NOTE = (
 )
 CANDIDATE_LINE = "Candidate {n}: {answer}"
 SELECT_DESCRIPTION = "Choose the final answer: the number of one of the candidates."
+
+# M5 and M5-spec: the Magentic-One-style text ledger (STATE=text-ledger; `ledger.py`). One variant: these texts are
+# not tuning variants, so the M arms' `RoleNotes` and their `prompt_sha` do not include them (`mas_params.ledger_sha`
+# records them). The ledger calls are side calls on the orchestrator's view; their answers are JSON (strict schemas in
+# `ledger.py`), and the harness shows the current ledger to the orchestrator at the end of its latest message.
+TASK_LEDGER_PROMPT = (
+    "Before the work starts, write the task ledger for this task as JSON with these keys, each a list of short "
+    "strings: given_facts (facts stated in the task), facts_to_look_up (facts that someone must look up with the "
+    "tools), facts_to_derive (facts to work out from those), educated_guesses (guesses to be checked), plan (the steps, "
+    "in order)."
+)
+REPLAN_PROMPT = (
+    "The work has not progressed for {stalls} turns. Rewrite the task ledger as JSON with the same keys "
+    "(given_facts, facts_to_look_up, facts_to_derive, educated_guesses, plan), using everything above: what is now "
+    "known, what is still missing, and a new plan.\n\nThe current task ledger:\n{ledger}"
+)
+PROGRESS_LEDGER_PROMPT = (
+    "Update the progress ledger as JSON with these keys: request_satisfied (true if the task's final answer can now be "
+    "submitted), in_loop (true if the same steps are being repeated without new results), progress_being_made (true "
+    "if the latest steps produced new results), next_action (what should happen next), instruction (the instruction "
+    "for it, e.g. the subtasks to delegate), reason (why, in a sentence or two).\n\nThe task ledger:\n{ledger}"
+)
+LEDGER_HEADER = "## Ledger (kept by the harness, refreshed every turn)"
+LEDGER_TASK = "### Task ledger (version {version})\n{body}"
+LEDGER_PROGRESS = "### Progress ledger (turn {turn})\n{body}"
+LEDGER_NONE = "(not available)"
+LEDGER_FIELDS = {
+    "given_facts": "Given facts",
+    "facts_to_look_up": "Facts to look up",
+    "facts_to_derive": "Facts to derive",
+    "educated_guesses": "Educated guesses",
+    "plan": "Plan",
+    "request_satisfied": "Request satisfied",
+    "in_loop": "In a loop",
+    "progress_being_made": "Progress being made",
+    "next_action": "Next action",
+    "instruction": "Instruction",
+    "reason": "Reason",
+}
 
 # Nudges after a text-only reply (one per text-only streak, as in kb_react).
 NUDGE_TASK = "Use the tools to complete the task, then call {answer_tool}."

@@ -2,8 +2,9 @@
 
 | Knob | Arms | What | Values (default) |
 |---|---|---|---|
-| `APE_MAS_<ARM>_PROMPT` | M1 (read by S9, M1s, M1k, M2), M7 | the role notes | a variant in `prompts.VARIANTS` (`default`: B2's notes) |
-| `APE_MAS_<ARM>_CLIP` | M1 (read by M1s, M1k, M2), M7 | tokens of a worker's result or a member's rationale as another agent reads it | 100-8,000 (2,000) |
+| `APE_MAS_<ARM>_PROMPT` | M1 (read by S9, M1s, M1k, M2, M5, M5-spec), M7 | the role notes | a variant in `prompts.VARIANTS` (`default`: B2's notes) |
+| `APE_MAS_<ARM>_CLIP` | M1 (read by M1s, M1k, M2, M5, M5-spec), M7 | tokens of a worker's result or a member's rationale as another agent reads it | 100-8,000 (2,000) |
+| `APE_MAS_M5_STALL` | M5, M5-spec | stalled turns (no progress, or in a loop) that force a replan of the task ledger | 1-10 (2) |
 
 **Each tuned arm has its own knobs**, so one arm's tuning candidates never move another arm, and the study runner runs
 each tuned arm under exactly its own selection's knobs (`run_study.env_group`, D-042). **The orchestrator chain shares
@@ -16,6 +17,9 @@ M2's notes still differ from M1k's by the specialization text only (the roster a
 variant changes). There are no `APE_MAS_S9_*`, `APE_MAS_M1K_*` or `APE_MAS_M2_*` knobs: setting one raises. S8k3
 has none: its attempts are S1's, and its aggregator note stays fixed. The structural parameters (3 workers, 2 critique
 rounds, council k = 3; brief §4.2) are fixed a priori and are not knobs.
+
+**M5 and M5-spec** (the ledger orchestrators; `ledger.py`) read M1's prompt variant and clip, so M1 -> M5 and M2 ->
+M5-spec change STATE only; their one knob of their own is the ledger's stall threshold `APE_MAS_M5_STALL`.
 
 Every `APE_MAS_*` variable is checked whenever a multi-agent solver is built: a misspelt name or an unknown value raises
 there, at task creation, before any model call. The task records them (`tasks.gate.ARM_KNOB_PREFIXES`), so they are in
@@ -31,12 +35,20 @@ from . import prompts as P
 from .core import TEXT_MAX_TOKENS
 
 PREFIX = "APE_MAS_"
-KNOB_ARM = {"S9": "M1", "M1": "M1", "M1s": "M1", "M1k": "M1", "M2": "M1", "M7": "M7"}  # arm -> its knobs' name part
+KNOB_ARM = {"S9": "M1", "M1": "M1", "M1s": "M1", "M1k": "M1", "M2": "M1", "M5": "M1", "M5-spec": "M1", "M7": "M7"}  # arm -> its knobs' name part
 NO_CLIP = ("S9",)  # reads M1's prompt variant; it has one agent, so no text is handed on to clip
 NO_KNOBS = ("S8k3",)
 CLIP_ARMS = ("M1", "M7")  # where one agent reads another's text (M1's clip is the whole orchestrator chain's)
 CLIP_RANGE = (100, 8000)
-KNOBS = {f"{PREFIX}{a}_PROMPT": (a, "prompt") for a in dict.fromkeys(KNOB_ARM.values())} | {f"{PREFIX}{a}_CLIP": (a, "clip") for a in CLIP_ARMS}
+STALL = f"{PREFIX}M5_STALL"
+STALL_ARMS = ("M5", "M5-spec")  # the ledger orchestrators: the one knob of their own
+STALL_RANGE = (1, 10)
+DEFAULT_STALL = 2
+KNOBS = (
+    {f"{PREFIX}{a}_PROMPT": (a, "prompt") for a in dict.fromkeys(KNOB_ARM.values())}
+    | {f"{PREFIX}{a}_CLIP": (a, "clip") for a in CLIP_ARMS}
+    | {STALL: ("M5", "stall")}
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +57,7 @@ class Knobs:
 
     prompt: str = P.DEFAULT_VARIANT
     clip: int = TEXT_MAX_TOKENS
+    stall: int = DEFAULT_STALL  # M5 and M5-spec only
 
     @property
     def notes(self) -> P.RoleNotes:
@@ -54,18 +67,19 @@ class Knobs:
 def arm_knobs(arm: str) -> list[str]:
     """The variables `arm` reads (none for S8k3)."""
     part = KNOB_ARM.get(arm)
-    return [name for name, (a, _) in KNOBS.items() if a == part]
+    return [name for name, (a, kind) in KNOBS.items() if a == part and kind != "stall"] + ([STALL] if arm in STALL_ARMS else [])
 
 
 def _value_problem(name: str, raw: str) -> str | None:
     if KNOBS[name][1] == "prompt":
         return None if raw in P.VARIANTS else f"{name}={raw!r} is not a prompt variant ({', '.join(P.VARIANTS)})"
-    lo, hi = CLIP_RANGE
+    lo, hi = STALL_RANGE if KNOBS[name][1] == "stall" else CLIP_RANGE
+    unit = "stalled turns" if KNOBS[name][1] == "stall" else "tokens"
     try:
         ok = lo <= int(raw) <= hi
     except ValueError:
         ok = False
-    return None if ok else f"{name}={raw!r} is not a whole number of tokens from {lo} to {hi}"
+    return None if ok else f"{name}={raw!r} is not a whole number of {unit} from {lo} to {hi}"
 
 
 def env_problems(environ: Mapping[str, str]) -> list[str]:
@@ -88,7 +102,7 @@ def resolve(arm: str, environ: Mapping[str, str] = os.environ) -> Knobs:
     if problems := env_problems(environ):
         raise ValueError("multi-agent knobs: " + "; ".join(problems))
     values = {KNOBS[name][1]: str(environ[name]).strip() for name in arm_knobs(arm) if str(environ.get(name, "")).strip()}
-    return Knobs(prompt=values.get("prompt", P.DEFAULT_VARIANT), clip=int(values.get("clip", TEXT_MAX_TOKENS)))
+    return Knobs(prompt=values.get("prompt", P.DEFAULT_VARIANT), clip=int(values.get("clip", TEXT_MAX_TOKENS)), stall=int(values.get("stall", DEFAULT_STALL)))
 
 
 def candidate_problems(system: str, env: Mapping[str, str]) -> list[str]:
