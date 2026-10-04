@@ -35,7 +35,10 @@ role the agent's model answers, as the budget assumes ("at the agent's model and
 **Calls and cost.** Every call is recorded with its kind: `agent` (the arm's agent), `cm` (a policy's management
 call, on the `cm` role, the agent's model when the run defines none) and `probe`, with its view tokens, model and
 Inspect usage, so management and probe cost separate from agent cost. Per case the record adds the management
-calls and the usage by kind (management calls at a boundary count toward the case that just ended; probes too).
+calls and the usage by kind (management calls at a boundary count toward the case that just ended; probes too). A
+call that trips a token or cost limit raises inside `generate` after Inspect counted it; it is recorded from the
+transcript, flagged `limit` (`SessionContext.record_limit_call`; a probe so cut is a checkpoint not taken), so the
+records equal Inspect's usage also then (review A-5).
 
 Recorded in the store (keys in `ape.worlds.env_f8`): per-case records (position, view tokens at the first call and
 at the decision call, generations, answered, success, dependency, cm_calls, usage by kind), every agent and
@@ -72,7 +75,9 @@ from .context_policy import (
     SessionOverflow,
     SessionRecords,
     dump_messages,
+    inspect_limit_hit,
     knob_env,
+    limit_call_usage,
     load_messages,
     message_tokens,  # noqa: F401  (re-exported: the session's token meter)
     policy_class,
@@ -245,9 +250,13 @@ def f8_session_agent(
                 v, vt = smaller, after
             if vt > window:
                 raise SessionOverflow(position)
-            output = await model.generate(v, tools=tools)
+            try:
+                output = await model.generate(v, tools=tools)
+            except LimitExceededError:
+                ctx.record_limit_call("agent", model, vt, v)  # Inspect counted it: so do the records
+                raise
+            ctx.record_call("agent", model, vt, output)  # before the append, which can trip the message limit
             history.append(output.message)
-            ctx.record_call("agent", model, vt, output)
             appended: list[ChatMessage] = [output.message]
             acted = bool(output.message.tool_calls)
             if acted:
@@ -275,7 +284,15 @@ def f8_session_agent(
             if _state_json(policy) != before:
                 raise RuntimeError(f"{cls.__name__}.probe_view changed the policy's state: probes must not affect the session")
             msgs = [*view, ChatMessageUser(content=PROBE_PROMPT)]
-            out = await probe_model.generate(msgs, config=GenerateConfig(response_schema=ResponseSchema(name="state_probe", json_schema=PROBE_SCHEMA, strict=True)))
+            try:
+                out = await probe_model.generate(msgs, config=GenerateConfig(response_schema=ResponseSchema(name="state_probe", json_schema=PROBE_SCHEMA, strict=True)))
+            except LimitExceededError as e:
+                # Counted by Inspect, so recorded (usage only); flagged `limit`, it is a checkpoint not taken.
+                if (usage := limit_call_usage(msgs)) is not None:
+                    records.probes.append({"k": k, "answer": None, "error": f"LimitExceededError: {e}"[:300], "view_tokens": view_tokens(msgs),
+                                           "scores": probe_score(None, gen_f8.state_at(world, k)), "usage": usage_record(usage), "item": k,
+                                           "kind": "probe", "model": str(probe_model), "limit": True})
+                raise
             try:
                 answer, error = json.loads(out.completion), None
             except (json.JSONDecodeError, TypeError) as e:
@@ -398,6 +415,10 @@ def f8_session_agent(
             store().set("arm", arm_record)
             for key, value in policy.records().items():
                 store().set(key, value)
+            # A time or working limit ends the sample by cancelling the solver, not by raising LimitExceededError into it:
+            # the session is over all the same, and its checkpoint must never be resumed.
+            if not finished and inspect_limit_hit() is not None:
+                finished = True
             if finished and ckpt is not None:
                 ckpt.complete()
         return state

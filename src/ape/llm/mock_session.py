@@ -9,8 +9,9 @@ dry runs check plumbing, not accuracy.
 `gold_session_agent(world)` knows the world's gold and plays every role perfectly: the reference trajectory's
 lookup, then the gold decision or ticket calls for the case its view shows (it needs only the current case's
 messages, which every arm keeps), the gold report, the true state for probes, the oracle state
-(`render_oracle_state`) as summaries, handoff notes and mock compactions, the true todo list for extractions, and,
-where the arm offers `todo_write`, one todo update at the start of each case. It counts the cases it answered (a
+(`render_oracle_state`) as summaries, handoff notes and mock compactions, the true todo list for extractions (the case
+the message opens in progress), and, where the arm offers `todo_write`, one todo update at the start of each case as
+the todo addendum asks: the previous cases completed, this one in progress. It counts the cases it answered (a
 closure), so one instance serves one session.
 
 For the topology arms (`ape.agent.multi.session_team`) it also plays the team, recognised by tool names:
@@ -176,8 +177,10 @@ def gold_session_agent(world, *, todo_updates: bool = True):
         if config.response_schema is not None:
             return ModelOutput.from_content(MODEL, json.dumps(gen_f8.state_at(world, k)))
         if not tools:
-            if purpose_of(messages[-1].text if messages else "") == "todo_extract":
-                return ModelOutput.from_content(MODEL, json.dumps(gold_todos(world, k)))
+            request = messages[-1].text if messages else ""
+            if purpose_of(request) == "todo_extract":  # as the prompt asks: the case the message opens is in progress
+                opened = CASE.search(_section(request, "Message"))
+                return ModelOutput.from_content(MODEL, json.dumps(gold_todos(world, k, current=opened.group(1) if opened else None)))
             return ModelOutput.from_content(MODEL, gen_f8.render_oracle_state(world, k))
         names = {t.name for t in tools}
         if "report" in names:
