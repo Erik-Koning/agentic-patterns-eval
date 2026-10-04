@@ -354,8 +354,8 @@ def f8_session_verdict(arms: Mapping[str, Mapping], categories: Sequence[str]) -
 SANE_STOPS = ("done", "text", "turn_cap")  # how a main-study agent may end its loop in a healthy sample
 SANE_WORKER_STOPS = ("reported", "text", "turn_cap")  # a session team's worker
 MAS_RECORDS = ("mas_switches", "mas_params", "mas_agents", "mas_accounting", "compile_log", "step_log", "turns_used", "arm")
-MAS_ARM_RECORDS = {"M1": ("mas_plan", "mas_rounds"), "M1k": ("mas_plan", "mas_rounds"), "M7": ("mas_council",), "S8k3": ("mas_ensemble",)}
-MAS_ARM_ROLES = {"M1": {"orchestrator": 1, "worker": 1}, "M1k": {"orchestrator": 1, "worker": 1}, "M7": {"member": 3, "chair": 1}, "S8k3": {"attempt": 3}}
+MAS_ARM_RECORDS = {"M1": ("mas_plan", "mas_rounds"), "M1k": ("mas_plan", "mas_rounds"), "M5": ("mas_plan", "mas_rounds", "mas_ledger"), "M7": ("mas_council",), "S8k3": ("mas_ensemble",)}
+MAS_ARM_ROLES = {"M1": {"orchestrator": 1, "worker": 1}, "M1k": {"orchestrator": 1, "worker": 1}, "M5": {"orchestrator": 1, "worker": 1}, "M7": {"member": 3, "chair": 1}, "S8k3": {"attempt": 3}}
 MAS_TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "input_tokens_cache_read", "input_tokens_cache_write")
 SESSION_MANAGEMENT = {"CM-sum": ("summary", "sum_drop"), "CM-todo": ("todo_extract", "todo_drop")}  # cm purpose, T_abs drop event
 COST_BAND = (0.05, 2.0)  # live: realised / projected (conservative) cost of a check; outside it, a cost-model finding
@@ -434,7 +434,9 @@ def mas_verdict(arm: str, samples: Sequence[Mapping]) -> dict:
     Fail, per sample: the log or sample errored or a sample limit fired; a record is missing (MAS_RECORDS and the arm's
     own); `mas_accounting` failed, left calls unattributed or does not sum to the sample's usage on every token field;
     an agent recorded an error or stopped otherwise than done, text or turn cap; the arm's roles did not all run; M1k's
-    workers made no kg call. Warn: a sample never answered (a model finding, not the harness)."""
+    workers made no kg call; M5 kept no ledger, or `mas_accounting`'s ledger calls differ from its ledger entries. Warn:
+    a sample never answered, or M5's ledger replies did not parse or produced no task ledger (model findings, not the
+    harness)."""
     if not samples:
         return result(FAIL, {}, reason=f"{arm}: no samples")
     reasons: list[str] = []
@@ -471,6 +473,15 @@ def mas_verdict(arm: str, samples: Sequence[Mapping]) -> dict:
             reasons.append(f"{tag}: roles that did not run: {short}")
         if arm == "M1k" and not s.get("kg_calls"):
             reasons.append(f"{tag}: the KG workers made no kg call")
+        if arm == "M5":
+            led = s.get("ledger") or {}
+            rows[-1]["ledger"] = led
+            if not led.get("entries"):
+                reasons.append(f"{tag}: no ledger entries")
+            elif led.get("calls") != led.get("entries"):
+                reasons.append(f"{tag}: mas_accounting counts {led.get('calls')} ledger calls, the ledger holds {led.get('entries')} entries")
+            if led.get("entries") and (led.get("errors") or not led.get("task_versions")):
+                warnings.append(f"{tag}: ledger replies that did not parse ({led.get('errors')}) or no task ledger")
         if not s.get("answered"):
             warnings.append(f"{tag}: never answered")
     status = FAIL if reasons else WARN if warnings else PASS

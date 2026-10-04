@@ -160,6 +160,10 @@ F7_1000_TASKS = 2  # the extraction check builds one F7-1000 dev world; its task
 MAS = {"tasks": 2, "message_limit": 200}
 MAS_CELLS = {"mas_orchestrator": ("M1", "F1", "2"), "mas_council": ("M7", "F1", "2"), "mas_ensemble": ("S8k3", "F7", "10"), "mas_kg_workers": ("M1k", "F7", "10")}
 KG_WORKER_ARMS = {"live": ("APG-s", "LGR-s"), "dry": ("APG-s", "LGRo-s")}
+# Add-on checks: an arm built now for a later add-on study (M5, the ledger orchestrator), run like the studies' mas checks
+# but required by no study yet (the add-on study's runner will require it); one task each.
+ADDON_CELLS = {"mas_ledger": ("M5", "F2", "2")}
+ADDON_TASKS = {"mas_ledger": 1}
 # Study G's new arm families: one short F8 session each (N cases, default knobs), at a small W and T_abs so that
 # management fires (the reference trajectory's view passes 4K at the third case and ends near 8.6K; a live agent's
 # grows faster); the probe at k = N.
@@ -183,6 +187,7 @@ STEPS: dict[str, tuple[tuple[str, ...], str]] = {
     "mas_council": (("effort",), "main: M7 on F1-2 (council, critique rounds, chair): records, accounting, effort, nonce, cost"),
     "mas_ensemble": (("effort",), "main: S8k3 on F7-10 (3 attempts, vote): records, accounting, effort, nonce, cost"),
     "mas_kg_workers": (("effort",), "main: M1k on F7-10 under APG-s and LightRAG (KG workers): records, kg calls, effort, nonce, cost"),
+    "mas_ledger": (("effort",), "add-on: M5 on F2-2 (orchestrator with the task and progress ledger + workers): ledger records, accounting, effort, nonce, cost"),
     "g_cm_sum": (("effort",), "Study G: CM-sum in one F8-6 session at a small W and T_abs: summaries metered as cm, W, probes, nonce"),
     "g_cm_todo": (("effort",), "Study G: CM-todo in one F8-6 session: extraction (cm) and todo traffic, W, probes, nonce"),
     "g_team_session": (("effort",), "Study G: M1 in one F8-6 session: orchestrator + workers, accounting, W, probes, nonce"),
@@ -193,8 +198,9 @@ STEPS: dict[str, tuple[tuple[str, ...], str]] = {
 # Who requires which checks. The gate's live preflight requires GATE_CHECKS (checks.json `required`); a study's
 # (`ape.run_study`, `Study.smoke_checks`) requires them plus its own, which must equal STUDY_CHECKS here.
 STUDY_CHECKS = {"main": ("mas_orchestrator", "mas_council", "mas_ensemble", "mas_kg_workers"), "study_g": ("g_cm_sum", "g_cm_todo", "g_team_session")}
-GATE_CHECKS = tuple(s for s in STEPS if not any(s in checks for checks in STUDY_CHECKS.values()))
-CHECK_GROUPS = {"gate": GATE_CHECKS, **STUDY_CHECKS}  # names --only / --skip also accept
+ADDON_CHECKS = tuple(ADDON_CELLS)  # in no `required` list until the add-on study's runner requires them
+GATE_CHECKS = tuple(s for s in STEPS if s not in ADDON_CHECKS and not any(s in checks for checks in STUDY_CHECKS.values()))
+CHECK_GROUPS = {"gate": GATE_CHECKS, **STUDY_CHECKS, "addon": ADDON_CHECKS}  # names --only / --skip also accept
 # The checks that run on the shared F7-100 / F3 worlds (built once, up front); the others build their own.
 SHARED_WORLD_STEPS = {"L2", "D017", "H4", "L4_L5", "APG", "pull", "recovery", "burst", "retrieval"}
 
@@ -311,6 +317,13 @@ def _cell(step: str, profile: str, **spec) -> "object":
     return PlanCell(f"smoke.{step}", "smoke", "smoke", {"profile": profile, **spec})
 
 
+def _priced(arm: str, fallback: str) -> str:
+    """`arm` if config/budget_assumptions.yaml prices it, else `fallback` (an arm built ahead of its study's pricing)."""
+    from ape.budget import load_assumptions
+
+    return arm if arm in (load_assumptions().get("arms") or {}) else fallback
+
+
 def step_cells(profile: str) -> dict[str, list]:
     """The checks that call models, as ad-hoc plan cells for `ape.budget` (F7-100 is priced at its measured
     chunk count). effort reads the probe and retrieval embeds a few queries: both ~$0."""
@@ -332,6 +345,8 @@ def step_cells(profile: str) -> dict[str, list]:
         "extract_f7_1000": [_cell("extract_f7_1000", profile, kind="build", systems=["apg", "lightrag"], worlds={"F7-1000": 1})],
         # The studies' arm families (B12), priced as the plan prices them (M1 2.5x, M7 5x, S8k3 3x S1's generations).
         **{step: [agent(step, [arm], f"{fam}-{lvl}", MAS["tasks"])] for step, (arm, fam, lvl) in MAS_CELLS.items() if step != "mas_kg_workers"},
+        # M5 at its own price once the budget lists it (prior: M1 x 1.2), at M1's until then.
+        **{step: [agent(step, [_priced(arm, "M1")], f"{fam}-{lvl}", ADDON_TASKS[step])] for step, (arm, fam, lvl) in ADDON_CELLS.items()},
         # M1k under APG-s and under LightRAG (priced at LightRAG's 2,300-token context), plus both KG builds of its world.
         "mas_kg_workers": [
             agent("mas_kg_workers.apg", ["M1k"], "F7-10", MAS["tasks"]),
@@ -1051,6 +1066,22 @@ def _study_task(c: dict, build_task, *parts: str):
         return working_guard(build_task())
 
 
+def _ledger_summary(ledger: dict | None, agents: dict) -> dict | None:
+    """M5's ledger as `sc.mas_verdict` reads it: entries, parsed versions, parse errors, replans and the ledger calls
+    `mas_accounting` counts (None for an arm without a ledger)."""
+    if ledger is None:
+        return None
+    entries = [*(ledger.get("task_ledgers") or []), *(ledger.get("progress") or [])]
+    return {
+        "entries": len(entries),
+        "task_versions": sum(1 for t in ledger.get("task_ledgers") or [] if t.get("version")),
+        "progress": len(ledger.get("progress") or []),
+        "errors": sum(1 for e in entries if e.get("error")),
+        "replans": ledger.get("replans"),
+        "calls": sum(int(((a.get("purposes") or {}).get("ledger") or {}).get("calls") or 0) for a in agents.values()),
+    }
+
+
 def _mas_record(log, s, label: str | None = None) -> dict:
     """What `sc.mas_verdict` needs from one main-study multi-agent sample."""
     from ape.worlds.env_tools import ANSWER
@@ -1069,6 +1100,7 @@ def _mas_record(log, s, label: str | None = None) -> dict:
         "agents": [{k: a.get(k) for k in ("id", "role", "stop", "error")} for a in s.store.get("mas_agents") or []],
         "answered": s.store.get(ANSWER) is not None,
         "kg_calls": sum(int((a.get("models") or {}).get("kg", {}).get("calls") or 0) for a in agents.values()),
+        "ledger": _ledger_summary(s.store.get("mas_ledger"), agents),
         "success": s.scores["task_success"].value if s.scores and "task_success" in s.scores else None,
     }
 
@@ -1088,8 +1120,9 @@ def check_mas(c: dict, step: str) -> tuple[dict, list]:
 
     spent0 = c["spend"].total()
     dry, cfg, profile = bool(c["args"].dry), c["cfg"], c["profile"]
-    arm, family, level = MAS_CELLS[step]
-    world_id = asyncio.run(build("dev", family, [level], n_worlds=1, n_tasks=MAS["tasks"], relational=True, embed=True))[0]
+    arm, family, level = {**MAS_CELLS, **ADDON_CELLS}[step]
+    n_tasks = ADDON_TASKS.get(step, MAS["tasks"])
+    world_id = asyncio.run(build("dev", family, [level], n_worlds=1, n_tasks=n_tasks, relational=True, embed=True))[0]
     variants: list[tuple[str | None, dict]] = [(None, {})]
     if arm == "M1k":
         from ape.apg.author import author_world, build_llm_author
@@ -1116,7 +1149,7 @@ def check_mas(c: dict, step: str) -> tuple[dict, list]:
     for kg, env in variants:
         with rg._environ(env):  # the KG arm is read when the arm is built inside the run, as under run_study's kg_env
             task = _study_task(c, lambda: main_study(family=family, level=level, split="dev", arm=arm), step, kg or "")
-            mine = _resolved(c["run_gate_check"](f"{step}{'_' + kg if kg else ''}", task, model=model, model_roles=roles, limit=MAS["tasks"], message_limit=MAS["message_limit"]))
+            mine = _resolved(c["run_gate_check"](f"{step}{'_' + kg if kg else ''}", task, model=model, model_roles=roles, limit=n_tasks, message_limit=MAS["message_limit"]))
         logs += mine
         records += [_mas_record(lg, s, kg) for lg in mine for s in (lg.samples or [])]
     for lg in logs:  # a task that produced no sample still counts
@@ -1373,6 +1406,7 @@ STEP_FUNCS: dict[str, Callable[[dict], tuple[dict, list]]] = {
     "burst": check_burst,
     "f8_session": check_f8_session,
     **{step: (lambda c, step=step: check_mas(c, step)) for step in MAS_CELLS},
+    **{step: (lambda c, step=step: check_mas(c, step)) for step in ADDON_CELLS},
     **{step: (lambda c, step=step: check_g_session(c, step)) for step in G_ARMS},
     "retrieval": check_retrieval,
     "extract_f7_1000": check_extract_f7_1000,

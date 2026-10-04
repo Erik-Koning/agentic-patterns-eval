@@ -348,6 +348,10 @@ def test_the_dry_smoke_passes_every_check_end_to_end(clean_env, monkeypatch):
     kg = report["checks"]["mas_kg_workers"]["measured"]
     assert {r["sample"].split()[1] for r in kg["records"]["measured"]["samples"]} == set(smoke.KG_WORKER_ARMS["dry"]) and all(r["kg_calls"] for r in kg["records"]["measured"]["samples"])
     assert set(kg["nonce"]["measured"]) == {"M1k/APG-s", "M1k/LGRo-s"} and len({p["measured"]["nonce"] for p in kg["nonce"]["measured"].values()}) == 2
+    ledger = report["checks"]["mas_ledger"]["measured"]
+    assert set(ledger) == {"records", "effort", "nonce", "cost"} and all(p["status"] == sc.PASS for p in ledger.values())
+    (row,) = ledger["records"]["measured"]["samples"]
+    assert row["ledger"]["entries"] == row["ledger"]["calls"] > 1 and row["ledger"]["task_versions"] == 1 and row["ledger"]["errors"] == 0
     council = report["checks"]["mas_council"]["measured"]["records"]["measured"]["samples"]
     assert all(r["roles"] == {"member": 3, "chair": 1} for r in council)
     g = {step: report["checks"][step]["measured"] for step in smoke.STUDY_CHECKS["study_g"]}
@@ -741,9 +745,12 @@ def test_the_gate_requires_only_its_own_checks_and_each_study_its_own():
     assert smoke.GATE_CHECKS == before_b12
     assert {s: STUDIES[s].smoke_checks for s in ("main", "study_g")} == smoke.STUDY_CHECKS
     study = [c for checks in smoke.STUDY_CHECKS.values() for c in checks]
-    assert set(smoke.STEPS) == {*smoke.GATE_CHECKS, *study} and all(smoke.STEPS[c][0] == ("effort",) for c in study)
+    assert smoke.ADDON_CHECKS == ("mas_ledger",), "M5's check runs, but no study requires it until the add-on study does"
+    assert set(smoke.STEPS) == {*smoke.GATE_CHECKS, *study, *smoke.ADDON_CHECKS} and all(smoke.STEPS[c][0] == ("effort",) for c in [*study, *smoke.ADDON_CHECKS])
+    assert not set(smoke.ADDON_CHECKS) & {*smoke.GATE_CHECKS, *study}
     assert smoke.select_steps(["main"], None) == ["effort", *smoke.STUDY_CHECKS["main"]]
-    assert smoke.select_steps(None, ["main", "study_g"]) == list(smoke.GATE_CHECKS)
+    assert smoke.select_steps(["addon"], None) == ["effort", "mas_ledger"]
+    assert smoke.select_steps(None, ["main", "study_g", "addon"]) == list(smoke.GATE_CHECKS)
     assert smoke.select_steps(["gate"], None) == list(smoke.GATE_CHECKS)
 
 
