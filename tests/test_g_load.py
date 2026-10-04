@@ -123,9 +123,14 @@ def test_report_end_to_end_from_cells(g_logs):
     json.dumps(d)
     dec = {r["id"]: r for r in d["decisions"]}
     # O-state solves everything and CM0 overflows: Gap_T = 1 − CM0's item success, shown at both points present; the
-    # plan's other two points (Luna-low, Astra) have no cells here, so the decision is INCOMPLETE, never SUPPORTED.
-    assert dec["G-H2a"]["decision"] == "INCOMPLETE" and dec["G-H2a"]["missing_points"] == ["luna-low", "astra-high"] and dec["G-H2a"]["present_positive"]
-    # With the planned points those two cells cover, it is decided.
+    # plan's other two points (Luna-low, Astra) have no cells here, and the two present have fewer sessions than the
+    # plan's minimum per point (S-4), so the decision is INCOMPLETE, never SUPPORTED.
+    gap = d["gh2"]["gap"]
+    assert dec["G-H2a"]["decision"] == "INCOMPLETE" and dec["G-H2a"]["missing_points"] == ["luna-low", "luna-high", "sol-high", "astra-high"]
+    assert set(dec["G-H2a"]["short_points"]) == {"luna-high", "sol-high"} and all(v["sessions"] < v["minimum"] for v in dec["G-H2a"]["short_points"].values())
+    assert gap["points"]["luna-high"]["reject"] and gap["points"]["sol-high"]["reject"] and d["min_sessions"]["G-H2a"] == {"luna-low": 6, "luna-high": 6, "sol-high": 4, "astra-high": 3}
+    assert "below the minimum sessions" in render(d)
+    # With the planned points those two cells cover (and no minimum), it is decided.
     full = report_from_cells(_cells(g_logs), prices=PRICES, capability={"luna-high": 0.78, "sol-high": 0.86}, reps=500, boot=0, glmm=False, planned={"G-H2a": ["luna-high", "sol-high"], "G-H3": []})
     assert {r["id"]: r["decision"] for r in full["decisions"]}["G-H2a"] == "SUPPORTED"
     ss = load_g_cells(_cells(g_logs), prices=PRICES).sessions
@@ -213,6 +218,27 @@ def test_loader_falls_back_without_b7_usage_and_tolerates_missing_scores():
     bare = SimpleNamespace(id="w", epoch=2, metadata={"world_id": "w", "N": 4}, store={}, scores={}, model_usage={}, role_usage={}, error=None, total_time=None, working_time=None, limit=None)
     items, row = sample_rows(bare, {"arm": "CM0"})
     assert len(items) == 4 and not any(i["success"] for i in items) and row["tokens"] == 0 and row["probes"] == {}
+
+
+def test_a_sample_limit_fails_the_item_in_progress_and_the_report():
+    """D-047: when a sample limit ends a session, the item in progress (no completed record) fails even if the scorer
+    credits an answer recorded in the turn that hit the limit; items completed before it stay as scored; a limit in the
+    report phase fails the report (and so the session)."""
+    scored = [{"position": 1, "success": True, "answered": True}, {"position": 2, "success": True, "answered": True}, {"position": 3, "success": False, "answered": False}]
+    sc = SimpleNamespace(value={"session_success": 1.0, "report_exact": 1.0}, metadata={"items": scored})
+    limit = SimpleNamespace(type="token", limit=1000)
+    store = {"f8_items": [ITEM], "f8_overflow_at": None}
+    items, row = sample_rows(_sample(store, scores={"f8_session_score": sc}, limit=limit), {"arm": "CM0"})
+    assert [i["success"] for i in items] == [1.0, 0.0, 0.0] and [i["answered"] for i in items] == [True, False, False]
+    assert "limit" in items[1]["labels"] and "limit" not in items[0]["labels"] and row["limit_item"] == 2
+    assert row["report_exact"] == 0.0 and row["session_success"] == 0.0
+    # Every case recorded: the limit fell in the report phase; the items stand, the report fails.
+    full = {"f8_items": [ITEM | {"position": p, "case_id": f"C-{p}"} for p in (1, 2, 3)], "f8_overflow_at": None}
+    items, row = sample_rows(_sample(full, scores={"f8_session_score": sc}, limit=limit), {"arm": "CM0"})
+    assert [i["success"] for i in items] == [1.0, 1.0, 0.0] and row["limit_item"] is None and row["report_exact"] == 0.0 and row["session_success"] == 0.0
+    # No limit: as scored.
+    items, row = sample_rows(_sample(store, scores={"f8_session_score": sc}), {"arm": "CM0"})
+    assert [i["success"] for i in items] == [1.0, 1.0, 0.0] and row["limit_item"] is None and row["report_exact"] == 1.0
 
 
 def test_cell_info_resolves_the_d033_luna_low_topology_cell():

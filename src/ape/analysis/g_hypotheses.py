@@ -13,8 +13,12 @@ Conventions (D-029, D-032, D-033; CONTEXT_MANAGEMENT_AUDIT §2, §7; HYPOTHESES 
   gatekeeping where a row has `step`.
 - **Decision test** (D-032): the session-clustered t on a linear combination of per-point session means
   (Welch–Satterthwaite df, capped at G_eff − 1, the effective number of clusters, when worlds are shared across
-  points: D-038), the gate's validated interval (D-023). The exact session-level sign-flip (a wild sign-flip with null-restricted residuals for contrasts
-  across points) is reported beside it, with its minimum attainable p.
+  points: D-038), the gate's validated interval (D-023), **decided at the calibrated one-sided level `T_LEVEL` =
+  0.013** (S-4: at a nominal 0.025 it over-rejected under skewed or heavy-tailed session effects; at 0.013 every
+  simulated null holds 0.025). The exact session-level sign-flip (a wild sign-flip with null-restricted residuals for
+  contrasts across points) is reported beside it, with its minimum attainable p.
+- **Minimum sessions per planned point** (S-4, `min_sessions`): max(3, ⌈0.6 × planned⌉) usable sessions; a planned
+  point below it is missing, and its family INCOMPLETE.
 - **Confirmatory rows (D-033):** G-H2a, and G-H3-pre → G-H3a → G-H3b. **G-H1 and G-H2b are descriptive**: no affordable
   design gives them useful power (G-H1 0.12–0.44, G-H2b's TOST 0.01 at ±0.20 R), so each is reported as an estimate
   with its 95% interval and nothing is decided on it.
@@ -56,6 +60,36 @@ COST_RATIO = 0.6  # H3b: S-CM* cost per solved item at most this share of M2's
 COST_METER = "cost_usd"  # cache-adjusted $ is primary (audit §5.1); tokens, calls and wall-clock are reported
 # D-043's sensitivity: capability as the tier rank, equally spaced, in place of measured capability.
 TIER_ORDER = {"luna-low": 1.0, "luna-high": 2.0, "sol-high": 3.0, "astra-high": 4.0}
+# S-4 (BUILD_REVIEW of a576a2c): at a nominal 0.025 the session-clustered t rejected true nulls at up to 0.037 (G-H3's
+# proportion tests, df ≈ 11, with arm-specific session variance), 0.040 (its cost clause, with heavy-tailed costs) and
+# 0.037 (G-H2a at Astra, df 3, with a wider O-state session spread): the variance is unbiased, but the statistic's tails
+# are heavier than t_df's. Neither the Bell–McCaffrey df, df = G_eff − 2, a kurtosis-aware df nor Johnson's skewness
+# correction brought every row to 0.025, so each confirmatory t-test is decided at this calibrated one-sided level.
+# At 0.013, over 72 stress scenarios (the review's generators, 16,000 simulated studies each for G-H3 and 20,000 for
+# G-H2a; at the planned sizes and at the minimum sessions below) the worst row rejects at 0.024 (G-H3; 0.025 at 0.014)
+# and 0.021 (G-H2a; 0.023 in the review's own 10,000-study run); g_power's own nulls are in the rows' notes.
+T_LEVEL = 0.013
+# S-4's minimum usable sessions per planned point: max(MIN_SESSIONS_FLOOR, ⌈MIN_SESSIONS_SHARE × planned⌉), never more
+# than planned; a planned point below it is missing and its family INCOMPLETE. The smallest the simulation validated at
+# T_LEVEL: topology Luna 10 of 16 and Sol 5 of 8 (all three points at their minimum at once: worst 0.023; Sol at 4
+# reaches 0.027 with arm-specific variance), CM Luna 6 of 10, Sol 4 of 6 and Astra 3 of 4 (worst 0.019).
+MIN_SESSIONS_SHARE = 0.6
+MIN_SESSIONS_FLOOR = 3
+
+
+def t_level(alpha: float = ALPHA) -> float:
+    """The confirmatory t-tests' calibrated one-sided level for a family at `alpha`: T_LEVEL at ALPHA (validated by
+    simulation), scaled in proportion at any other α (not validated)."""
+    return T_LEVEL if alpha == ALPHA else alpha * T_LEVEL / ALPHA
+
+
+def min_sessions(planned: int | None) -> int | None:
+    """The fewest usable sessions a planned point with `planned` sessions needs (S-4); None when the plan names none."""
+    if not planned:
+        return None
+    import math
+
+    return int(min(int(planned), max(MIN_SESSIONS_FLOOR, math.ceil(MIN_SESSIONS_SHARE * int(planned) - 1e-9))))
 
 CAP_CELLS = ("g.cap.luna-low", "g.cap.luna-high", "g.cap.sol-high", "g.cap.astra-high")
 TOPO_CELLS = ("g.topo.luna-low", "g.topo.luna", "g.topo.sol", "g.topo.astra")  # D-033 adds g.topo.luna-low
@@ -126,16 +160,20 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         ("O-state", "CM0"),
         CM_CELLS,
         "Per point: mean over sessions of s(O-state) − s(CM0), item success rate, N = 40 (Astra 24).",
-        "intersection-union: one-sided session-clustered t at α at every point (no multiplicity adjustment); exact "
+        f"intersection-union: one-sided session-clustered t at the calibrated level {T_LEVEL:g} at every point (no "
+        "multiplicity adjustment); exact "
         "sign-flip reported",
         "all_greater",
         0.0,
         "pp",
         "G-H2-gap",
         "confirmatory",
-        notes="Decided over the plan's points: a planned point without paired sessions makes it INCOMPLETE, never "
-        "SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below 1/16 = 0.0625, so the decision rests on the t-test "
-        "there (D-032). g_power: type I 0.020–0.024 per point (10,000 studies); power 0.99 by t at the ~+25–30 pp gaps CM0's overflow implies.",
+        notes="Decided over the plan's points: a planned point without paired sessions, or below its minimum (Luna 6 of 10, Sol 4 "
+        "of 6, Astra 3 of 4; S-4), makes it INCOMPLETE, never SUPPORTED. Astra has 4 sessions: an exact sign-flip cannot go below "
+        "1/16 = 0.0625, so the decision rests on the t-test there (D-032). Each point's t at the calibrated 0.013 (S-4). g_power: "
+        "type I 0.012–0.013 per point (20,000 studies; at most 0.023 under the review's stress scenarios, which reached 0.037 at "
+        "a nominal 0.025); power 0.94 by t at the ~+25–30 pp gaps CM0's overflow implies, limited by Astra's 4 sessions (0.996 "
+        "with 6; 0.86 with σ_arm 0.6). At a nominal 0.025 it was 0.99.",
     ),
     GHypothesis(
         "G-H2b",
@@ -191,15 +229,17 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         ("M2", "S1"),
         H3_CELLS,
         "Mean over Luna-low, Luna-high and Sol-high (equal weights) of the per-session M2 − S1, item success rate.",
-        "one-sided session-clustered t",
+        f"one-sided session-clustered t at the calibrated level {T_LEVEL:g}",
         "greater",
         0.0,
         "pp",
         "G-H3",
         "confirmatory",
         step=1,
-        notes="Pools the plan's points; a planned point without ≥ 2 sessions of all four arms makes G-H3-pre, G-H3a and "
-        "G-H3b INCOMPLETE, never SUPPORTED. g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp).",
+        notes="Pools the plan's points; a planned point without ≥ 2 sessions of all four arms, or below its minimum (Luna 10 of "
+        "16, Sol 5 of 8; S-4), makes G-H3-pre, G-H3a and G-H3b INCOMPLETE, never SUPPORTED. Every G-H3 t at the calibrated "
+        "0.013 (S-4). g_power (D-033 design): power 1.0 (M2 − S1 ≈ +28–33 pp); type I at most 0.013 under the review's stress "
+        "scenarios (16,000 studies each).",
     ),
     GHypothesis(
         "G-H3a",
@@ -208,14 +248,14 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         H3_CELLS,
         "Linear form (M1 − S1) − 0.5 (M2 − S1) > 0, pooled over Luna-low, Luna-high and Sol-high (equal weights); the "
         "share itself with Fieller and bootstrap intervals.",
-        "one-sided session-clustered t",
+        f"one-sided session-clustered t at the calibrated level {T_LEVEL:g}",
         "greater",
         ISOLATION_SHARE,
         "share",
         "G-H3",
         "confirmatory",
         step=2,
-        notes="g_power (D-033 design): type I 0.026 at a share of 0.5 (10,000 studies); power 0.997 at 0.75, 0.996 at 0.80, 0.90 at 0.70, 0.66 at 0.65 (0.95 / 0.68 at 0.80 / 0.70 with σ_arm 0.6). Before D-033: 0.84 at 0.75.",
+        notes="g_power (D-033 design; t at the calibrated 0.013, S-4): type I 0.012 at a share of 0.5 (20,000 studies; under the review's stress scenarios at most 0.021 at the planned sizes and 0.024 at the minimum sessions, against 0.026–0.037 at a nominal 0.025); power 0.99 at 0.75 and at 0.80, 0.83 at 0.70, 0.55 at 0.65 (0.90 / 0.58 at 0.80 / 0.70 with σ_arm 0.6). Before D-033: 0.73 at 0.75. At a nominal 0.025 it was 0.997 / 0.90 / 0.66 at 0.75 / 0.70 / 0.65.",
     ),
     GHypothesis(
         "G-H3b",
@@ -225,14 +265,14 @@ HYPOTHESES: tuple[GHypothesis, ...] = (
         H3_CELLS,
         "(S-CM* − S1) − 0.8 (M2 − S1) > 0 and log(CPS_S-CM* / CPS_M2) < log 0.6 (cache-adjusted $, probes excluded), "
         "pooled over Luna-low, Luna-high and Sol-high (equal weights).",
-        "intersection-union of two one-sided session-clustered t-tests at α",
+        f"intersection-union of two one-sided session-clustered t-tests at the calibrated level {T_LEVEL:g}",
         "greater",
         RECOVERY_SHARE,
         "share; cost ratio 0.6",
         "G-H3",
         "confirmatory",
         step=3,
-        notes="Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7). g_power (D-033 design): type I 0.027 (recovery at 0.8) and 0.026 (cost at 0.6) over 16,000 studies, 0.006 with both clauses at their margins; power 0.69 at recovery 0.95 and cost ratio 0.45, 0.37 at 0.90 / 0.50, 0.11 at 0.85 / 0.55 (the cost clause alone ≥ 0.99 at ≤ 0.5). With 24 Luna sessions per point 0.76; with 12 Sol sessions 0.74. Before D-033: 0.38.",
+        notes="Fixed sequence G-H3-pre → G-H3a → G-H3b at α (audit §7), each t at the calibrated 0.013 (S-4); a clause that cannot be computed (a missing cost) makes it NOT_TESTABLE. g_power (D-033 design): type I 0.014 (recovery at 0.8) and 0.015 (cost at 0.6) over 20,000 studies, 0.002 with both clauses at their margins (under the review's stress scenarios at most 0.021 and 0.024 at the planned sizes, against up to 0.037 and 0.040 at a nominal 0.025); power 0.56 at recovery 0.95 and cost ratio 0.45, 0.26 at 0.90 / 0.50, 0.07 at 0.85 / 0.55 (the cost clause alone ≥ 0.96 at ≤ 0.5). With 24 Luna sessions per point 0.67; with 12 Sol sessions 0.62; with σ_arm 0.6 0.35. Before D-033: 0.26. At a nominal 0.025 it was 0.69 / 0.37 / 0.11.",
     ),
     GHypothesis(
         "G-H3-spec",
@@ -326,9 +366,9 @@ def markdown() -> str:
 def design_markdown() -> str:
     """Each row's plan cells, level and planned power or precision (its `notes`, from g_power), as
     PREREGISTRATION_G.md shows them beside `markdown()`."""
-    rows = ["| ID | Plan cells | One-sided α | Planned power and precision |", "|---|---|---|---|"]
+    rows = ["| ID | Plan cells | One-sided α (t-test level) | Planned power and precision |", "|---|---|---|---|"]
     for h in HYPOTHESES:
-        level = f"{h.alpha:g}" if h.role == "confirmatory" else "– (descriptive)"
+        level = f"{h.alpha:g} ({t_level(h.alpha):g})" if h.role == "confirmatory" else "– (descriptive)"
         notes = (h.notes or "–").replace("|", "\\|")
         rows.append(f"| {h.id} | {', '.join(h.cells)} | {level} | {notes} |")
     return "\n".join(rows) + "\n"
