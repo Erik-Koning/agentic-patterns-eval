@@ -5,6 +5,7 @@ import itertools
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from inspect_ai import eval as inspect_eval
 from inspect_ai.model import ChatMessageTool, ModelOutput, get_model
@@ -88,6 +89,34 @@ def test_load_main_reads_a_multi_agent_log(offline_env):
         assert row["switches"] == s.store["mas_switches"] and row["realized_parallelism"] == acc["realized_parallelism"]
 
 
+def test_a_capped_sample_is_a_failure_and_casts_no_vote(monkeypatch):
+    """BUILD_REVIEW S-1, D-047: Inspect scores a sample after a limit with its last state, so a capped F3 sample whose end
+    state equals the gold scored a success and voted in the S8 frontier. A cap hit is a failure with no answer key."""
+    from types import SimpleNamespace as NS
+
+    import inspect_ai.log
+
+    from ape.worlds.env_tools import ANSWER, CALLS
+
+    gold = [{"tool": "refund_order", "args": {"order_id": "O-1"}}]
+
+    def sample(sid, limit, turns, answered=False):
+        score = NS(value="C", answer=json.dumps({"calls": gold}), metadata={"turns_used": turns, "answered": answered})
+        usage = {"openai/gpt-6-luna": NS(input_tokens=100, input_tokens_cache_read=0, input_tokens_cache_write=0, output_tokens=10, reasoning_tokens=0, total_cost=0.01, total_tokens=110)}
+        return NS(metadata={"family": "F3", "level": "60", "world_id": "F3-60-test-s13000"}, model_usage=usage, scores={"task_success": score},
+                  store={ANSWER: {"finished": True} if answered else None, CALLS: gold, "turns_used": turns}, error=None, id=sid, epoch=1,
+                  limit=NS(type=limit) if limit else None, events=[], working_time=1.0, total_time=1.0, uuid=f"u-{sid}")  # fmt: skip
+
+    log = NS(eval=NS(task_args={"arm": "S1"}, metadata={"max_turns": 12, "family": "F3"}, model="openai/gpt-6-luna", model_generate_config=NS(reasoning_effort="high")),
+             samples=[sample("token", "token", 7), sample("turns", None, 12), sample("ok", None, 5, answered=True), sample("late", "token", 6, answered=True)])  # fmt: skip
+    monkeypatch.setattr(inspect_ai.log, "read_eval_log", lambda f: log)
+    df = load_main(["fake.eval"], plan_cell="main.B.s1-pool", require_cost=False).set_index("task")
+    for t in ("token", "turns", "late"):
+        assert df.loc[t, "cap_hit"] and df.loc[t, "success"] == 0.0 and pd.isna(df.loc[t, "answer_key"]) and df.loc[t, "scored_success"] == 1.0, t
+    assert not df.loc["ok", "cap_hit"] and df.loc["ok", "success"] == 1.0 and not pd.isna(df.loc["ok", "answer_key"])
+    assert list(df["uuid"]) == ["u-token", "u-turns", "u-ok", "u-late"]
+
+
 def test_tier_from_the_eval_model():
     assert tier_of("openai/gpt-6-luna") == "luna" and tier_of("openai/gpt-6-sol") == "sol" and tier_of("mockllm/model") == "model"
 
@@ -120,6 +149,7 @@ def test_load_main_reads_a_main_study_log(offline_env):
     assert (df["success"] == 1.0).all() and not df["cap_hit"].any() and not df["error"].any() and not df["multi_agent"].any()
     assert (df["max_turns"] == 14).all(), "the eval's own turn cap (gen_registry.turn_cap), not the 12-turn knob default"
     assert (df["tier"] == "model").all() and (df["calls"] >= 1).all()
+    assert df["uuid"].notna().all() and df["uuid"].nunique() == len(df), "one uuid per sample-epoch run"
     by_task = df.groupby("task")["answer_key"].nunique()
     assert (by_task == 1).all(), "the same (normalised) answer gives one key across epochs"
     for t in df["task"].unique():
