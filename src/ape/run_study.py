@@ -1612,7 +1612,10 @@ def _micro_pilot(run: StudyRun, record: dict) -> None:
     record["outputs"] |= {"summary": _show(out)}
 
 
-OVERFLOW_EXPECTED = ("CM0", "S1", "M1", "M2", "CM-prune")  # full history (S1 = CM0; M1, M2 under the CM0 rule), or a compactor with no mover: overflowing W is their measured outcome
+# Arms for which overflowing W is a measured outcome, not a harness fault: full history (CM0; S1 = CM0; M1, M2 under the
+# CM0 rule), a compactor with no mover (CM-prune), and provider compaction (CM-native: whether the provider's compacted
+# block keeps the view under W is the provider-absorption question itself). Errors and limits refuse for every arm.
+OVERFLOW_EXPECTED = ("CM0", "S1", "M1", "M2", "CM-prune", "CM-native")
 
 
 def session_health(log_files: Sequence[str]) -> dict[str, dict]:
