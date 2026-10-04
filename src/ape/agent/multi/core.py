@@ -24,11 +24,17 @@ sample's `model_usage` exactly.
 
 **Limits.** The sample's `token_limit` is a node in Inspect's limit tree, a ContextVar that every child task inherits, so
 every agent's calls count against it (and against nothing else: the arms set no per-agent limits; turn caps are the
-loops' own counters). When it trips inside a worker, the worker's `LimitExceededError` must end the sample. Inspect's
-`execute_tools` maps a `LimitExceededError` raised inside a tool into a tool error and carries on (`tool_call_error`),
-and the workers run inside the orchestrator's `delegate` tool, so the delegate tool records the error on the team
-(`note_limit`) and the loop re-raises it right after `execute_tools` (`raise_pending_limit`). Every solver writes its
-records in a `finally`, so a sample cut short keeps them.
+loops' own counters). When it trips inside a worker, the worker's `LimitExceededError` must end the sample.
+
+**Errors.** Any other exception inside an agent (a provider error after the client's retries, a failed knowledge
+compile) ends the sample too, as it would S1's: Inspect's `retry_on_error` then re-runs it, and an exhausted retry is a
+counted harness error (BUILD_REVIEW A-2). Only model misbehaviour that is not an exception (text instead of a call, a bad
+or unknown tool call, a worker that never reports) gives a marked result or a tool error the agents work around.
+Inspect's `execute_tools` maps a `LimitExceededError`, and some other exceptions (a `TimeoutError`, a
+`PermissionError`, ...), raised inside a tool into a tool error and carries on (`tool_call_error`); the workers run
+inside the orchestrator's `delegate` tool, so the delegate tool holds any worker failure on the team (`note_error`)
+and the loop re-raises it right after `execute_tools` (`raise_pending_error`). Every solver writes its records in a
+`finally`, so a sample cut short keeps them.
 
 **Isolation (`run_isolated`).** `inspect_ai.util.store()` is a ContextVar; each isolated unit (a worker, an ensemble
 attempt, a council member's phase) runs in its own anyio task with its own `Store` (`init_subtask_store`, as Inspect's
@@ -136,7 +142,7 @@ class Team:
         self.records: dict[str, Any] = {}
         self.top: AgentRecord | None = None  # the agent whose turns are the sample's `turns_used`
         self._spans: dict[str, str] = {}
-        self._pending_limit: LimitExceededError | None = None
+        self._pending_error: Exception | None = None
         self._t0 = time.perf_counter()
 
     def agent(self, id: str, role: str, parent: str | None = None, **info) -> AgentRecord:
@@ -156,15 +162,15 @@ class Team:
         finally:
             agent.wall_s += time.perf_counter() - t0
 
-    def note_limit(self, error: LimitExceededError) -> None:
-        """A limit hit inside a tool (a worker run by `delegate`): `execute_tools` turns it into a tool error, so it is
-        kept here and re-raised once the tool call returns."""
-        if self._pending_limit is None:
-            self._pending_limit = error
+    def note_error(self, error: Exception) -> None:
+        """A limit or an error inside a tool (a worker run by `delegate`): `execute_tools` may turn it into a tool error,
+        so it is kept here and re-raised once the tool call returns."""
+        if self._pending_error is None:
+            self._pending_error = error
 
-    def raise_pending_limit(self) -> None:
-        if self._pending_limit is not None:
-            raise self._pending_limit
+    def raise_pending_error(self) -> None:
+        if self._pending_error is not None:
+            raise self._pending_error
 
     def answered(self) -> bool:
         return self.state.store.get(ANSWER) is not None
@@ -321,7 +327,7 @@ async def react_loop(
                 agent.tool_calls += [c.function for c in output.message.tool_calls]
                 result = await execute_tools(messages, exposed)
                 messages.extend(result.messages)
-                team.raise_pending_limit()
+                team.raise_pending_error()
                 if done():
                     stop = "done"
                     break

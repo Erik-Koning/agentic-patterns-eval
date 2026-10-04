@@ -16,8 +16,10 @@ non-terminal tools plus `report`, and only its result returns. One `delegate` ca
   round-mate's effects in either arm, the results come back in subtask order, and no prompt says how workers are
   scheduled: concurrency changes only latency (and, at a limit hit, which calls were in flight).
 - Two `delegate` calls in one turn run as two rounds, in the model's order (`delegate` is not parallel-safe).
-- A worker that fails (an exception), stops replying, or reaches its turn cap returns a marked result; the round and
-  the sample go on. A limit error ends the sample (`Team.note_limit`).
+- A worker that stops replying or reaches its turn cap returns a marked result; the round and the sample go on. A
+  limit or an exception (a provider error) in a worker ends the sample, as in S1, so Inspect retries it
+  (`Team.note_error`; BUILD_REVIEW A-2). The same holds for council members, the chair, ensemble attempts and the
+  aggregator: an exception is the sample's, never a lost proposal or vote.
 
 **Council (M7).** k members each attempt the task independently (DEL as S1; their answer tool records a proposal with a
 rationale instead of answering), then `rounds` critique rounds: each member's own history continues with the others'
@@ -121,7 +123,8 @@ def worker_tools(team: Team, specialist: Specialist | None = None) -> tuple[dict
 
 
 async def run_worker(team: Team, agent: AgentRecord, subtask: str, cfg: TeamConfig, specialist: Specialist | None = None) -> WorkerResult:
-    """One subtask in a fresh context; returns only its result. Never raises, except for limits (which end the sample)."""
+    """One subtask in a fresh context; returns only its result. Raises only a limit or an error, which end the sample
+    (recorded on the agent first)."""
     tools, always = cfg.worker_tools(team, specialist)
     reported: list[str] = []
 
@@ -142,14 +145,12 @@ async def run_worker(team: Team, agent: AgentRecord, subtask: str, cfg: TeamConf
             messages = [cfg.delivery.system(ctx), ChatMessageUser(content=P.WORKER_SUBTASK.format(note=note, subtask=subtask))]
             await react_loop(team, agent, messages, delivery=cfg.delivery, ctx=ctx, query=query, tools=tools, always=always,
                              exposure=cfg.exposure, max_turns=cfg.worker_turns, done=lambda: bool(reported), nudge=P.NUDGE_WORKER)
-    except LimitExceededError:
+    except Exception as e:  # a limit or a provider error ends the sample, as in S1 (BUILD_REVIEW A-2)
+        if not isinstance(e, LimitExceededError):
+            agent.error, agent.stop = f"{type(e).__name__}: {e}"[:500], "error"
         raise
-    except Exception as e:  # a worker's failure is the orchestrator's to route around, as a tool error is an agent's
-        agent.error, agent.stop = f"{type(e).__name__}: {e}"[:500], "error"
     if reported:
         status, text = "reported", reported[0]
-    elif agent.stop == "error":
-        status, text = "error", ""
     else:
         status, text = agent.stop or "turn_cap", last_assistant_text(messages)
     agent.info.update(status=status, result=clip(text, 500))
@@ -211,8 +212,8 @@ def delegate_tool(team: Team, orch: AgentRecord, cfg: TeamConfig, rounds: list[d
 
         try:
             results = await run_isolated([unit(*w) for w in workers], stores, cfg.concurrent)
-        except LimitExceededError as e:
-            team.note_limit(e)
+        except Exception as e:  # held: execute_tools would turn a limit (or a TimeoutError, ...) into a tool error
+            team.note_error(e)
             raise
         finally:
             for s in stores:
@@ -275,20 +276,28 @@ async def run_orchestrator(team: Team, cfg: TeamConfig, *, prompt: str | None = 
 def proposal_tool(team: Team, answer: ToolDef, sink: list[dict], clip_tokens: int = TEXT_MAX_TOKENS) -> ToolDef:
     """The task's answer tool as a council member sees it: same name and parameters plus a rationale; it records a
     proposal (parsed exactly as the real tool parses an answer, in a scratch store; the rationale clipped to
-    `clip_tokens`) and never answers the task."""
+    `clip_tokens`) and never answers the task. The first proposal of a round wins and every later one is told so: the
+    slot is taken before the parse awaits, and the tool is not parallel-safe, so two proposals in one turn run in the
+    model's order (BUILD_REVIEW A-8: both used to be told "recorded" while only the first counted)."""
+    taken: list[bool] = []
 
     async def propose(**kwargs: Any) -> str:
-        if sink:
+        if sink or taken:
             return P.PROPOSAL_AGAIN
-        rationale = str(kwargs.pop("rationale", "") or "")
-        scratch = Store()
-        await run_isolated([lambda: answer.tool(**kwargs)], [scratch], concurrent=False)
+        taken.append(True)
+        try:
+            rationale = str(kwargs.pop("rationale", "") or "")
+            scratch = Store()
+            await run_isolated([lambda: answer.tool(**kwargs)], [scratch], concurrent=False)
+        except BaseException:
+            taken.clear()  # the call failed before a proposal was recorded: the slot is free again
+            raise
         sink.append({"answer": scratch.get(ANSWER), "rationale": clip(rationale, clip_tokens)})
         return "Proposal recorded."
 
     params = ToolParams(properties={**answer.parameters.properties, "rationale": ToolParam(type="string", description=P.RATIONALE_PARAM)},
                         required=[*answer.parameters.required, "rationale"])
-    return ToolDef(propose, name=answer.name, description=answer.description + P.PROPOSE_SUFFIX, parameters=params)
+    return ToolDef(propose, name=answer.name, description=answer.description + P.PROPOSE_SUFFIX, parameters=params, parallel=False)
 
 
 def _proposals(latest: list[dict | None], members: list[int]) -> str:
@@ -329,10 +338,10 @@ async def run_council(team: Team, cfg: TeamConfig, k: int = COUNCIL_K, rounds: i
                     await react_loop(team, agent, histories[i], delivery=cfg.delivery, ctx=ctx, query=task.prompt, tools=tools, always=always,
                                      exposure=cfg.exposure, max_turns=cfg.max_turns, done=lambda: bool(sink),
                                      nudge=P.NUDGE_PROPOSE.format(answer_tool=answer.name))
-            except LimitExceededError:
+            except Exception as e:  # a limit or a provider error ends the sample, as in S1 (BUILD_REVIEW A-2)
+                if not isinstance(e, LimitExceededError):
+                    agent.error, agent.stop = f"{type(e).__name__}: {e}"[:500], "error"
                 raise
-            except Exception as e:
-                agent.error, agent.stop = f"{type(e).__name__}: {e}"[:500], "error"
             return sink[0] if sink else None
 
         return run
@@ -415,10 +424,10 @@ async def aggregate(team: Team, cfg: TeamConfig, candidates: list[str]) -> int |
             messages: list[ChatMessage] = [cfg.delivery.system(ctx), ChatMessageUser(content=f"{task.prompt}\n\n{P.AGGREGATOR_NOTE.format(k=ENSEMBLE_K, candidates=lines)}")]
             await react_loop(team, agent, messages, delivery=cfg.delivery, ctx=ctx, query=task.prompt, tools={"select_answer": tool}, always=["select_answer"],
                              exposure=cfg.exposure, max_turns=cfg.max_turns, done=lambda: bool(chosen), nudge=P.NUDGE_SUBMIT.format(tool="select_answer"))
-    except LimitExceededError:
+    except Exception as e:  # a limit or a provider error ends the sample, as in S1 (BUILD_REVIEW A-2)
+        if not isinstance(e, LimitExceededError):
+            agent.error, agent.stop = f"{type(e).__name__}: {e}"[:500], "error"
         raise
-    except Exception as e:
-        agent.error, agent.stop = f"{type(e).__name__}: {e}"[:500], "error"
     return chosen[0] if chosen else None
 
 
@@ -450,8 +459,9 @@ async def run_ensemble(team: Team, cfg: TeamConfig, attempt: Solver, generate: G
             except LimitExceededError:
                 agents[i].stop = "limit"
                 raise
-            except Exception as e:  # one attempt's failure leaves the others to vote
+            except Exception as e:  # a provider error ends the sample, as in S1, never a lost vote (BUILD_REVIEW A-2)
                 agents[i].error, agents[i].stop = f"{type(e).__name__}: {e}"[:500], "error"
+                raise
             except BaseException:  # cancelled (a sibling hit a limit, or the time limit)
                 agents[i].stop = "interrupted"
                 raise
