@@ -7,8 +7,8 @@ worlds/sweep/). The dataset is one sample per (task, kind, size): `kinds` and `s
 `tasks_per_kind` how many tasks (world seeds, `gen_sweep.task_seed`) each kind has, `seed_base` where the seeds start
 and `output_tokens` the tool-file knob (part of the world ID).
 
-`max_output_tokens` caps each generation's output (reasoning included): the GPT-6 window (1,050,000 tokens) holds input
-and output together, so at 960K the default 64,000 keeps the request inside it. `working_limit` is the per-sample
+`max_output_tokens` is the ceiling on each generation's output (reasoning included); the solver lowers it per request so
+input plus output fit `window_tokens` (the GPT-6 window, 1,050,000: `agent.sweep.output_cap`). `working_limit` is the per-sample
 runaway wall-clock guard (seconds). `group` labels the replicate (the runner passes it), so each replicate is its own
 task identity.
 
@@ -21,13 +21,12 @@ from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.model import GenerateConfig
 
 from ape.agent import cache_nonce
-from ape.agent.sweep import MAX_GENERATIONS, sweep_probe
+from ape.agent.sweep import MAX_GENERATIONS, MAX_OUTPUT_TOKENS, WINDOW_TOKENS, sweep_probe
 from ape.config import Config
 from ape.scorers.sweep import sweep_score
 from ape.worlds import gen_sweep
 from ape.worlds.spec import World
 
-MAX_OUTPUT_TOKENS = 64_000
 WORKING_LIMIT_S = 1800
 
 
@@ -78,6 +77,7 @@ def context_sweep(
     working_limit: int = WORKING_LIMIT_S,
     group: str | None = None,
     tasks_per_kind: int = 1,
+    window_tokens: int = WINDOW_TOKENS,
 ) -> Task:
     ks, ss = _strs(kinds), _ints(sizes)
     if bad := [k for k in ks if k not in gen_sweep.KINDS]:
@@ -89,11 +89,11 @@ def context_sweep(
     cache_nonce.stamp(samples, nonce)
     return Task(
         dataset=MemoryDataset(samples, name="F8S"),
-        solver=sweep_probe(max_generations=int(max_generations)),
+        solver=sweep_probe(max_generations=int(max_generations), max_output_tokens=int(max_output_tokens), window_tokens=int(window_tokens)),
         scorer=sweep_score(),
         config=GenerateConfig(max_tokens=int(max_output_tokens)),
         working_limit=int(working_limit),
         metadata={"family": "F8S", "kinds": ks, "sizes": ss, "seed_base": int(seed_base), "output_tokens": int(output_tokens),
-                  "tasks_per_kind": int(tasks_per_kind), "max_generations": int(max_generations)}
+                  "tasks_per_kind": int(tasks_per_kind), "max_generations": int(max_generations), "window_tokens": int(window_tokens)}
         | ({"group": group} if group is not None else {}) | cache_nonce.task_metadata(nonce),
     )  # fmt: skip

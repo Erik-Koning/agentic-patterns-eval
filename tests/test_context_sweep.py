@@ -34,7 +34,7 @@ def test_each_size_fits_under_its_target_and_shares_case_1_the_probe_and_a_middl
         assert d["target_tokens"] == size and size - 2_000 < d["context_tokens"] <= size
         assert d["context_tokens"] == gen_sweep.context_tokens(w)
         assert w.id == gen_sweep.world_id(kind, size, gen_sweep.kind_seed(kind))
-    ids = lambda w: [t.tags["case_id"] for t in w.tasks]  # noqa: E731
+    ids = lambda w: [t.tags["case_id"] for t in w.tasks]
     assert ids(small)[0] == ids(large)[0] and ids(small)[-1] == ids(large)[-1]
     assert ids(small)[1:-1] == ids(large)[1 : len(small.tasks) - 1]  # the smaller middle is a prefix
     assert small.tasks[-1].gold == large.tasks[-1].gold
@@ -103,7 +103,7 @@ def test_the_gold_agent_gets_every_probe_right_in_one_generation(monkeypatch, tm
     scores = _run(monkeypatch, tmp_path, worlds, gold_sweep_agent([w for ws in worlds.values() for w in ws]))
     assert len(scores) == 6
     for sid, sc in scores.items():
-        assert sc.value == {"success": 1.0, "answered": 1.0}, sid
+        assert sc.value == {"success": 1.0, "answered": 1.0, "measured": 1.0}, sid
         md = sc.metadata
         assert md["failure"] is None and md["generations"] == 1
         assert md["calls"][0]["view_tokens"] == md["context_tokens"]  # the solver meters what the world recorded
@@ -111,7 +111,7 @@ def test_the_gold_agent_gets_every_probe_right_in_one_generation(monkeypatch, tm
 
 def test_failure_labels(monkeypatch, tmp_path, worlds):
     memo, follow = worlds["memo"][0].tasks[-1], worlds["followup"][0].tasks[-1]
-    cid = lambda t: t.tags["case_id"]  # noqa: E731
+    cid = lambda t: t.tags["case_id"]
     stale = {cid(memo): memo.tags["counterfactuals"]["stateless"], cid(follow): follow.tags["counterfactuals"]["original_gold"]}
 
     def agent(messages, tools, tool_choice, config):
@@ -182,6 +182,69 @@ def test_more_tasks_per_kind_get_their_own_seeds_and_pool_in_the_metrics(monkeyp
     assert sorted(r["seed"] for r in rows) == [40_001, 40_004] and all(r["success"] for r in rows)
     md = (tmp_path / "runs" / "many" / "report" / "report.md").read_text()
     assert "Tasks: 2 (2 per kind)" in md and "| 8K | 2/2 (100%, 34–100) |" in md
+
+
+# ---------- requests the provider refuses ----------
+
+
+def test_the_output_cap_keeps_input_and_output_inside_the_window():
+    from ape.agent.sweep import MAX_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS, output_cap
+
+    assert output_cap(512_000, 2_000) == MAX_OUTPUT_TOKENS
+    cap = output_cap(960_000, 4_000)  # the 960K world: ~4,000 messages
+    assert 40_000 < cap < MAX_OUTPUT_TOKENS and 960_000 * 1.03 + 4 * 4_000 + cap <= 1_050_000
+    assert output_cap(1_040_000, 4_000) == MIN_OUTPUT_TOKENS
+
+
+def _refuser(limit_messages: int, how: str):
+    """Gold-like answers for short histories; a refusal for histories longer than `limit_messages`."""
+    import httpx
+    import openai
+
+    def agent(messages, tools, tool_choice, config):
+        case = next(m.text for m in reversed(messages) if m.role == "user").split(":")[0].split()[-1]
+        if len(messages) > limit_messages:
+            if how == "context":
+                return ModelOutput.from_content(MODEL, "maximum context length exceeded", stop_reason="model_length")
+            text = "Invalid 'input': too many input items" if how == "items" else "Invalid value for 'tool_choice'"
+            raise openai.BadRequestError(text, response=httpx.Response(400, request=httpx.Request("POST", "https://api.openai.com/v1/responses")), body=None)
+        return ModelOutput.for_tool_call(MODEL, "submit_decision", {"case_id": case, "action": "approve", "approver": "none", "deadline_days": 5, "document": "none"})
+
+    return agent
+
+
+@pytest.mark.parametrize(("how", "label"), [("context", "over_limit"), ("items", "over_limit"), ("other", "rejected")])
+def test_a_refused_request_is_not_measured_and_does_not_error_the_sample(monkeypatch, tmp_path, worlds, how, label):
+    scores = _run(monkeypatch, tmp_path, worlds, _refuser(40, how), kinds="fresh")
+    small, large = scores["F8S-fresh-8k-sweep-s40000"], scores["F8S-fresh-64k-sweep-s40000"]
+    assert small.value["measured"] == 1.0 and small.metadata["calls"][0]["max_output_tokens"] == 64_000
+    assert large.value == {"success": 0.0, "answered": 0.0, "measured": 0.0}
+    assert large.metadata["failure"] == label and large.metadata["calls"][0]["error"]
+
+
+def test_the_runner_reports_a_refused_size_as_not_measured_with_the_recovery(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(run_sweep, "RUNS", tmp_path / "runs")
+    args = ["all", "--run-id", "big", "--offline", "--sizes", "8000,64000", "--kinds", "fresh,memo", "--models", "luna", "--mock", "refuse-largest"]
+    assert run_sweep.main(args) == 0
+    out = capsys.readouterr().out
+    assert "refused luna's requests at 64K" in out and "--output-tokens 2000" in out
+    run = json.loads((tmp_path / "runs" / "big" / "run.json").read_text())
+    assert run["replicates"]["1"]["tiers"]["luna"]["over_limit_sizes"] == [64_000]
+    md = (tmp_path / "runs" / "big" / "report" / "report.md").read_text()
+    assert "| held | 8K (64K not measured) |" in md
+    assert "| 64K | – · 2 not measured |" in md and "| 8K | 2/2 (100%, 34–100) |" in md
+    assert "## Not measured" in md and "| luna | 64K | over_limit | 2 | This model's maximum context length" in md and "| 64K | ⊘ | ⊘ | 0/0 |" in md
+
+
+def test_the_recovery_rendering_fits_every_size_and_a_bulkier_one_is_refused(monkeypatch, tmp_path, capsys):
+    """`--output-tokens 2000` (the advised recovery) still fits 8K with fewer messages; 3000 does not, and says why."""
+    small = gen_sweep.generate_set("memo", [8_000, 64_000], output_tokens=2_000)
+    assert all(w.entities["sweep"]["context_tokens"] <= w.entities["sweep"]["target_tokens"] for w in small)
+    default = gen_sweep.generate_set("memo", [64_000])[0]
+    assert len(gen_sweep.history(small[1])) < 0.7 * len(gen_sweep.history(default))
+    monkeypatch.setattr(run_sweep, "RUNS", tmp_path / "runs")
+    assert run_sweep.main(["build", "--run-id", "bulky", "--offline", "--sizes", "8000", "--kinds", "memo", "--output-tokens", "3000"]) == 2
+    assert "use --output-tokens 2000 or less" in capsys.readouterr().err
 
 
 def test_wilson_interval():

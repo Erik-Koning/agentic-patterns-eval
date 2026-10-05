@@ -11,7 +11,7 @@ Study G asks a different question: what context a model should be *given*. It co
 | | |
 |---|---|
 | Models | GPT-6 Luna, Sol and Astra, each at high effort (profiles `study_g_luna`, `study_g_sol` and `study_g_astra`). gpt-4o-mini, the anchor's model, is not swept. |
-| Sizes | 8K, 64K, 128K, 256K, 512K and 960K tokens. The GPT-6 window of 1,050,000 tokens is shared by input and output, so each generation's output is capped at 64,000 tokens. |
+| Sizes | 8K, 64K, 128K, 256K, 512K and 960K tokens. The GPT-6 window of 1,050,000 tokens is shared by input and output, so each generation's output is capped at 64,000 tokens, lowered to about 43,000 at 960K so input and output fit together. |
 | Tasks | 3 per size and model, one of each kind below. The same 3 tasks run at every size and on every model (paired). |
 | Samples | 3 kinds × 6 sizes × 3 models = 54 per replicate. |
 
@@ -43,7 +43,20 @@ The shift has three parts:
 | `ignored_memo` | (memo) The decision the probe would have without the memo. |
 | `copied_original` | (followup) Case 1's earlier decision repeated. This is also the decision without the probe's memo. |
 | `unanswered` | No decision within the 2 generations. |
+| `output_cap` | No decision: the last generation hit its output cap. |
 | `wrong` | Any other decision. |
+
+**Not measured.** Some samples never reach the model, so they are kept out of every rate and out of the held size, and the report lists them on their own:
+
+| Label | Meaning |
+|---|---|
+| `over_limit` | The provider refused the request's size: OpenAI's `context_length_exceeded`, or any 400 that names a size or limit, such as too many input items. |
+| `rejected` | Any other 400: a request problem to look at. |
+| `error` | A harness error. |
+
+**Request sizing.** Each generation's output cap is lowered so that the input, as the provider may count it (the meter × 1.03 plus 4 tokens per message), plus the output fits the 1.05M window: about 43K at 960K. A refusal ends the sample without an Inspect error, so it is not retried and does not fail the model's eval set.
+
+**Recovery.** After each model, the runner names the refused sizes and the fix: a new run at every size, with `--output-tokens 2000` (about half the messages, the most that still fits 8K) or without the size. It never re-renders one size on its own, because every size must share one rendering for the comparison to hold.
 
 **Context size** is the decision call's input as the session meters it: o200k tokens of every message's text and tool calls, plus the session tools' schemas. Each world sits at most one case (about 1.6K tokens) under its target and records the exact figure. The provider's own input-token count is logged beside it.
 
@@ -97,5 +110,5 @@ Per replicate, with the cells enabled (`uv run python -m ape.budget`):
 - **Three tasks per size and model.** Read the results as patterns, not rates. A replicate adds sampling noise at the same tasks; only new seeds add task variety.
 - **Every kind needs the handbook**, which sits in the system prompt at the very start of the context. `fresh` is free of session state, not of long-range reading.
 - **The replayed history is a flawless agent's.** A real session also holds the agent's own text, reasoning and mistakes, so this measures reading a clean transcript.
-- **Message counts are high.** At 960K the history has about 4,000 messages. If a provider refuses a request that size or that many items, start a new run with `--output-tokens 3000` (fewer, bulkier cases).
+- **Message counts are high.** At 960K the history has about 4,000 messages. If a provider refuses a request that size or that many items, start a new run with `--output-tokens 2000` (fewer, bulkier cases: about 2,200 messages at 960K). Larger files leave no room at 8K: with 3,000-token files, the fixed parts alone exceed 8K.
 - **The token meter differs from the provider's count.** The provider count is recorded per sample; the offline mock's count means nothing.

@@ -2,7 +2,7 @@
 
     uv run --locked python -m ape.run_sweep <build|run|analyze|all> --run-id <id> [--offline]
         [--models luna,sol,astra] [--kinds fresh,memo,followup] [--sizes 8000,64000,...] [--rerun | --replicate N]
-        [--tasks-per-kind 1] [--max-samples 6] [--budget-usd X] [--mock gold|naive]
+        [--tasks-per-kind 1] [--max-samples 6] [--budget-usd X] [--mock gold|naive|refuse-largest]
 
 It needs no other study's run. Steps (`all` runs the three in order):
 
@@ -31,11 +31,19 @@ spend from its usage ledgers at long-context rates). `run_evals` adds its prefli
 snapshots).
 
 **Offline** (`--offline`, zero spend): a mockllm agent (`--mock gold`, the default, knows every probe's gold;
-`naive` decides every probe the same way), worlds and a spend registry under the run's work/, and an OpenAI key and
-base URL that reach nothing. Offline and live runs never share a run id.
+`naive` decides every probe the same way; `refuse-largest` is gold but refuses the largest size as the provider would,
+to rehearse the not-measured path), worlds and a spend registry under the run's work/, and an OpenAI key and base URL
+that reach nothing. Offline and live runs never share a run id.
 
 Every eval set runs under its own cache nonce (run, replicate, tier), so provider prompt caches never cross
 replicates; within a set, the sizes of a kind share their history's prefix and may hit the cache.
+
+**A size the provider refuses** (`over_limit`, `agent.sweep`) ends that sample at once, without an Inspect error, so
+the tier's other sizes still run and nothing is retried; the sample is "not measured", never wrong. After each tier
+the runner lists the refused sizes (run.json `over_limit_sizes`) and prints how to recover: a new run at every size,
+with `--output-tokens 2000` (the same sizes in about half as many messages; 2000 is the most that still fits 8K) or
+without the refused size. It never
+re-renders one size on its own, since every size must share one rendering for the comparison to hold.
 """
 
 import argparse
@@ -48,6 +56,7 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .analyze_sweep import RECOVERY
 from .budget import BudgetError, Prices, load_assumptions, load_plan, program_spend, require_affordable, sweep_sample_usd
 from .config import ROOT, Config
 from .models import load_profile
@@ -181,7 +190,11 @@ def build(run: dict) -> dict:
     with environment(run):
         cfg = Config()
         for j, kind in ((j, k) for j in range(tasks_per_kind(d)) for k in d["kinds"]):
-            for w in gen_sweep.generate_set(kind, d["sizes"], gen_sweep.task_seed(kind, j, d["seed_base"]), d["output_tokens"]):
+            try:
+                worlds = gen_sweep.generate_set(kind, d["sizes"], gen_sweep.task_seed(kind, j, d["seed_base"]), d["output_tokens"])
+            except ValueError as e:
+                raise SweepError(f"{e}: use --output-tokens 2000 or less, or drop the smallest size (a new run id)") from e
+            for w in worlds:
                 path = cfg.world_path(w.id)
                 h = w.content_hash()
                 if path.exists():
@@ -265,7 +278,8 @@ def _mock(run: dict, kind: str):
         return get_model(mock_sweep.MODEL, custom_outputs=mock_sweep.naive_sweep_agent)
     cfg = Config()
     worlds = [World.load(cfg.world_path(wid)) for wid in run["worlds"]]
-    return get_model(mock_sweep.MODEL, custom_outputs=mock_sweep.gold_sweep_agent(worlds))
+    refuse = max(run["design"]["sizes"]) if kind == "refuse-largest" else None
+    return get_model(mock_sweep.MODEL, custom_outputs=mock_sweep.gold_sweep_agent(worlds, refuse_from=refuse))
 
 
 def run_tiers(run: dict, tiers: Sequence[str] | None = None, *, rerun: bool = False, replicate: int | None = None, max_samples: int = MAX_SAMPLES,
@@ -300,13 +314,26 @@ def run_tiers(run: dict, tiers: Sequence[str] | None = None, *, rerun: bool = Fa
             task = context_sweep(kinds=",".join(d["kinds"]), sizes=",".join(map(str, d["sizes"])), seed_base=d["seed_base"], output_tokens=d["output_tokens"],
                                  group=f"rep-{rep}", tasks_per_kind=tasks_per_kind(d))  # fmt: skip
             kwargs = {"model": _mock(run, mock)} if run["offline"] else {}
-            ok, logs = run_evals(task, log_dir, profile=cell.spec["profile"], roles=(), sample_cost_usd=max(sweep_sample_usd(model, s) for s in d["sizes"]), max_samples=max_samples, max_tasks=1, **kwargs)
-        results[tier] = {"success": ok, "log_dir": str(log_dir), "projected_usd": projected}
-        run["replicates"][str(rep)]["tiers"][tier] = {"success": ok, "updated": _now(), "model": model}
+            ok, _ = run_evals(task, log_dir, profile=cell.spec["profile"], roles=(), sample_cost_usd=max(sweep_sample_usd(model, s) for s in d["sizes"]), max_samples=max_samples, max_tasks=1, **kwargs)
+        refused = refused_sizes(rep, tier, log_dir)
+        results[tier] = {"success": ok, "log_dir": str(log_dir), "projected_usd": projected, "over_limit_sizes": refused}
+        run["replicates"][str(rep)]["tiers"][tier] = {"success": ok, "updated": _now(), "model": model, "over_limit_sizes": refused}
         save_run(run)
+        if refused:
+            print(f"warning: the provider refused {tier}'s requests at {', '.join(f'{s // 1000}K' for s in refused)} for size; "
+                  f"those samples are not measured (not counted as wrong). {RECOVERY}")  # fmt: skip
         if not ok:
             raise SweepError(f"tier {tier} (replicate {rep}) did not complete; re-run the same command to resume it")
     return {"replicate": rep, "tiers": results}
+
+
+def refused_sizes(rep: int, tier: str, log_dir: Path) -> list[int]:
+    """The sizes at which the provider refused one of the tier's requests for size (`over_limit`) in this replicate."""
+    from .analyze_sweep import _rows, over_limit_sizes
+
+    if not log_dir.exists():
+        return []
+    return over_limit_sizes(_rows(rep, tier, log_dir, load_assumptions(), Prices.load()))
 
 
 def _world_ids(run: dict) -> list[str]:
@@ -342,7 +369,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--replicate", type=int, help="resume this replicate")
     ap.add_argument("--max-samples", type=int, default=MAX_SAMPLES)
     ap.add_argument("--budget-usd", type=float, help="a lower program budget for the guard")
-    ap.add_argument("--mock", choices=("gold", "naive"), default="gold", help="offline agent")
+    ap.add_argument("--mock", choices=("gold", "naive", "refuse-largest"), default="gold",
+                    help="offline agent: gold answers, naive answers, or gold with the largest size refused as over the limit")  # fmt: skip
     a = ap.parse_args(argv)
     try:
         tiers = _csv(a.models)

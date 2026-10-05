@@ -31,7 +31,7 @@ uv run python readiness/probe_openai.py   # optional: confirms the GPT-6 models 
 uv run python -m ape.run_sweep all --run-id rehearsal --offline
 ```
 
-This builds all 18 worlds (3 kinds × 6 sizes) and runs every model with a mock that always answers correctly: 54 samples and about 23 MB of logs. It then writes `runs/context_sweep/rehearsal/report/report.md`, so the whole pipeline is exercised, 960K included, with zero spend. The report says "Offline dry run (mock agent)" at the top; its numbers mean nothing. Add `--mock naive` to see the failure labels appear.
+This builds all 18 worlds (3 kinds × 6 sizes) and runs every model with a mock that always answers correctly: 54 samples and about 23 MB of logs. It then writes `runs/context_sweep/rehearsal/report/report.md`, so the whole pipeline is exercised, 960K included, with zero spend. The report says "Offline dry run (mock agent)" at the top; its numbers mean nothing. Add `--mock naive` to see the failure labels appear, or `--mock refuse-largest` to see what happens when the provider refuses the largest size (section 9).
 
 ## 3. Switch it on
 
@@ -95,22 +95,25 @@ Everything is under `runs/context_sweep/<run id>/`:
 | `target_tokens`, `context_tokens` | Nominal size; the exact metered input of the decision call |
 | `provider_input_tokens` | Input tokens as OpenAI billed the first generation |
 | `success`, `answered` | 1 if the decision matched the gold; 1 if any decision was submitted |
-| `failure` | `ignored_memo`, `copied_original`, `unanswered`, `wrong`, `error` or empty |
+| `measured` | 1 if the model actually got the request; 0 if the provider refused it or the harness errored (kept out of every rate) |
+| `failure` | `ignored_memo`, `copied_original`, `unanswered`, `output_cap`, `wrong`; not measured: `over_limit`, `rejected`, `error`; empty when right |
 | `generations`, `output_tokens`, `reasoning_tokens` | Effort spent on the decision |
 | `cost_usd`, `cost_flat_usd` | Cost at long-context rates, and at Inspect's flat table |
 | `error`, `limit` | A harness error or a limit the sample hit |
+| `message` | The harness error, or the provider's message when it refused the request |
 
 ## 6. The metrics in `report.md`
 
 | Metric | Definition | How to read it |
 |---|---|---|
-| **held** (usable context) | Largest size up to which *every* sample of the model was right, plus the first size with a miss | The headline: "Sol held through 256K, first miss at 512K" |
+| **held** (usable context) | Largest size up to which *every measured* sample of the model was right, plus the first size with a miss (or the first size not measured) | The headline: "Sol held through 256K, first miss at 512K" |
 | **Success by size** | right / samples at each size, all kinds pooled, with a 95% Wilson interval | Where accuracy starts to fall |
 | **short vs long** | The same, pooled over the smaller half of the sizes (8K–128K) against the larger half (256K–960K) | Whether there is a drop at all, with more samples per number |
 | **Success by kind** | right / samples per kind, all sizes pooled | What breaks: length itself or long-range retrieval |
 | **Effort by size** | Median output tokens per sample (reasoning included) · mean generations | Whether the model works harder, or gives up, as context grows |
-| **Per-sample grid** | One mark per task and replicate: ✓ right, ✗ wrong, – no answer, ! error | Exactly which tasks failed where; consistent ✗ across replicates means a stable failure |
-| **Failure labels** | Count per model, kind and label | Why answers were wrong |
+| **Not measured** | Samples the provider refused (`over_limit`: too large; `rejected`: another reason) or that errored, per model and size, with the first error message | A size here is a provider limit, *not* the model failing. They never count as right or wrong |
+| **Per-sample grid** | One mark per task and replicate: ✓ right, ✗ wrong, – no answer, ⊘ refused for size, ! rejected or errored | Exactly which tasks failed where; consistent ✗ across replicates means a stable failure |
+| **Failure labels** | Count per model, kind and label, over measured samples | Why answers were wrong |
 | **Token check** | Provider input tokens / metered context | Should be close to 1; a big gap means "960K" is not what the model saw |
 | **Spend** | Per eval set, at flat and long-context prices | What it actually cost |
 
@@ -165,13 +168,27 @@ Per replicate, conservative (2 generations per sample) / expected:
 
 ## 9. Troubleshooting
 
+**If a request is too large.** The sweep protects the measurement in three ways:
+1. **It sizes each request to fit.** Each generation's output cap is lowered so the input (as the provider may count it) plus the output fit the 1.05M window: 64K up to 512K, about 43K at 960K.
+2. **A refusal is never scored as the model failing.** If the provider still refuses a request for its size, that sample is marked `over_limit` and "not measured". It is kept out of every rate and out of the held size.
+3. **A refusal doesn't stop the run.** The sample ends without an error and isn't retried, so the model's other sizes still complete. The runner then prints which sizes were refused, records them in `run.json` (`over_limit_sizes`), and the report lists them under "Not measured".
+
+Recovery is a new run at **every** size, never one size on its own: the comparison needs every size rendered the same way. Rehearse this path for free with `--mock refuse-largest`.
+
+```bash
+uv run python -m ape.run_sweep all --run-id sweep-dense --output-tokens 2000     # same sizes, ~1/2 the messages
+uv run python -m ape.run_sweep all --run-id sweep-512 --sizes 8000,64000,128000,256000,512000
+```
+
 | Message or symptom | Fix |
 |---|---|
 | `refused: ... plan cell(s) ['sweep.luna'] are off` | Enable the cells (section 3) |
 | `refused: the sweep's next tier: projected $X exceeds the remaining $Y` | Raise `budget.allocations.context_sweep` (or the program budget), or run fewer models, sizes or tasks |
 | `refused: run X fixed its design` | You changed sizes, kinds, tasks or seeds: use a new `--run-id` |
 | `refused: run X is offline` | Offline and live runs never share a run id |
-| Requests at 960K rejected (too long, or too many input items: about 4,000 messages) | New run with `--output-tokens 3000` (fewer, bulkier cases), or drop 960K with `--sizes` |
+| `warning: the provider refused <model>'s requests at 960K for size` (too long, or too many input items: about 4,000 messages) | Those samples show as `over_limit` / ⊘, "not measured"; every other size still ran and is valid. To measure that size, start a new run at every size with `--output-tokens 2000` (the same sizes in about half as many messages; 2000 is the most that still fits 8K), or leave the size out with `--sizes` (see above) |
+| `refused: ... the system prompt, case 1 and the probe alone take N tokens, more than the smallest size` | `--output-tokens` is too large for the smallest size: use 2000 or less, or drop the smallest size |
+| `rejected` samples in "Not measured" | The provider refused the request for a reason other than size: read the message in the report and fix the cause before re-running |
 | Rate limits (429), slow progress | `--max-samples 2`; re-run the same command to resume |
 | `run: ... incomplete` | Re-run the same command: completed samples are kept and only the rest run |
 

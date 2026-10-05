@@ -33,9 +33,15 @@ from .runner import INDEX_NAME, latest_tasks, read_index
 from .worlds import gen_sweep
 
 FIELDS = (
-    "replicate", "tier", "model", "kind", "seed", "target_tokens", "context_tokens", "provider_input_tokens", "success", "answered",
-    "failure", "generations", "output_tokens", "reasoning_tokens", "cost_flat_usd", "cost_usd", "error", "limit", "sample_id",
+    "replicate", "tier", "model", "kind", "seed", "target_tokens", "context_tokens", "provider_input_tokens", "measured", "success",
+    "answered", "failure", "generations", "output_tokens", "reasoning_tokens", "cost_flat_usd", "cost_usd", "error", "message", "limit",
+    "sample_id",
 )  # fmt: skip
+RECOVERY = (
+    "Recover with a new run at every size (the comparison needs one rendering for all sizes): `--output-tokens 2000` "
+    "renders the same sizes with about half as many messages (2000 is the most that still fits 8K), or `--sizes` without "
+    "the refused size."
+)
 
 
 def call_cost(model: str, input_tokens: float, output_tokens: float, cache_read: float = 0.0, assumptions: dict | None = None, prices: Prices | None = None) -> float:
@@ -59,14 +65,21 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return max(0.0, c - h), min(1.0, c + h)
 
 
+def measured(rows: list[dict]) -> list[dict]:
+    """The rows the model actually answered or failed (not refused by the provider, not a harness error)."""
+    return [r for r in rows if r["measured"]]
+
+
 def rate(rows: list[dict]) -> str:
-    """"k/n (p%, lo–hi)" for the rows' successes, or "–" for none."""
-    n = len(rows)
-    if not n:
-        return "–"
-    k = sum(r["success"] for r in rows)
+    """"k/n (p%, lo–hi)" over the measured rows, plus how many were not measured; "–" for none."""
+    ms = measured(rows)
+    gap = len(rows) - len(ms)
+    note = f" · {gap} not measured" if gap else ""
+    if not ms:
+        return f"–{note}" if rows else "–"
+    k, n = sum(r["success"] for r in ms), len(ms)
     lo, hi = wilson(k, n)
-    return f"{k}/{n} ({100 * k / n:.0f}%, {100 * lo:.0f}–{100 * hi:.0f})"
+    return f"{k}/{n} ({100 * k / n:.0f}%, {100 * lo:.0f}–{100 * hi:.0f}){note}"
 
 
 def replicate_dirs(run_dir: Path) -> list[tuple[int, Path]]:
@@ -117,19 +130,23 @@ def _rows(rep: int, tier: str, log_dir: Path, A: dict, P: Prices) -> list[dict]:
             cost = sum(call_cost(model, float(u.get("input_tokens") or 0), float(u.get("output_tokens") or 0), float(u.get("input_tokens_cache_read") or 0), A, P) for u in usage) if not model.startswith("mockllm/") else 0.0
             wid = str(s.id)
             smd = s.metadata or {}
+            errored = sc is None or bool(getattr(s, "error", None))
             rows.append({
                 "replicate": rep, "tier": tier, "model": model, "kind": md.get("kind") or smd.get("kind") or wid.split("-")[1],
                 "seed": smd.get("seed") or _seed(wid),
                 "target_tokens": md.get("target_tokens") or smd.get("target_tokens"),
                 "context_tokens": md.get("context_tokens") or smd.get("context_tokens"),
                 "provider_input_tokens": first.get("input_tokens"),
+                "measured": 0 if errored else int(value.get("measured", 1)),
                 "success": int(value.get("success", 0) or 0), "answered": int(value.get("answered", 0) or 0),
-                "failure": md.get("failure") if sc is not None else "error",
+                "failure": "error" if errored else md.get("failure"),
                 "generations": md.get("generations", 0),
                 "output_tokens": sum(int(u.get("output_tokens") or 0) for u in usage),
                 "reasoning_tokens": sum(int(u.get("reasoning_tokens") or 0) for u in usage),
                 "cost_flat_usd": round(flat, 6), "cost_usd": round(cost, 6),
                 "error": (s.error or "")[:200] if getattr(s, "error", None) else "",
+                # The harness error, else the provider's message on the last refused or errored call.
+                "message": (s.error or "")[:200] if getattr(s, "error", None) else next((str(c["error"])[:200] for c in reversed(calls) if c.get("error")), ""),
                 "limit": getattr(s, "limit", None) or "",
                 "sample_id": wid,
             })  # fmt: skip
@@ -153,27 +170,42 @@ def _k(n: int) -> str:
     return f"{n // 1000}K"
 
 
-def held_size(by: dict, tier: str, kinds: list[str], sizes: list[int]) -> tuple[int | None, int | None]:
-    """(the largest size up to which every sample of the tier was right, the first size with a miss); a size with no
-    rows ends the run of sizes."""
+def held_size(by: dict, tier: str, kinds: list[str], sizes: list[int]) -> tuple[int | None, int | None, int | None]:
+    """(the largest size up to which every measured sample of the tier was right, the first size with a miss, the
+    first size with no measured sample). Not-measured samples (provider refusals, errors) neither pass nor fail a size;
+    a size with none measured ends the run of sizes, as does a size with no rows."""
     held = None
     for s in sizes:
-        rs = [r for k in kinds for r in by.get((tier, k, s), [])]
-        if not rs or not all(r["success"] for r in rs):
-            return held, s
+        rows = [r for k in kinds for r in by.get((tier, k, s), [])]
+        if not rows:
+            return held, None, None
+        ms = measured(rows)
+        if not ms:
+            return held, None, s
+        if not all(r["success"] for r in ms):
+            return held, s, None
         held = s
-    return held, None
+    return held, None, None
 
 
 def held_line(by: dict, tier: str, kinds: list[str], sizes: list[int]) -> str:
-    held, miss = held_size(by, tier, kinds, sizes)
+    held, miss, unmeasured = held_size(by, tier, kinds, sizes)
+    tail = f"; the first miss at {_k(miss)}" if miss else (f"; not measured from {_k(unmeasured)} (refused or errored, see Not measured)" if unmeasured else "")
     if held is None:
-        return f"A task missed already at {_k(miss)}." if miss else "No results."
-    return f"Every task right at every size through {_k(held)}." if miss is None else f"Every task right through {_k(held)}; the first miss at {_k(miss)}."
+        return f"A task missed already at {_k(miss)}." if miss else (f"Not measured from {_k(unmeasured)} (see Not measured)." if unmeasured else "No results.")
+    return f"Every measured task right through {_k(held)}{tail}."
+
+
+def _held_cell(by: dict, tier: str, kinds: list[str], sizes: list[int]) -> str:
+    held, miss, unmeasured = held_size(by, tier, kinds, sizes)
+    note = f" (first miss {_k(miss)})" if miss else (f" ({_k(unmeasured)} not measured)" if unmeasured else "")
+    return f"{_k(held) if held else 'none'}{note}"
 
 
 def _mark(r: dict) -> str:
-    if r["failure"] == "error" or r["error"]:
+    if r["failure"] == "over_limit":
+        return "⊘"
+    if not r["measured"] or r["failure"] == "error" or r["error"]:
         return "!"
     return "✓" if r["success"] else ("–" if not r["answered"] else "✗")
 
@@ -190,13 +222,10 @@ def metrics_md(rows: list[dict], tiers: list[str], kinds: list[str], sizes: list
     head = "| | " + " | ".join(tiers) + " |"
     rule = "|---|" + "---|" * len(tiers)
     short, long_ = sizes[: (len(sizes) + 1) // 2], sizes[(len(sizes) + 1) // 2 :]
-    lines = ["## Metrics", "", "Rates are right / samples (%, 95% Wilson interval), pooling tasks and replicates.", ""]
-    lines += ["**Usable context** (every sample right at every size up to it):", "", head, rule]
-    cells = []
-    for t in tiers:
-        held, miss = held_size(by, t, kinds, sizes)
-        cells.append(f"{_k(held) if held else 'none'}{'' if miss is None else f' (first miss {_k(miss)})'}")
-    lines += ["| held | " + " | ".join(cells) + " |", ""]
+    lines = ["## Metrics", "", ("Rates are right / measured samples (%, 95% Wilson interval), pooling tasks and replicates; samples the "
+             "provider refused or that errored are not measured and are counted beside the rate."), ""]  # fmt: skip
+    lines += ["**Usable context** (every measured sample right at every size up to it):", "", head, rule]
+    lines += ["| held | " + " | ".join(_held_cell(by, t, kinds, sizes) for t in tiers) + " |", ""]
     lines += ["**Success by size** (all kinds):", "", head.replace("| |", "| size |"), rule]
     lines += [f"| {_k(s)} | " + " | ".join(rate(by_size[(t, s)]) for t in tiers) + " |" for s in sizes]
     if short and long_:
@@ -207,10 +236,35 @@ def metrics_md(rows: list[dict], tiers: list[str], kinds: list[str], sizes: list
     lines += ["", "**Effort by size** (median output tokens per sample, reasoning included · mean generations):", "", head.replace("| |", "| size |"), rule]
 
     def effort(rs: list[dict]) -> str:
-        return f"{median(r['output_tokens'] for r in rs):,.0f} · {mean(r['generations'] for r in rs):.1f}" if rs else "–"
+        ms = measured(rs)
+        return f"{median(r['output_tokens'] for r in ms):,.0f} · {mean(r['generations'] for r in ms):.1f}" if ms else "–"
 
     lines += [f"| {_k(s)} | " + " | ".join(effort(by_size[(t, s)]) for t in tiers) + " |" for s in sizes]
     return [*lines, ""]
+
+
+def not_measured_md(rows: list[dict]) -> list[str]:
+    """Samples the model never answered: provider refusals (over_limit, rejected) and harness errors, with the first
+    error text, and how to recover from size refusals."""
+    gaps = defaultdict(list)
+    for r in rows:
+        if not r["measured"]:
+            gaps[(r["tier"], int(r["target_tokens"] or 0), r["failure"] or "error")].append(r)
+    if not gaps:
+        return []
+    lines = ["## Not measured", "", "| tier | size | label | n | first message |", "|---|---|---|---|---|"]
+    for (t, s, label), rs in sorted(gaps.items()):
+        msg = next((r["message"] for r in rs if r["message"]), "").replace("|", "/").replace("\n", " ")
+        lines.append(f"| {t} | {_k(s)} | {label} | {len(rs)} | {msg[:120]} |")
+    lines += ["", ("`over_limit`: the provider refused the request's size; `rejected`: refused for another reason (check the "
+              "request); `error`: the sample errored in the harness. None of them counts as right or wrong."), ""]  # fmt: skip
+    if any(label == "over_limit" for _, _, label in gaps):
+        lines += [RECOVERY, ""]
+    return lines
+
+
+def over_limit_sizes(rows: list[dict]) -> list[int]:
+    return sorted({int(r["target_tokens"]) for r in rows if r["failure"] == "over_limit" and r["target_tokens"]})
 
 
 def report_md(rows: list[dict], spend: dict, run: dict) -> str:
@@ -224,10 +278,12 @@ def report_md(rows: list[dict], spend: dict, run: dict) -> str:
     lines = [
         f"# Context-length sweep: {run.get('run_id', '?')}",
         "",
-        f"{'Offline dry run (mock agent): plumbing only, not results.' if run.get('offline') else 'Live run.'} "
-        f"Tiers: {', '.join(tiers) or 'none'}. Kinds: {', '.join(kinds)}. Sizes: {', '.join(_k(s) for s in sizes)}. "
-        f"Tasks: {tasks} ({design.get('tasks_per_kind', 1)} per kind). Replicates: {', '.join(map(str, reps)) or 'none'}. "
-        f"World seeds from {design.get('seed_base')}; tool files ~{design.get('output_tokens')} tokens.",
+        (
+            f"{'Offline dry run (mock agent): plumbing only, not results.' if run.get('offline') else 'Live run.'} "
+            f"Tiers: {', '.join(tiers) or 'none'}. Kinds: {', '.join(kinds)}. Sizes: {', '.join(_k(s) for s in sizes)}. "
+            f"Tasks: {tasks} ({design.get('tasks_per_kind', 1)} per kind). Replicates: {', '.join(map(str, reps)) or 'none'}. "
+            f"World seeds from {design.get('seed_base')}; tool files ~{design.get('output_tokens')} tokens."
+        ),
         "",
     ]
     if not rows:
@@ -236,7 +292,9 @@ def report_md(rows: list[dict], spend: dict, run: dict) -> str:
     by = defaultdict(list)
     for r in rows:
         by[(r["tier"], r["kind"], int(r["target_tokens"] or 0))].append(r)
-    lines += ["## Per sample", "", "One mark per task and replicate (seed order, then replicate): ✓ right, ✗ wrong, – no decision, ! error.", ""]
+    lines += not_measured_md(rows)
+    lines += ["## Per sample", "", ("One mark per task and replicate (seed order, then replicate): ✓ right, ✗ wrong, – no decision, "
+              "⊘ refused by the provider for size, ! rejected or errored (not measured)."), ""]  # fmt: skip
     for tier in tiers:
         lines += [f"### {tier}", "", "| size | " + " | ".join(kinds) + " | right |", "|---|" + "---|" * (len(kinds) + 1)]
         for size in sizes:
@@ -244,20 +302,20 @@ def report_md(rows: list[dict], spend: dict, run: dict) -> str:
             for kind in kinds:
                 rs = sorted(by.get((tier, kind, size), []), key=lambda r: (r["seed"] or 0, r["replicate"]))
                 cells.append("".join(_mark(r) for r in rs) or " ")
-                right += sum(r["success"] for r in rs)
-                total += len(rs)
+                right += sum(r["success"] for r in measured(rs))
+                total += len(measured(rs))
             lines.append(f"| {_k(size)} | " + " | ".join(cells) + f" | {right}/{total} |")
         lines += ["", held_line(by, tier, kinds, sizes), ""]
     fails = defaultdict(int)
-    for r in rows:
+    for r in measured(rows):
         if not r["success"]:
             fails[(r["tier"], r["kind"], r["failure"])] += 1
     if fails:
         lines += ["## Failure labels", "", "| tier | kind | label | n |", "|---|---|---|---|"]
         lines += [f"| {t} | {k} | {f} | {n} |" for (t, k, f), n in sorted(fails.items())]
-        lines += ["", "`ignored_memo` (memo): the decision without the memo announced at the start; `copied_original` (followup): case 1's "
+        lines += ["", ("`ignored_memo` (memo): the decision without the memo announced at the start; `copied_original` (followup): case 1's "
                   "earlier decision repeated, i.e. the original found but the probe's memo not applied; `wrong`: anything else; "
-                  "`unanswered`: no decision within 2 generations.", ""]  # fmt: skip
+                  "`unanswered`: no decision within 2 generations; `output_cap`: no decision, the output cap was reached."), ""]  # fmt: skip
     ratios = [r["provider_input_tokens"] / r["context_tokens"] for r in rows if r["provider_input_tokens"] and r["context_tokens"]]
     if ratios:
         lines += [f"Provider input tokens / metered context: median {median(ratios):.3f} (range {min(ratios):.3f}–{max(ratios):.3f}).", ""]

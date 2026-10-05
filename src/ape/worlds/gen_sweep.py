@@ -117,12 +117,10 @@ class _Plan:
         world, cust = self.world, self.customers[it["customer_id"]]
         base = gen_f8.base_decision(world, cust, it["domain"], it["amount"])
         phrase = gen_f8._phrase(world, it["domain"])
-        options = []
-        for t, w in gen_f8.MEMO_TYPES:
-            if t == "escalate" and (base["action"], base["approver"]) != ("escalate", "compliance_officer"):
-                options.append((t, w))
-            elif t in ("deadline", "document"):
-                options.append((t, w))
+        # Policy-case memos only: deadline and document always change something; escalation only when policy does not
+        # already escalate to the compliance officer.
+        escalates = (base["action"], base["approver"]) == ("escalate", "compliance_officer")
+        options = [(t, w) for t, w in gen_f8.MEMO_TYPES if t in ("deadline", "document") or (t == "escalate" and not escalates)]
         t = self.rng.choices([t for t, _ in options], [w for _, w in options])[0]
         if t == "escalate":
             pol = next(p for p in world.policies if p.domain == it["domain"] and p.region == cust["region"] and p.lo <= it["amount"] < p.hi)
