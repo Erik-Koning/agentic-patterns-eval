@@ -504,6 +504,13 @@ Simulations use `power/power_sim.py`'s model with per-cell baselines 0.85 / 0.45
 - **Its own pre-registration** (`PREREGISTRATION_M5.md`) and hypothesis family (L1: M5 − M1, L2: M5-spec − M2), separate from the main study's; a short pilot checks cap hits and health first.
 - **Cost when enabled:** about $110 conservative (Luna); zero while off.
 
+**D-054 (2026-10-05, user: a context-length sweep, runnable separately and optionally re-run).** Study G measures what context a model should be given, never how much it can receive and still answer (its 32K window is a harness rule). The sweep measures that (`CONTEXT_SWEEP.md`).
+- **Design (user's choices):** sizes 8K, 64K, 128K, 256K, 512K and 960K tokens; 3 tasks per size and model, one per kind (`fresh`: no session state; `memo`: a memo at the start changes the decision; `followup`: the original request at the start, a memo in the probe); filler = a replayed F8 shift (the reference trajectory, F8's 1K-token tool files); Luna, Sol and Astra at high effort, not gpt-4o-mini. The same 3 tasks at every size and model (paired); middle cases are neutral, so the probe's gold is the same at every size.
+- **One decision per sample:** at most 2 generations (an optional tool call, then the decision), no nudge; F8's item scoring with failure labels. Each generation's output is capped at 64K so 960K plus output stays inside the 1.05M window.
+- **Runs on its own** (`python -m ape.run_sweep`), with no other study's run, no pre-registration and no freeze: it is exploratory and descriptive. Resumable; `--rerun` adds a replicate of the same tasks, `--tasks-per-kind N` gives each kind N tasks (more tasks, not replicates, widen the evidence), and a run's design is fixed at its first step. The report gives the largest size with every sample right and success rates by size, kind and short-vs-long half with 95% Wilson intervals (runbook: `CONTEXT_SWEEP_README.md`).
+- **Off by default** (cells `enabled: false`, as M5): the program total stays $2,996 until it is enabled. When enabled, one replicate projects **$238 conservative / $177 expected**, $212 of it Astra; allocation $500 (room for one rerun).
+- **Astra's long-context rate** ($20 / $75 per 1M above 272K input, listed 2026-10-05) is new in `budget_assumptions.yaml` (`long_context_prices`) and priced by `ape.budget` for the sweep's cells. Inspect's flat price table undercounts such calls, so the sweep's guard prices its own spend from its usage ledgers at these rates and subtracts the surcharge from the program's remaining budget.
+
 ## Open (needs user input)
 
 | ID | Decision | Blocks |

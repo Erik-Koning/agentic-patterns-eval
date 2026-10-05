@@ -16,6 +16,9 @@
 #            passed to the F8 generator (D-028: short sessions get larger tool files so they cross W).
 #   anchor   GraphRAG-Bench questions: n_tasks per mode, modes.
 #   fixed    a capped spend (usd).
+#   sweep    the context-length sweep (CONTEXT_SWEEP.md): one sample per kind x task x size x replicate. Fields: kinds,
+#            sizes (target context tokens), tasks_per_kind (default 1), replicates (default 1); optional knobs
+#            {output_tokens} (the tool-file size).
 # Every cell takes `profile` (config/models.yaml; default: the study's), optional `effort` (agent effort
 # override, e.g. the low-effort capability points), optional `models` (role -> model overrides) and
 # `enabled` (default true).
@@ -27,8 +30,10 @@ budget:
   # FX-5 targets 700 / 1,000 / 2,700, under which the guard would have stopped Study G's topology cells. R-B4
   # (2026-10-03): ape.budget prices whole worlds as the runners run them (main 1,126.8 + the D-039 pilot re-runs the
   # runner reserves, 35.7 = 1,162.5, + ~5% headroom -> main 1,225). m5: the M5 add-on study (off by default; its
-  # enabled cells project ~$123 conservative, the ledger arms at 1.5 x their team).
-  allocations: {gate: 300, main: 1225, study_g: 3600, m5: 150}
+  # enabled cells project ~$123 conservative, the ledger arms at 1.5 x their team). context_sweep (D-054): the
+  # context-length sweep (off by default; one replicate projects ~$238 conservative, ~$177 expected, 89% of it Astra at
+  # 512K and 960K; 500 leaves room for a `--rerun` replicate at the expected cost).
+  allocations: {gate: 300, main: 1225, study_g: 3600, m5: 150, context_sweep: 500}
   contingency_usd: 1000
   # Per-sample runaway guard (Inspect `cost_limit`, set by ape.runner): multiple x the cell's conservative
   # per-sample projection, at least floor_usd; default_usd where no projection is passed. A sample that hits it
@@ -214,6 +219,24 @@ studies:
            note: "M5 with a fresh concurrent M1 control, on main's test worlds (Study A's cells)"}
         - {id: m5.test.b, enabled: false, arms: [M5-spec, M2], cells: [F3-5, F3-60, F7-10, F7-1000], n_tasks: 100, epochs: 3,
            note: "M5-spec with a fresh concurrent M2 control, on main's test worlds (Study B's cells)"}
+
+  # ------------------------------------------------------------------------------------------------
+  # The context-length sweep (CONTEXT_SWEEP.md, D-054; user-requested): how much replayed F8 history a model can
+  # receive and still decide one case. Exploratory and descriptive, with no freeze. OFF by default (every cell
+  # `enabled: false`): enabled, it runs on its own with `python -m ape.run_sweep all --run-id <id>`, and
+  # `--rerun` adds a replicate of the same tasks. Per model: 3 tasks (fresh, memo, followup) x 6 sizes. Every GPT-6
+  # tier at high effort; gpt-4o-mini (the anchor's model) is not swept.
+  context_sweep:
+    profile: study_g_luna
+    phases:
+      sweep:
+        - {id: sweep.luna, kind: sweep, enabled: false, profile: study_g_luna, kinds: [fresh, memo, followup],
+           sizes: [8000, 64000, 128000, 256000, 512000, 960000], replicates: 1}
+        - {id: sweep.sol, kind: sweep, enabled: false, profile: study_g_sol, kinds: [fresh, memo, followup],
+           sizes: [8000, 64000, 128000, 256000, 512000, 960000], replicates: 1}
+        - {id: sweep.astra, kind: sweep, enabled: false, profile: study_g_astra, kinds: [fresh, memo, followup],
+           sizes: [8000, 64000, 128000, 256000, 512000, 960000], replicates: 1,
+           note: "512K and 960K pay Astra's long-context rate ($20 / $75 per 1M above 272K)"}
 
 # Right-sizing cuts (FX-5), applied IN ORDER while the conservative total exceeded budget.total_usd, stopping as
 # soon as it fit. `applied` cuts are already reflected in the cells above. Never cut: gate primary sizes, epochs of

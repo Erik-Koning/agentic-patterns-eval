@@ -1,0 +1,42 @@
+"""Scripted stand-ins for the agent in context-sweep dry runs (`mockllm` `custom_outputs`).
+
+`gold_sweep_agent(worlds)` knows every given world's probe and submits its gold decision for the last case the
+history opens (one generation). `naive_sweep_agent` decides every probe the same way (approve, no approver, 5 days, no
+document), so a dry run exercises the failure labels. Dry runs check plumbing, not accuracy.
+"""
+
+import re
+from collections.abc import Iterable
+
+from inspect_ai.model import ModelOutput
+
+from ..worlds.spec import World
+
+MODEL = "mockllm/model"
+CASE = re.compile(r"Case (C-\d{6})")
+
+
+def _probe_case(messages) -> str | None:
+    for m in reversed(messages):
+        if m.role == "user" and (hits := CASE.findall(m.text)):
+            return hits[0]
+    return None
+
+
+def gold_sweep_agent(worlds: Iterable[World]):
+    gold = {w.tasks[-1].tags["case_id"]: w.tasks[-1].gold for w in worlds}
+
+    def agent(messages, tools, tool_choice, config) -> ModelOutput:
+        cid = _probe_case(messages)
+        if cid is None or cid not in gold:
+            return ModelOutput.from_content(MODEL, "No case to decide.")
+        return ModelOutput.for_tool_call(MODEL, "submit_decision", {"case_id": cid, **gold[cid]})
+
+    return agent
+
+
+def naive_sweep_agent(messages, tools, tool_choice, config) -> ModelOutput:
+    cid = _probe_case(messages)
+    if cid is None:
+        return ModelOutput.from_content(MODEL, "No case to decide.")
+    return ModelOutput.for_tool_call(MODEL, "submit_decision", {"case_id": cid, "action": "approve", "approver": "none", "deadline_days": 5, "document": "none"})

@@ -10,6 +10,7 @@ A pre-registered evaluation of agent architectures (single agents with different
 | **Main** | Which mechanism drives multi-agent gains (decomposition, isolation, ensembling, communication, specialization), and does KG delivery substitute for a team? | `PREREGISTRATION_MAIN.md` | $827 |
 | **Study G** | Do context-management strategies (prune, summarise, todo, reset, native compaction) and topologies keep their value as models get stronger? | `PREREGISTRATION_G.md` | $1,950 |
 | **M5 add-on** (off by default) | Does a Magentic-style task/progress ledger help an orchestrator (M5 = M1 + ledger, M5-spec = M2 + ledger)? Runs on a frozen main run's test tasks with fresh controls. | `PREREGISTRATION_M5.md` | $123 when enabled |
+| **Context-length sweep** (off by default) | How much replayed F8 history (8K to 960K tokens) can each GPT-6 tier receive and still decide one case correctly? Exploratory; runs on its own and can be re-run. | `CONTEXT_SWEEP.md` (no freeze); runbook `CONTEXT_SWEEP_README.md` | $238 per replicate when enabled |
 
 The program costs $2,996 conservative ($2,047 expected) against a $5,000 budget (`BUDGET.md`).
 
@@ -34,6 +35,7 @@ uv run pytest -q                                              # ~15 min
 uv run python -m ape.run_gate all --run-id rehearsal --offline
 uv run python -m ape.run_study all --study main --run-id rehearsal --offline
 uv run python -m ape.run_study all --study study_g --run-id rehearsal --offline
+uv run python -m ape.run_sweep all --run-id rehearsal --offline
 uv run python readiness/smoke.py --dry
 ```
 
@@ -46,6 +48,7 @@ uv run python -m ape.run_gate all --run-id gate-1                  # stops at th
 uv run python -m ape.run_study all --study main --run-id main-1 --gate-run-id gate-1
 uv run python -m ape.run_study all --study study_g --run-id g-1
 uv run python -m ape.run_study all --study m5 --run-id m5-1 --main-run-id main-1   # after enabling studies.m5's cells
+uv run python -m ape.run_sweep all --run-id sweep-1    # any time, after enabling studies.context_sweep's cells; --rerun adds a replicate
 ```
 
 Every runner is resumable: re-run the same command to continue. Each phase is guarded by the study's budget, the program's spend ledger and a fresh smoke check. The test split is generated only after the freeze. Cost projections come from `uv run python -m ape.budget`.
@@ -61,6 +64,7 @@ Every runner is resumable: re-run the same command to continue. Each phase is gu
 | `src/ape/apg/`, `src/ape/lgr/`, `src/ape/kb/` | APG, LightRAG and flat-retrieval knowledge delivery |
 | `src/ape/analysis/` | Statistics, power simulations and hypothesis tables for each study |
 | `src/ape/run_gate.py`, `run_study.py` | Orchestrators: phases, freezes, budget guards |
+| `src/ape/run_sweep.py`, `analyze_sweep.py` | The context-length sweep: build, run, re-run and report (`worlds/gen_sweep.py` builds its worlds) |
 | `config/` | Run plan, models, prices, tuning grids, budget assumptions |
 | `readiness/` | Probe, smoke checks, spot-check sheet |
 | `tests/` | Offline test suite |
@@ -68,6 +72,6 @@ Every runner is resumable: re-run the same command to continue. Each phase is gu
 ## Documents
 
 - **Plan and status:** `BUILD_PLAN.md`, `READINESS_AUDIT.md`, `BUILD_REVIEW.md`
-- **Design:** `ORCHESTRATOR_BRIEF_v2.md`, `CONTEXT_MANAGEMENT_AUDIT.md`, `HYPOTHESES.md`
+- **Design:** `ORCHESTRATOR_BRIEF_v2.md`, `CONTEXT_MANAGEMENT_AUDIT.md`, `HYPOTHESES.md`, `CONTEXT_SWEEP.md`
 - **Decisions:** `DECISIONS.md`, a dated log (D-000 onward) of every design and statistics choice, with open items for the user
 - **Money:** `BUDGET.md`

@@ -165,6 +165,21 @@ study_g:
     M1: {view: managed, overhead: 0.0, multiplier: 2.5, cache: multi_agent}
     M2: {view: managed, overhead: 0.0, multiplier: 2.5, cache: multi_agent}
 
+# --- Context-length sweep (CONTEXT_SWEEP.md, D-054) -----------------------------------------------------------
+# One sample = one probe decision at the end of a replayed F8 shift; every generation's input is the whole context,
+# i.e. the sample's size (8K .. 960K tokens; [measured offline]: each world sits at most ~1.6K tokens under its size).
+context_sweep:
+  calls_per_sample: 2   # [given] the solver's cap (one optional tool call, then the decision): conservative by construction
+  output_tokens_per_call: {high: 4000, medium: 2000, low: 1000, default: 2000}  # [assumed] reasoning over very long inputs; F7's prior is 1,500 at high
+  cache: sweep
+
+# Long-context rates (USD per 1M tokens): a call whose input exceeds `above_tokens` pays these for all its tokens.
+# [given] OpenAI's GPT-6 pricing as checked 2026-10-05: Astra $20 input / $75 output above 272K; Sol and Luna list none.
+# Confirm on the pricing page on the day of a run (PROVENANCE.md). Only the sweep's calls reach these sizes. Inspect's
+# own cost (config/model_costs.yaml, flat) undercounts such a call; the sweep runner prices its spend with these rates.
+long_context_prices:
+  openai/gpt-6-astra: {above_tokens: 272000, input: 20.00, output: 75.00}
+
 # --- Prompt caching ------------------------------------------------------------------------------------
 # conservative: cached input billed at the full input price (what config/model_costs.yaml says today:
 #               input_cache_read = input, TODO(E5)). The budget gate (exit code, allocation) uses this one.
@@ -193,3 +208,4 @@ cache_scenarios:
       build_apg: 0.3
       build_lightrag: 0.5   # long fixed extraction prompt; gleaning re-sends the first turn
       embeddings: 0.0
+      sweep: 0.3            # a second generation re-sends the first's whole input; sizes of a kind share a prefix

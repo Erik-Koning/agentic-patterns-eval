@@ -54,8 +54,8 @@ PLAN_PATH = ROOT / "config" / "run_plan.yaml"
 ASSUMPTIONS_PATH = ROOT / "config" / "budget_assumptions.yaml"
 MEASURED_PATH = ROOT / "config" / "budget_calibration_measured.yaml"
 SCENARIOS = ("conservative", "expected")
-KINDS = ("agent", "session", "build", "anchor", "fixed")
-STUDY_ORDER = ("gate", "main", "study_g")
+KINDS = ("agent", "session", "build", "anchor", "fixed", "sweep")
+STUDY_ORDER = ("gate", "main", "study_g", "context_sweep")
 
 
 class BudgetError(RuntimeError):
@@ -194,6 +194,27 @@ class Prices:
                 return entry
         raise BudgetError(f"no price for {model!r} in the price table; add it to config/model_costs.yaml")
 
+    def with_long_context(self, assumptions: dict) -> Prices:
+        """The table plus each model's long-context rate (budget_assumptions.yaml `long_context_prices`) under
+        `long_context_key(model)`, the price a call pays whose input exceeds the model's `above_tokens`."""
+        extra = {}
+        for model, spec in (assumptions.get("long_context_prices") or {}).items():
+            rates = {"input": float(spec["input"]), "output": float(spec["output"])}
+            extra[long_context_key(model)] = {**rates, "input_cache_write": rates["input"], "input_cache_read": rates["input"]}
+        return Prices({**self.table, **extra}) if extra else self
+
+
+def long_context_key(model: str) -> str:
+    return f"{model}@long-context"
+
+
+def long_context_rate(assumptions: dict, model: str, input_tokens: float) -> dict | None:
+    """The model's long-context spec (`above_tokens`, `input`, `output` USD per 1M) when a call of `input_tokens`
+    pays it, else None. Matched by the full model name or its bare name."""
+    table = assumptions.get("long_context_prices") or {}
+    spec = table.get(model) or next((v for k, v in table.items() if k.split("/", 1)[-1] == model.split("/", 1)[-1]), None)
+    return spec if spec is not None and input_tokens > float(spec["above_tokens"]) else None
+
 
 def load_measured(path: Path | None = MEASURED_PATH) -> list[dict]:
     if path is None or not Path(path).is_file():
@@ -215,6 +236,7 @@ class CallGroup:
     output: float
     cache: str  # cache class for the `expected` scenario
     cached_fraction: float | None = None  # measured; replaces the class's assumed share
+    price_key: str | None = None  # the price entry, when not the model's own (a long-context rate: `long_context_key`)
 
 
 @dataclass(frozen=True)
@@ -427,6 +449,33 @@ def _session_items(cell: PlanCell, A: dict, roles: dict, measured: _Measured, pl
     return items
 
 
+def _sweep_items(cell: PlanCell, A: dict, roles: dict) -> list[LineItem]:
+    """The context-length sweep (CONTEXT_SWEEP.md): one sample per kind x size x replicate, each up to
+    `calls_per_sample` generations of the whole context (the size), at the long-context rate above the model's
+    threshold. Fields: kinds, sizes, tasks_per_kind (default 1), replicates (default 1)."""
+    s, S = cell.spec, A["context_sweep"]
+    model, effort = roles["agent"]
+    out = float((S.get("output_tokens_per_call") or {}).get(effort or "default", _output(A, effort)))
+    calls = float(S["calls_per_sample"])
+    n = len(s["kinds"]) * int(s.get("tasks_per_kind", 1)) * int(s.get("replicates", 1))
+    items = []
+    for size in sorted(int(x) for x in s["sizes"]):
+        key = long_context_key(model) if long_context_rate(A, model, size) else None
+        groups = (CallGroup("agent", model, calls, float(size), out, S.get("cache", "sweep"), price_key=key),)
+        items.append(LineItem(cell.id, cell.study, cell.phase, "sweep", _tier(model, effort), "probe", f"F8S-{size // 1000}k", "push", float(n), groups))
+    return items
+
+
+def sweep_sample_usd(model: str, size: int, assumptions: dict | None = None, prices: Prices | None = None, effort: str | None = "high") -> float:
+    """The conservative projection of one sweep sample (its runaway guard's base): `calls_per_sample` calls of `size`
+    input at the model's rate for that size (no caching)."""
+    A = assumptions or load_assumptions()
+    S = A["context_sweep"]
+    out = float((S.get("output_tokens_per_call") or {}).get(effort or "default", _output(A, effort)))
+    rate = long_context_rate(A, model, size) or (prices or Prices.load()).entry(model)
+    return float(S["calls_per_sample"]) * (size * float(rate["input"]) + out * float(rate["output"])) / 1e6
+
+
 def _build_items(cell: PlanCell, A: dict, roles: dict) -> list[LineItem]:
     s = cell.spec
     model, effort = roles["build_fallback" if s.get("fallback") else "build"]
@@ -481,6 +530,8 @@ def expand(plan: Plan, assumptions: dict, measured: Sequence[dict] = (), models_
             items += _build_items(cell, assumptions, roles)
         elif cell.kind == "anchor":
             items += _anchor_items(cell, assumptions, roles)
+        elif cell.kind == "sweep":
+            items += _sweep_items(cell, assumptions, roles)
     return items
 
 
@@ -489,7 +540,7 @@ def expand(plan: Plan, assumptions: dict, measured: Sequence[dict] = (), models_
 
 def group_cost_per_sample(g: CallGroup, prices: Prices, scenario: dict) -> float:
     """USD per sample for one call group under a cache scenario (see the module docstring)."""
-    p = prices.entry(g.model)
+    p = prices.entry(g.price_key or g.model)
     mode = scenario.get("cached_price", "input")
     if mode == "input":
         cached_price = p["input"]
@@ -526,6 +577,7 @@ class Estimate:
 
 def price(items: Iterable[LineItem], prices: Prices, assumptions: dict) -> Estimate:
     scenarios = assumptions["cache_scenarios"]
+    prices = prices.with_long_context(assumptions)
     rows = []
     for it in items:
         row = {

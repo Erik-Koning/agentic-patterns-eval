@@ -13,6 +13,7 @@
 | Contingency | $5,000 − conservative total | 2,004 | | ≥ 1,000 |
 
 - **By tier** (conservative / expected): Sol-high 1,896 / 1,320 · Astra-high 1,028 / 644 · Luna-high 871 / 641 · Luna-low 89 / 45 · gpt-4o-mini (anchor) 11 / 10 · smoke cap 3.
+- **Not in the totals (off by default):** the M5 add-on ($123 when enabled) and the context-length sweep (D-054, `CONTEXT_SWEEP.md`): **$238 conservative / $177 expected per replicate** when its cells are enabled (Astra $212, of which $180 at 512K and 960K under Astra's long-context rate, $20 / $75 per 1M above 272K input; Sol $25; Luna $1). Allocation $500.
 - **Pilot σ cell (D-026, 2026-10-02):** +$8 conservative. The pilot builds 8 worlds per cell (was 4; +$6.19) and runs APG* and LGR* on the 4 new ones (`gate.pilot.sigma`, +$2.17), so σ is estimated from 8 worlds per cell.
 - **PC1 fidelity (D-025, 2026-10-02):** the anchor grew about $5: answer contexts mapped to LightRAG 1.2.5's caps (26.5K tokens) and a second scorer's judge calls; its bge embeddings run locally ($0).
 - **The total fits.** Each study is within its allocation (D-035: allocations reset to the right-sized plan plus headroom; the FX-5 targets were 700 / 1,000 / 2,700, and Study G's topology cells would have been stopped by the guard). The gate's underspend covers part of that. The conservative scenario prices every cached token at the full input price, so expected spend is ≈ $3.2K. The orchestrator's budget check (FX-6) stops any phase whose projected cost exceeds what remains.
